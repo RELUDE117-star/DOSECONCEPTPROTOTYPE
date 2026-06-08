@@ -79,11 +79,17 @@ Type=Application
 Name=DOSE Home Station
 Comment=Launch DOSE medication dispenser
 Exec=bash $INSTALL_DIR/launch.sh
-Icon=utilities-terminal
+Icon=$INSTALL_DIR/dose_icon.png
 Terminal=false
 Categories=Utility;
+StartupNotify=false
 EOF
 chmod +x "$DESKTOP_DIR/DOSE.desktop"
+
+# Mark the shortcut as trusted so the Pi treats it as an app, not a text file
+gio set "$DESKTOP_DIR/DOSE.desktop" metadata::trusted true 2>/dev/null || true
+# Also handle older Raspberry Pi OS versions
+dbus-launch gio set "$DESKTOP_DIR/DOSE.desktop" metadata::trusted true 2>/dev/null || true
 
 # ---- autostart on boot ----
 AUTOSTART_DIR="$HOME/.config/autostart"
@@ -96,6 +102,23 @@ Exec=bash $INSTALL_DIR/launch.sh
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
+
+# ---- create app icon ----
+python3 -c "
+from PIL import Image, ImageDraw, ImageFont
+size = 128
+img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+draw = ImageDraw.Draw(img)
+draw.rounded_rectangle([4, 4, size-4, size-4], radius=24, fill='#5B9BFF')
+try:
+    font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 72)
+except: font = ImageFont.load_default()
+bbox = draw.textbbox((0, 0), 'D', font=font)
+tw, th = bbox[2]-bbox[0], bbox[3]-bbox[1]
+draw.text(((size-tw)//2, (size-th)//2 - 8), 'D', fill='white', font=font)
+img.save('$INSTALL_DIR/dose_icon.png')
+print('  Icon created.')
+" 2>/dev/null || true
 
 echo ""
 echo "========================================="
