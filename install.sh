@@ -1,19 +1,33 @@
 #!/bin/bash
-# DOSE Home Station — Raspberry Pi installer
-# Run on Raspberry Pi OS Bookworm (64-bit recommended):
-#   chmod +x install.sh && ./install.sh
+# DOSE Home Station — One-Click Installer
+# Just double-click this file from the file manager.
+# If it asks "Execute" or "Execute in Terminal" → pick "Execute in Terminal".
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# If we're not inside a terminal, relaunch ourselves inside one
+if [ ! -t 1 ]; then
+    if command -v lxterminal &>/dev/null; then
+        exec lxterminal -e "bash \"$0\""
+    elif command -v xterm &>/dev/null; then
+        exec xterm -e "bash \"$0\""
+    fi
+fi
+
+clear
 echo "========================================="
 echo "  DOSE Home Station — Installer"
 echo "========================================="
 echo ""
+echo "This will install everything automatically."
+echo "You may be asked for your password once."
+echo ""
+sleep 1
 
 # ---- system packages ----
-echo "[1/4] Installing system packages..."
-sudo apt update
+echo "[1/5] Installing system packages..."
+sudo apt update -y
 sudo apt install -y \
     python3-tk \
     python3-pil \
@@ -22,57 +36,80 @@ sudo apt install -y \
     python3-picamera2 \
     git
 
-# ---- Python packages (user-level, no venv needed) ----
+# ---- Python packages ----
 echo ""
-echo "[2/4] Installing Python packages..."
-pip install --break-system-packages -r "$SCRIPT_DIR/requirements.txt"
+echo "[2/5] Installing Python packages..."
+pip install --break-system-packages -r "$SCRIPT_DIR/requirements.txt" 2>/dev/null || \
+pip install -r "$SCRIPT_DIR/requirements.txt"
 
-# ---- desktop shortcut for manual launch ----
+# ---- make scripts executable ----
 echo ""
-echo "[3/4] Creating desktop shortcut..."
+echo "[3/5] Setting permissions..."
+chmod +x "$SCRIPT_DIR/dose_demo.py"
+chmod +x "$SCRIPT_DIR/generate_qr_codes.py"
+chmod +x "$SCRIPT_DIR/launch.sh"
+chmod +x "$SCRIPT_DIR/uninstall.sh"
+
+# ---- install to a fixed location so updates work ----
+echo ""
+echo "[4/5] Installing to home folder..."
+INSTALL_DIR="$HOME/dose-home-station"
+if [ "$SCRIPT_DIR" != "$INSTALL_DIR" ]; then
+    mkdir -p "$INSTALL_DIR"
+    cp -r "$SCRIPT_DIR"/* "$INSTALL_DIR"/
+    cp -r "$SCRIPT_DIR"/.git "$INSTALL_DIR"/ 2>/dev/null || true
+    cp "$SCRIPT_DIR"/.gitignore "$INSTALL_DIR"/ 2>/dev/null || true
+fi
+
+# ---- set the remote URL to HTTPS (no login needed for pull) ----
+cd "$INSTALL_DIR"
+if [ -d .git ]; then
+    git remote set-url origin https://github.com/relude117-star/doseconceptprototype.git 2>/dev/null || true
+fi
+
+# ---- create desktop shortcut (double-click to run) ----
+echo ""
+echo "[5/5] Creating shortcuts..."
 DESKTOP_DIR="$HOME/Desktop"
 mkdir -p "$DESKTOP_DIR"
-cat > "$DESKTOP_DIR/dose-home-station.desktop" <<EOF
+
+cat > "$DESKTOP_DIR/DOSE.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=DOSE Home Station
-Comment=DOSE medication dispenser kiosk
-Exec=python3 $SCRIPT_DIR/dose_demo.py
+Comment=Launch DOSE medication dispenser
+Exec=bash $INSTALL_DIR/launch.sh
 Icon=utilities-terminal
 Terminal=false
 Categories=Utility;
 EOF
-chmod +x "$DESKTOP_DIR/dose-home-station.desktop"
+chmod +x "$DESKTOP_DIR/DOSE.desktop"
 
-# ---- optional kiosk autostart ----
-echo ""
-echo "[4/4] Setting up kiosk autostart..."
+# ---- autostart on boot ----
 AUTOSTART_DIR="$HOME/.config/autostart"
 mkdir -p "$AUTOSTART_DIR"
 cat > "$AUTOSTART_DIR/dose-home-station.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=DOSE Home Station
-Comment=DOSE medication dispenser kiosk (auto-start)
-Exec=python3 $SCRIPT_DIR/dose_demo.py
+Exec=bash $INSTALL_DIR/launch.sh
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
 
 echo ""
 echo "========================================="
-echo "  Installation complete!"
+echo "  DONE! Installation complete!"
 echo "========================================="
 echo ""
-echo "  To run now:        python3 $SCRIPT_DIR/dose_demo.py"
-echo "  Desktop shortcut:  ~/Desktop/dose-home-station.desktop"
-echo "  Auto-start:        Enabled (reboot to test)"
+echo "  You now have a 'DOSE' icon on your desktop."
+echo "  Double-click it to launch the app."
 echo ""
-echo "  Controls:"
-echo "    Esc   — quit"
-echo "    c     — toggle camera preview"
-echo "    tap   — dismiss result"
+echo "  The app also starts automatically when"
+echo "  you turn on your Raspberry Pi."
 echo ""
-echo "  To generate QR codes for testing:"
-echo "    python3 $SCRIPT_DIR/generate_qr_codes.py"
+echo "  Updates from GitHub are pulled automatically"
+echo "  every time the app launches."
 echo ""
+echo "  Press any key to close this window..."
+read -n 1 -s

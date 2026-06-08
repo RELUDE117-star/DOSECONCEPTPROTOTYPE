@@ -11,33 +11,28 @@ built for Raspberry Pi.
 | Camera | Raspberry Pi Camera Module 3 Wide (120° FOV, autofocus) |
 | Display | Elecrow 5" 800×480 capacitive touchscreen |
 
-## Quick Start
+## Setup (One-Click Install)
 
-### 1. Clone and install
+1. Download the ZIP from GitHub: click the green **Code** button → **Download ZIP**
+2. Unzip the folder
+3. Open the folder and **double-click `install.sh`**
+4. If asked, choose **"Execute in Terminal"**
+5. Enter your Raspberry Pi password when asked
+6. Done! You now have a **DOSE** icon on your desktop
 
-```bash
-git clone https://github.com/relude117-star/doseconceptprototype.git
-cd doseconceptprototype
-chmod +x install.sh
-./install.sh
-```
+## Running the App
 
-The installer handles all system packages, Python dependencies, a desktop
-shortcut, and kiosk autostart on boot.
+- **Double-click the DOSE icon** on your desktop
+- The app also **starts automatically** when you turn on the Pi
+- Press **Esc** on a keyboard to exit
 
-### 2. Connect hardware
+## Auto-Updates
 
-- Attach the Camera Module 3 Wide via CSI ribbon cable
-- Connect the Elecrow display via HDMI + USB (for touch)
-- Enable the camera in `raspi-config` → Interface Options → Camera
+Every time the app launches, it automatically pulls the latest version
+from GitHub. Just push updates to this repo from your laptop and the
+Raspberry Pi will pick them up on next launch.
 
-### 3. Run
-
-```bash
-python3 dose_demo.py
-```
-
-The app launches full-screen. Controls:
+## Controls
 
 | Key | Action |
 |-----|--------|
@@ -45,46 +40,20 @@ The app launches full-screen. Controls:
 | `c` | Toggle camera preview (for aiming) |
 | Tap screen | Dismiss result → idle |
 
-### 4. Generate QR codes
+## QR Codes for Testing
+
+Double-click `generate_qr_codes.py` or run from terminal:
 
 ```bash
 python3 generate_qr_codes.py
 ```
 
-Creates individual PNGs and a printable 2×2 sheet in `qr_codes/`.
-Print them, cut them out, and hold them in front of the camera to test.
-
-The demo uses four medication codes: **blue**, **red**, **green**, **yellow**.
-
-## How It Works
-
-1. The idle screen shows a clock and the next scheduled dose
-2. The camera continuously scans for QR codes in the background
-3. When a medication QR code is detected, the screen shows:
-   - Medication name
-   - Instructions (what to take it with)
-   - Which dispenser button to press
-4. After the QR code leaves the camera view for 6 seconds, the screen
-   returns to idle
-
-## Auto-Start on Boot
-
-The installer sets up autostart automatically. To disable it:
-
-```bash
-rm ~/.config/autostart/dose-home-station.desktop
-```
-
-To re-enable, run `install.sh` again.
+Creates printable QR codes in `qr_codes/`. The demo uses four codes:
+**blue**, **red**, **green**, **yellow**.
 
 ## Uninstall
 
-```bash
-chmod +x uninstall.sh
-./uninstall.sh
-```
-
-Removes shortcuts and autostart. System packages are left in place.
+Double-click `uninstall.sh` to remove everything.
 
 ## Display Setup
 
@@ -100,9 +69,10 @@ hdmi_cvt 800 480 60 6 0 0 0
 ## Project Structure
 
 ```
-dose_demo.py          — Main application
-generate_qr_codes.py  — QR code generator utility
-install.sh            — One-step Raspberry Pi installer
-uninstall.sh          — Remove shortcuts and autostart
-requirements.txt      — Python dependencies
+install.sh               ← Double-click to install (one time)
+launch.sh                ← Auto-updater + launcher (used by shortcuts)
+dose_demo.py             ← Main application
+generate_qr_codes.py     ← QR code generator utility
+uninstall.sh             ← Double-click to remove
+requirements.txt         ← Python dependencies
 ```
