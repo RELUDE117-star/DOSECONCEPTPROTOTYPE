@@ -50,20 +50,21 @@ chmod +x "$SCRIPT_DIR/generate_qr_codes.py"
 chmod +x "$SCRIPT_DIR/launch.sh"
 chmod +x "$SCRIPT_DIR/uninstall.sh"
 
-# ---- install to a fixed location so updates work ----
+# ---- copy files to a fixed location ----
 echo ""
 echo "[4/5] Installing to home folder..."
 INSTALL_DIR="$HOME/dose-home-station"
+mkdir -p "$INSTALL_DIR"
 if [ "$SCRIPT_DIR" != "$INSTALL_DIR" ]; then
-    mkdir -p "$INSTALL_DIR"
     cp -r "$SCRIPT_DIR"/* "$INSTALL_DIR"/
-    cp -r "$SCRIPT_DIR"/.git "$INSTALL_DIR"/ 2>/dev/null || true
     cp "$SCRIPT_DIR"/.gitignore "$INSTALL_DIR"/ 2>/dev/null || true
 fi
 
-# ---- set the remote URL to HTTPS (no login needed for pull) ----
+# Set up git for future auto-updates (no login needed to pull public repos)
 cd "$INSTALL_DIR"
-if [ -d .git ]; then
+if [ ! -d .git ]; then
+    git init 2>/dev/null || true
+    git remote add origin https://github.com/relude117-star/doseconceptprototype.git 2>/dev/null || \
     git remote set-url origin https://github.com/relude117-star/doseconceptprototype.git 2>/dev/null || true
 fi
 

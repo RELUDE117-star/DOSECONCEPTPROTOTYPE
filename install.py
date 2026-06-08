@@ -108,23 +108,23 @@ class Installer:
                 "pip install pyzbar Pillow 'qrcode[pil]'"
             )
 
-            # Step 3: Clone or update repo
-            self.set_status("Downloading DOSE app...", "#5B9BFF")
-            self.set_progress("[3/5] Downloading from GitHub...")
-            if os.path.isdir(os.path.join(INSTALL_DIR, ".git")):
-                self.run_cmd(f"cd {INSTALL_DIR} && git pull origin {BRANCH} --ff-only 2>/dev/null || true")
-            else:
-                # Remove old install if exists but isn't a git repo
-                if os.path.isdir(INSTALL_DIR):
-                    self.run_cmd(f"rm -rf {INSTALL_DIR}")
-                self.run_cmd(f"git clone -b {BRANCH} {REPO_URL} {INSTALL_DIR}")
-
-            # If we're running from the extracted ZIP, copy files over
+            # Step 3: Copy app files to install location
+            self.set_status("Installing DOSE app...", "#5B9BFF")
+            self.set_progress("[3/5] Copying files...")
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            if script_dir != INSTALL_DIR and os.path.isfile(os.path.join(script_dir, "dose_demo.py")):
+            if script_dir != INSTALL_DIR:
+                os.makedirs(INSTALL_DIR, exist_ok=True)
                 self.run_cmd(f'cp -r "{script_dir}"/* "{INSTALL_DIR}/"')
                 if os.path.isfile(os.path.join(script_dir, ".gitignore")):
                     self.run_cmd(f'cp "{script_dir}/.gitignore" "{INSTALL_DIR}/"')
+
+            # Set up git for future auto-updates (no login needed to pull public repos)
+            if not os.path.isdir(os.path.join(INSTALL_DIR, ".git")):
+                self.run_cmd(
+                    f'cd "{INSTALL_DIR}" && git init && '
+                    f'git remote add origin {REPO_URL} 2>/dev/null || '
+                    f'git remote set-url origin {REPO_URL}'
+                )
 
             # Step 4: Make scripts executable
             self.set_status("Setting up shortcuts...", "#5B9BFF")
@@ -140,7 +140,7 @@ class Installer:
 Type=Application
 Name=DOSE Home Station
 Comment=Launch DOSE medication dispenser
-Exec=bash {INSTALL_DIR}/launch.sh
+Exec=/bin/bash {INSTALL_DIR}/launch.sh
 Icon={INSTALL_DIR}/dose_icon.png
 Terminal=false
 Categories=Utility;
@@ -160,7 +160,7 @@ StartupNotify=false
                 f.write(f"""[Desktop Entry]
 Type=Application
 Name=DOSE Home Station
-Exec=bash {INSTALL_DIR}/launch.sh
+Exec=/bin/bash {INSTALL_DIR}/launch.sh
 Terminal=false
 X-GNOME-Autostart-enabled=true
 """)
