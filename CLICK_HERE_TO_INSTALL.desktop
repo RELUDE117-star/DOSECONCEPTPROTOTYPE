@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=CLICK HERE TO INSTALL DOSE
-Comment=Installs the DOSE Home Station application
-Exec=sh -c 'cd "$(dirname "$(readlink -f "%k")")" && lxterminal -e bash install.sh'
-Icon=system-software-install
-Terminal=false
-Categories=Utility;
