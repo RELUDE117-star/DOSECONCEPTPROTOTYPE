@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=CLICK HERE TO RUN DOSE
+Comment=Launches the DOSE Home Station application
+Exec=sh -c 'cd "$(dirname "$(readlink -f "%k")")" && bash launch.sh'
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;
