@@ -78,7 +78,7 @@ cat > "$DESKTOP_DIR/DOSE.desktop" <<EOF
 Type=Application
 Name=DOSE Home Station
 Comment=Launch DOSE medication dispenser
-Exec=bash $INSTALL_DIR/launch.sh
+Exec=/bin/bash $INSTALL_DIR/launch.sh
 Icon=$INSTALL_DIR/dose_icon.png
 Terminal=false
 Categories=Utility;
@@ -98,7 +98,7 @@ cat > "$AUTOSTART_DIR/dose-home-station.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=DOSE Home Station
-Exec=bash $INSTALL_DIR/launch.sh
+Exec=/bin/bash $INSTALL_DIR/launch.sh
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
@@ -120,6 +120,21 @@ img.save('$INSTALL_DIR/dose_icon.png')
 print('  Icon created.')
 " 2>/dev/null || true
 
+# ---- verify the app can actually start ----
+echo ""
+echo "  Testing that DOSE can start..."
+python3 -c "
+import tkinter as tk
+from PIL import Image, ImageTk
+from pyzbar.pyzbar import decode as qr_decode
+print('  All dependencies OK!')
+" 2>&1
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "  WARNING: Some dependencies are missing."
+    echo "  The app may not work. See errors above."
+fi
+
 echo ""
 echo "========================================="
 echo "  DONE! Installation complete!"
@@ -134,5 +149,10 @@ echo ""
 echo "  Updates from GitHub are pulled automatically"
 echo "  every time the app launches."
 echo ""
-echo "  Press any key to close this window..."
+echo "  Launching DOSE now..."
+sleep 2
+/bin/bash "$INSTALL_DIR/launch.sh" &
+echo ""
+echo "  DOSE is starting! You can close this window."
+echo "  Press any key to close..."
 read -n 1 -s
