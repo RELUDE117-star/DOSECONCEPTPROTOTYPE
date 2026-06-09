@@ -9,6 +9,7 @@ import tkinter.font as tkfont
 import json
 import os
 import subprocess
+import sys
 import time
 import threading
 import math
@@ -124,6 +125,63 @@ DEFAULT_MEDS = {
 ALL_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 CONFIG_PATH = os.path.expanduser("~/.dose_config.json")
+APP_DIR = os.path.expanduser("~/dose-home-station")
+RAW_URL = "https://raw.githubusercontent.com/relude117-star/doseconceptprototype/claude/quirky-brown-vkHwi"
+
+
+def _check_for_updates():
+    """Check GitHub for a newer version and offer to update via tkinter dialog."""
+    import hashlib
+    import tkinter.messagebox as tkmb
+    try:
+        import urllib.request
+        app_path = os.path.join(APP_DIR, "dose_app.py")
+        if not os.path.isfile(app_path):
+            app_path = os.path.abspath(__file__)
+
+        with open(app_path, "rb") as f:
+            local_hash = hashlib.md5(f.read()).hexdigest()
+
+        req = urllib.request.Request(RAW_URL + "/dose_app.py")
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            remote_data = resp.read()
+        remote_hash = hashlib.md5(remote_data).hexdigest()
+
+        if local_hash == remote_hash:
+            return
+
+        hidden = tk.Tk()
+        hidden.withdraw()
+        answer = tkmb.askyesno(
+            "DOSE Update",
+            "An update is available.\nWould you like to update now?",
+            parent=hidden,
+        )
+        hidden.destroy()
+
+        if not answer:
+            return
+
+        os.makedirs(APP_DIR, exist_ok=True)
+        with open(os.path.join(APP_DIR, "dose_app.py"), "wb") as f:
+            f.write(remote_data)
+
+        for extra in ("DOSE.sh", "dose_logo.png"):
+            try:
+                req2 = urllib.request.Request(RAW_URL + "/" + extra)
+                with urllib.request.urlopen(req2, timeout=8) as resp2:
+                    with open(os.path.join(APP_DIR, extra), "wb") as f2:
+                        f2.write(resp2.read())
+            except Exception:
+                pass
+
+        os.execv(
+            sys.executable,
+            [sys.executable, os.path.join(APP_DIR, "dose_app.py")],
+        )
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Theme palettes
@@ -1186,5 +1244,6 @@ class DoseApp:
 # Entry point
 # ===================================================================
 if __name__ == "__main__":
+    _check_for_updates()
     app = DoseApp()
     app.run()
