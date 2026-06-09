@@ -357,7 +357,7 @@ class DoseApp:
             self._update_settings()
 
         # Keep D button on top
-        self.d_btn_canvas.lift()
+        self.d_btn_canvas.tkraise()
 
     # ---------------------------------------------------------------
     # Clock
@@ -839,7 +839,7 @@ class DoseApp:
         self.overlay_frame.configure(bg=t["bg"])
         self.overlay_frame.place(x=0, y=0, width=800, height=480)
         self.overlay_frame.lift()
-        self.d_btn_canvas.lift()
+        self.d_btn_canvas.tkraise()
 
         # Pill name
         tk.Label(
@@ -890,7 +890,7 @@ class DoseApp:
         self.overlay_frame.configure(bg=t["bg"])
         self.overlay_frame.place(x=0, y=0, width=800, height=480)
         self.overlay_frame.lift()
-        self.d_btn_canvas.lift()
+        self.d_btn_canvas.tkraise()
 
         tk.Label(
             self.overlay_frame, text="Hold to confirm", font=self.font_xl,
@@ -985,7 +985,7 @@ class DoseApp:
         self.overlay_frame.configure(bg=t["bg"])
         self.overlay_frame.place(x=0, y=0, width=800, height=480)
         self.overlay_frame.lift()
-        self.d_btn_canvas.lift()
+        self.d_btn_canvas.tkraise()
 
         tk.Label(
             self.overlay_frame, text="CONFIRMED", font=self.font_xl,
@@ -1031,7 +1031,7 @@ class DoseApp:
         self.overlay_frame.configure(bg=t["bg"])
         self.overlay_frame.place(x=0, y=0, width=800, height=480)
         self.overlay_frame.lift()
-        self.d_btn_canvas.lift()
+        self.d_btn_canvas.tkraise()
 
         tk.Label(
             self.overlay_frame, text=f"Dispensed: {med['name']}", font=self.font_xl,
