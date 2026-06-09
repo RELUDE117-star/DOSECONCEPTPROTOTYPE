@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-DOSE Home Station - Medication Dispenser Kiosk Application
-Raspberry Pi 4B + Elecrow 5" 800x480 Touchscreen
+DOSE Home Station — Prototype Application
+Braun/Dieter Rams inspired medication dispensing kiosk.
+
+Modes: Standby, Storage, Settings
+Dispensing: READ → HOLD → CONFIRM → DISPENSED
+
+Gracefully handles missing hardware (camera, pyzbar, PIL).
 """
 
 import tkinter as tk
@@ -17,9 +22,7 @@ import base64
 import io
 from datetime import datetime
 
-# ---------------------------------------------------------------------------
-# Graceful optional imports
-# ---------------------------------------------------------------------------
+# ── Graceful optional imports ──────────────────────────────────────────────
 PIL_AVAILABLE = False
 try:
     from PIL import Image, ImageTk
@@ -36,9 +39,76 @@ try:
 except Exception:
     pass
 
-# ---------------------------------------------------------------------------
-# Embedded dose+ logo (48x48 PNG, base64-encoded)
-# ---------------------------------------------------------------------------
+# ── Module-level constants ─────────────────────────────────────────────────
+SCREEN_W = 800
+SCREEN_H = 480
+MARGIN_LEFT = 52
+HOLD_TIME = 3.0
+
+ALL_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+CONFIG_PATH = os.path.expanduser("~/.dose_config.json")
+APP_DIR = os.path.expanduser("~/dose-home-station")
+RAW_URL = "https://raw.githubusercontent.com/relude117-star/doseconceptprototype/claude/quirky-brown-vkHwi"
+
+DEFAULT_MEDS = {
+    "blue": {
+        "name": "Lisinopril",
+        "accent": "#4A90D9",
+        "pills_left": 28,
+        "schedule_time": "8:00 AM",
+        "schedule_days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+        "take_with": "Take with water",
+        "safety": "Do not take with potassium supplements."
+    },
+    "red": {
+        "name": "Metformin",
+        "accent": "#D94A4A",
+        "pills_left": 56,
+        "schedule_time": "9:00 AM",
+        "schedule_days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+        "take_with": "Take with food",
+        "safety": "Avoid alcohol while taking this medication."
+    },
+    "green": {
+        "name": "Atorvastatin",
+        "accent": "#4AD97A",
+        "pills_left": 30,
+        "schedule_time": "10:00 PM",
+        "schedule_days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+        "take_with": "Take at bedtime",
+        "safety": "Avoid grapefruit juice."
+    },
+    "yellow": {
+        "name": "Vitamin D",
+        "accent": "#D9C84A",
+        "pills_left": 90,
+        "schedule_time": "8:00 AM",
+        "schedule_days": ["Mon", "Wed", "Fri"],
+        "take_with": "Take with food",
+        "safety": "Do not exceed recommended dose."
+    }
+}
+
+DARK_THEME = {
+    "bg": "#070708",
+    "fg": "#F4F4F2",
+    "muted": "#7E8186",
+    "card_bg": "#141418",
+    "btn_bg": "#1E1E24",
+    "btn_active": "#2A2A32",
+    "popup_bg": "#1A1A20"
+}
+
+LIGHT_THEME = {
+    "bg": "#F4F4F2",
+    "fg": "#1A1A1C",
+    "muted": "#888888",
+    "card_bg": "#E8E8E6",
+    "btn_bg": "#DCDCDA",
+    "btn_active": "#D0D0CE",
+    "popup_bg": "#E0E0DE"
+}
+
 DOSE_LOGO_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAABCGlDQ1BJQ0MgUHJvZmlsZQAAeJxj"
     "YGA8wQAELAYMDLl5JUVB7k4KEZFRCuwPGBiBEAwSk4sLGHADoKpv1yBqL+viUYcLcKakFicD6Q9A"
@@ -75,1234 +145,1195 @@ DOSE_LOGO_B64 = (
     "DQXm1BIVyT4AAAAASUVORK5CYII="
 )
 
-# ---------------------------------------------------------------------------
-# Default medication data
-# ---------------------------------------------------------------------------
-DEFAULT_MEDS = {
-    "blue": {
-        "name": "Blue", "accent": "#5B9BFF", "pills_left": 26,
-        "schedule_time": "11:00 AM",
-        "schedule_days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-        "take_with": "A full glass of water. With or without food.",
-        "safety": (
-            "Do not exceed prescribed dose. Store at room temperature away "
-            "from moisture and heat. May cause dizziness — avoid driving "
-            "until you know how it affects you."
-        ),
-    },
-    "red": {
-        "name": "Red", "accent": "#FF6B6B", "pills_left": 14,
-        "schedule_time": "8:00 AM",
-        "schedule_days": ["Mon", "Wed", "Fri"],
-        "take_with": "Food, to avoid stomach upset. Avoid alcohol.",
-        "safety": (
-            "Take with food to reduce nausea. Do not crush or chew. Avoid "
-            "grapefruit juice. Report unusual bleeding or bruising to your doctor."
-        ),
-    },
-    "green": {
-        "name": "Green", "accent": "#5BD08A", "pills_left": 30,
-        "schedule_time": "9:00 AM",
-        "schedule_days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-        "take_with": "An empty stomach, ~1 hour before eating.",
-        "safety": (
-            "Take on empty stomach for best absorption. Do not take with "
-            "dairy products. May increase sun sensitivity — use sunscreen."
-        ),
-    },
-    "yellow": {
-        "name": "Yellow", "accent": "#E6C34A", "pills_left": 8,
-        "schedule_time": "7:00 AM",
-        "schedule_days": ["Mon", "Tue", "Wed", "Thu", "Fri"],
-        "take_with": "Morning, with water. Do not crush or chew.",
-        "safety": (
-            "Swallow whole — do not split, crush, or chew. Take at the "
-            "same time each day. Store away from direct sunlight."
-        ),
-    },
-}
 
-ALL_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-
-CONFIG_PATH = os.path.expanduser("~/.dose_config.json")
-APP_DIR = os.path.expanduser("~/dose-home-station")
-RAW_URL = "https://raw.githubusercontent.com/relude117-star/doseconceptprototype/claude/quirky-brown-vkHwi"
-
-
-
-# ---------------------------------------------------------------------------
-# Theme palettes
-# ---------------------------------------------------------------------------
-DARK_THEME = {
-    "bg": "#070708",
-    "fg": "#F4F4F2",
-    "muted": "#7E8186",
-    "card_bg": "#141418",
-    "btn_bg": "#1E1E24",
-    "btn_active": "#2A2A32",
-    "popup_bg": "#1A1A20",
-}
-LIGHT_THEME = {
-    "bg": "#F4F4F2",
-    "fg": "#1A1A1C",
-    "muted": "#888888",
-    "card_bg": "#E8E8E6",
-    "btn_bg": "#DCDCDA",
-    "btn_active": "#D0D0CE",
-    "popup_bg": "#E0E0DE",
-}
-
-# Grid constants
-MARGIN_LEFT = 52
-MARGIN_RIGHT = 52
-RIGHT_EDGE = 800 - MARGIN_RIGHT  # 748
-
-
-# ===================================================================
-# Main Application
-# ===================================================================
+# ═══════════════════════════════════════════════════════════════════════════
+#  DoseApp
+# ═══════════════════════════════════════════════════════════════════════════
 class DoseApp:
-    """Top-level controller for the DOSE Home Station kiosk."""
 
+    # ── Constructor ────────────────────────────────────────────────────────
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("DOSE Home Station")
-        self.root.geometry("800x480")
+        self.root.title("DOSE")
+        self.root.geometry(f"{SCREEN_W}x{SCREEN_H}+0+0")
+        self.root.attributes("-fullscreen", True)
+        self.root.configure(cursor="none")
         self.root.resizable(False, False)
-        self.root.configure(bg="#070708")
 
-        # Fullscreen & cursor
-        try:
-            self.root.attributes("-fullscreen", True)
-        except Exception:
-            pass
-        self.root.config(cursor="none")
+        # ── Fonts ──────────────────────────────────────────────────────────
+        preferred = "Nunito"
+        fallback = "DejaVu Sans"
+        families = tkfont.families(self.root)
+        base = preferred if preferred in families else fallback
 
-        # ---- Fonts -------------------------------------------------
-        available = tkfont.families()
-        family = "DejaVu Sans"
-        for candidate in ("Nunito", "Nunito Sans"):
-            if candidate in available:
-                family = candidate
-                break
-        self.font_family = family
+        self.font_clock = tkfont.Font(family=base, size=32)
+        self.font_hero = tkfont.Font(family=base, size=44, weight="bold")
+        self.font_name = tkfont.Font(family=base, size=36, weight="bold")
+        self.font_body = tkfont.Font(family=base, size=20)
+        self.font_body_bold = tkfont.Font(family=base, size=20, weight="bold")
+        self.font_label = tkfont.Font(family=base, size=11, weight="bold")
+        self.font_small = tkfont.Font(family=base, size=14)
+        self.font_small_bold = tkfont.Font(family=base, size=14, weight="bold")
+        self.font_btn = tkfont.Font(family=base, size=16, weight="bold")
+        self.font_btn_lg = tkfont.Font(family=base, size=18, weight="bold")
+        self.font_title = tkfont.Font(family=base, size=24, weight="bold")
+        self.font_medium = tkfont.Font(family=base, size=18)
+        self.font_bold_lg = tkfont.Font(family=base, size=28, weight="bold")
 
-        self.font_clock = tkfont.Font(family=family, size=32, weight="normal")
-        self.font_xl = tkfont.Font(family=family, size=44, weight="normal")
-        self.font_name = tkfont.Font(family=family, size=36, weight="bold")
-        self.font_lg = tkfont.Font(family=family, size=20, weight="normal")
-        self.font_md = tkfont.Font(family=family, size=16, weight="normal")
-        self.font_sm = tkfont.Font(family=family, size=13, weight="normal")
-        self.font_label = tkfont.Font(family=family, size=11, weight="bold")
-        self.font_xs = tkfont.Font(family=family, size=10, weight="normal")
-        self.font_bold_sm = tkfont.Font(family=family, size=13, weight="bold")
-        self.font_bold_md = tkfont.Font(family=family, size=16, weight="bold")
-        self.font_bold_lg = tkfont.Font(family=family, size=20, weight="bold")
-
-        # ---- State -------------------------------------------------
+        # ── State ──────────────────────────────────────────────────────────
         self.meds = {}
-        self.settings = {"night_mode": True, "alarm_sound": True}
+        self.settings = {"night_mode": False, "alarm_sound": True}
         self.theme = dict(DARK_THEME)
-        self.mode = "standby"  # standby | storage | settings
+        self.mode = "standby"
         self.selected_pill = "blue"
-
-        # Dispensing state
-        self.dispensing_active = False
-        self.dispense_state = None  # READ | HOLD | CONFIRM | DISPENSED
-        self.dispense_pill_key = None
-        self.hold_start = None
-        self.hold_timer_id = None
-        self.dispense_return_id = None
-
-        # D-menu
+        self.dispense_state = 0
+        self.dispense_pill = None
+        self.hold_start = 0
+        self.hold_after_id = None
         self.menu_visible = False
-        self.menu_timeout_id = None
-
-        # Camera
+        self.menu_dismiss_id = None
         self.camera = None
-        self.camera_thread = None
         self.camera_running = False
 
-        # Load saved config
+        # ── Config ─────────────────────────────────────────────────────────
         self._load_config()
+        self._apply_theme_colors()
 
-        # Apply theme from settings
-        if self.settings.get("night_mode", True):
-            self.theme = dict(DARK_THEME)
-        else:
-            self.theme = dict(LIGHT_THEME)
+        # ── Root frames ────────────────────────────────────────────────────
+        self.main_frame = tk.Frame(self.root, bg=self.theme["bg"],
+                                   width=SCREEN_W, height=SCREEN_H)
+        self.main_frame.place(x=0, y=0, width=SCREEN_W, height=SCREEN_H)
 
-        # ---- Build UI layers ----------------------------------------
-        self.root.configure(bg=self.theme["bg"])
+        self.overlay_frame = tk.Frame(self.root, bg=self.theme["bg"],
+                                      width=SCREEN_W, height=SCREEN_H)
 
-        # Main container
-        self.main_frame = tk.Frame(self.root, bg=self.theme["bg"])
-        self.main_frame.place(x=0, y=0, width=800, height=480)
-
-        # Overlay for dispensing flow (on top of everything)
-        self.overlay_frame = tk.Frame(self.root, bg=self.theme["bg"])
-
-        # D button (always visible)
-        self.d_btn_canvas = tk.Canvas(
-            self.root, width=48, height=48,
-            bg=self.theme["bg"], highlightthickness=0, bd=0
-        )
+        # D button canvas — 48x48 in bottom-right
+        self.d_btn_canvas = tk.Canvas(self.root, width=48, height=48,
+                                      highlightthickness=0,
+                                      bg=self.theme["bg"], bd=0)
         self.d_btn_canvas.place(x=740, y=424)
         self._draw_d_button()
         self.d_btn_canvas.bind("<Button-1>", self._on_d_pressed)
 
         # Popup menu frame
-        self.popup_frame = tk.Frame(
-            self.root, bg=self.theme["popup_bg"],
-            highlightbackground=self.theme["muted"], highlightthickness=1
-        )
+        self.popup_frame = tk.Frame(self.root, bg=self.theme["popup_bg"],
+                                    highlightbackground=self.theme["muted"],
+                                    highlightthickness=1)
 
-        # ---- Key bindings -------------------------------------------
+        # ── Bindings ───────────────────────────────────────────────────────
         self.root.bind("<Escape>", lambda e: self.root.destroy())
 
-        # ---- Build modes --------------------------------------------
+        # ── Build all modes ────────────────────────────────────────────────
         self._build_standby()
         self._build_storage()
         self._build_settings()
         self._build_overlay()
 
-        # ---- Show standby -------------------------------------------
+        # ── Show initial mode ──────────────────────────────────────────────
         self._show_mode("standby")
-
-        # ---- Start clock --------------------------------------------
         self._tick_clock()
 
-        # ---- Camera -------------------------------------------------
         if CAMERA_AVAILABLE:
             self._start_camera()
 
-        # Focus so Esc works
         self.root.focus_force()
 
+    # ── Safe widget raising ────────────────────────────────────────────────
     @staticmethod
     def _raise_widget(widget):
-        """Raise a widget in the stacking order. Works for Canvas too."""
         widget.tk.call('raise', widget._w)
 
-    # ---------------------------------------------------------------
-    # Config persistence
-    # ---------------------------------------------------------------
+    # ── Config persistence ─────────────────────────────────────────────────
     def _load_config(self):
-        """Load medication data and settings from JSON, or use defaults."""
-        try:
-            with open(CONFIG_PATH, "r") as f:
-                data = json.load(f)
-            self.meds = data.get("meds", {})
-            self.settings = data.get("settings", {"night_mode": True, "alarm_sound": True})
-            # Ensure all default keys exist
-            for key, default in DEFAULT_MEDS.items():
-                if key not in self.meds:
-                    self.meds[key] = dict(default)
-                else:
-                    for dk, dv in default.items():
-                        if dk not in self.meds[key]:
-                            self.meds[key][dk] = dv
-        except Exception:
-            self.meds = {k: dict(v) for k, v in DEFAULT_MEDS.items()}
-            self.settings = {"night_mode": True, "alarm_sound": True}
+        loaded = {}
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, "r") as f:
+                    loaded = json.load(f)
+            except Exception:
+                pass
+
+        saved_meds = loaded.get("meds", {})
+        self.meds = {}
+        for key, defaults in DEFAULT_MEDS.items():
+            entry = dict(defaults)
+            if key in saved_meds:
+                for k, v in saved_meds[key].items():
+                    entry[k] = v
+            self.meds[key] = entry
+
+        saved_settings = loaded.get("settings", {})
+        for k in self.settings:
+            if k in saved_settings:
+                self.settings[k] = saved_settings[k]
 
     def _save_config(self):
-        """Persist current state to JSON."""
+        data = {"meds": self.meds, "settings": self.settings}
         try:
-            data = {"meds": self.meds, "settings": self.settings}
+            os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
             with open(CONFIG_PATH, "w") as f:
                 json.dump(data, f, indent=2)
         except Exception:
             pass
 
-    # ---------------------------------------------------------------
-    # Theme helpers
-    # ---------------------------------------------------------------
-    def _apply_theme(self):
-        """Recolour every widget after a theme change."""
-        t = self.theme
-        self.root.configure(bg=t["bg"])
-        self.main_frame.configure(bg=t["bg"])
-        self.overlay_frame.configure(bg=t["bg"])
-        self.d_btn_canvas.configure(bg=t["bg"])
-        self._draw_d_button()
-        self.popup_frame.configure(bg=t["popup_bg"], highlightbackground=t["muted"])
+    # ── Theme ──────────────────────────────────────────────────────────────
+    def _apply_theme_colors(self):
+        if self.settings.get("night_mode", False):
+            self.theme = dict(LIGHT_THEME)
+        else:
+            self.theme = dict(DARK_THEME)
 
-        # Rebuild everything (simplest way to recolour deeply)
+    def _apply_theme(self):
+        self._apply_theme_colors()
+        self.root.configure(bg=self.theme["bg"])
+        self.main_frame.configure(bg=self.theme["bg"])
+        self.overlay_frame.configure(bg=self.theme["bg"])
+        self.d_btn_canvas.configure(bg=self.theme["bg"])
+        self.popup_frame.configure(bg=self.theme["popup_bg"],
+                                   highlightbackground=self.theme["muted"])
+        self._draw_d_button()
+        # Rebuild everything for deep recolor
         self._build_standby()
         self._build_storage()
         self._build_settings()
         self._build_overlay()
         self._show_mode(self.mode)
 
-    # ---------------------------------------------------------------
-    # D button and popup menu
-    # ---------------------------------------------------------------
+    # ── D Button drawing ───────────────────────────────────────────────────
     def _draw_d_button(self):
-        c = self.d_btn_canvas
-        c.delete("all")
-        c.configure(bg=self.theme["bg"])
-        if PIL_AVAILABLE and not hasattr(self, '_d_logo_img'):
-            try:
+        self.d_btn_canvas.delete("all")
+        loaded = False
+        try:
+            if PIL_AVAILABLE:
                 raw = base64.b64decode(DOSE_LOGO_B64)
-                pil_img = Image.open(io.BytesIO(raw))
-                resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
-                if resample:
-                    pil_img = pil_img.resize((48, 48), resample)
-                else:
-                    pil_img = pil_img.resize((48, 48))
-                self._d_logo_img = ImageTk.PhotoImage(pil_img)
-            except Exception:
-                pass
-        if hasattr(self, '_d_logo_img'):
-            c.create_image(24, 24, image=self._d_logo_img)
-        else:
-            self._canvas_rounded_rect(c, 2, 2, 46, 46, 12, fill="#5B9BFF", outline="")
-            c.create_text(25, 26, text="D", fill="#FFFFFF",
-                          font=tkfont.Font(family=self.font_family, size=22, weight="bold"))
+                img = Image.open(io.BytesIO(raw))
+                resample = getattr(Image, 'LANCZOS',
+                                   getattr(Image, 'ANTIALIAS', None))
+                img = img.resize((48, 48), resample)
+                self._d_logo_img = ImageTk.PhotoImage(img)
+                self.d_btn_canvas.create_image(24, 24,
+                                               image=self._d_logo_img)
+                loaded = True
+        except Exception:
+            pass
+        if not loaded:
+            self._canvas_rounded_rect(self.d_btn_canvas, 2, 2, 46, 46,
+                                      12, fill="#4A90D9", outline="")
+            self.d_btn_canvas.create_text(24, 24, text="D",
+                                          fill="white",
+                                          font=self.font_btn_lg)
 
+    # ── D Menu ─────────────────────────────────────────────────────────────
     def _on_d_pressed(self, event=None):
-        if self.dispensing_active:
-            return
         if self.menu_visible:
             self._hide_menu()
         else:
             self._show_menu()
 
     def _show_menu(self):
-        if self.menu_visible:
-            return
         self.menu_visible = True
-        t = self.theme
-
-        # Clear old children
+        # Clear and build menu
         for w in self.popup_frame.winfo_children():
             w.destroy()
 
-        items = [("Standby", "standby"), ("Storage", "storage"), ("Settings", "settings")]
-        for label, mode in items:
-            btn = tk.Label(
-                self.popup_frame, text=label, font=self.font_md,
-                bg=t["popup_bg"], fg=t["fg"],
-                padx=24, pady=14, anchor="w"
-            )
+        items = [("Standby", "standby"), ("Storage", "storage"),
+                 ("Settings", "settings")]
+        for label, mode_val in items:
+            btn = tk.Button(self.popup_frame, text=label,
+                            font=self.font_small_bold,
+                            bg=self.theme["popup_bg"],
+                            fg=self.theme["fg"],
+                            activebackground=self.theme["btn_active"],
+                            activeforeground=self.theme["fg"],
+                            bd=0, padx=20, pady=10, anchor="w",
+                            command=lambda m=mode_val: self._menu_pick(m))
             btn.pack(fill="x")
-            btn.bind("<Button-1>", lambda e, m=mode: self._menu_pick(m))
-            btn.bind("<Enter>", lambda e, b=btn: b.configure(bg=t["btn_active"]))
-            btn.bind("<Leave>", lambda e, b=btn: b.configure(bg=t["popup_bg"]))
 
-        # Place wider menu, right-aligned with D button, above it
-        self.popup_frame.place(x=608, y=280, width=180)
+        self.popup_frame.place(x=640, y=340, width=150)
         self._raise_widget(self.popup_frame)
 
-        # Auto-dismiss after 45 s
-        if self.menu_timeout_id:
-            self.root.after_cancel(self.menu_timeout_id)
-        self.menu_timeout_id = self.root.after(45000, self._hide_menu)
+        if self.menu_dismiss_id:
+            self.root.after_cancel(self.menu_dismiss_id)
+        self.menu_dismiss_id = self.root.after(45000, self._hide_menu)
 
     def _hide_menu(self):
         self.menu_visible = False
         self.popup_frame.place_forget()
-        if self.menu_timeout_id:
-            self.root.after_cancel(self.menu_timeout_id)
-            self.menu_timeout_id = None
+        if self.menu_dismiss_id:
+            self.root.after_cancel(self.menu_dismiss_id)
+            self.menu_dismiss_id = None
 
-    def _menu_pick(self, mode):
+    def _menu_pick(self, mode_val):
         self._hide_menu()
-        self._show_mode(mode)
+        if self.dispense_state > 0:
+            self._end_dispense()
+        self._show_mode(mode_val)
 
-    # ---------------------------------------------------------------
-    # Mode switching
-    # ---------------------------------------------------------------
+    # ── Mode switching ─────────────────────────────────────────────────────
     def _show_mode(self, mode):
         self.mode = mode
-        # Hide all mode frames
         self.standby_frame.place_forget()
         self.storage_frame.place_forget()
         self.settings_frame.place_forget()
         self.overlay_frame.place_forget()
 
         if mode == "standby":
-            self.standby_frame.place(x=0, y=0, width=800, height=480)
+            self.standby_frame.place(x=0, y=0,
+                                     width=SCREEN_W, height=SCREEN_H)
             self._update_standby()
         elif mode == "storage":
-            self.storage_frame.place(x=0, y=0, width=800, height=480)
+            self.storage_frame.place(x=0, y=0,
+                                     width=SCREEN_W, height=SCREEN_H)
             self._update_storage()
         elif mode == "settings":
-            self.settings_frame.place(x=0, y=0, width=800, height=480)
-            self._update_settings()
+            self.settings_frame.place(x=0, y=0,
+                                      width=SCREEN_W, height=SCREEN_H)
 
-        # Keep D button on top
         self._raise_widget(self.d_btn_canvas)
 
-    # ---------------------------------------------------------------
-    # Clock
-    # ---------------------------------------------------------------
+    # ── Clock ──────────────────────────────────────────────────────────────
     def _tick_clock(self):
         try:
-            now = datetime.now().strftime("%-I:%M %p")
+            now_str = datetime.now().strftime("%-I:%M %p")
         except ValueError:
-            now = datetime.now().strftime("%I:%M %p").lstrip("0")
-        self._current_time_str = now
-
-        # Update standby clock
-        if hasattr(self, "_standby_clock_label"):
-            self._standby_clock_label.configure(text=now)
-
+            now_str = datetime.now().strftime("%I:%M %p").lstrip("0")
+        try:
+            self.clock_label.configure(text=now_str)
+        except Exception:
+            pass
         self.root.after(1000, self._tick_clock)
 
-    # ---------------------------------------------------------------
-    # Canvas helper: rounded rectangle
-    # ---------------------------------------------------------------
+    # ── Canvas helper ──────────────────────────────────────────────────────
     @staticmethod
-    def _canvas_rounded_rect(canvas, x1, y1, x2, y2, r, **kw):
+    def _canvas_rounded_rect(canvas, x1, y1, x2, y2, r, **kwargs):
         points = [
             x1 + r, y1,
+            x1 + r, y1,
+            x2 - r, y1,
             x2 - r, y1,
             x2, y1,
             x2, y1 + r,
+            x2, y1 + r,
+            x2, y2 - r,
             x2, y2 - r,
             x2, y2,
             x2 - r, y2,
+            x2 - r, y2,
+            x1 + r, y2,
             x1 + r, y2,
             x1, y2,
             x1, y2 - r,
+            x1, y2 - r,
+            x1, y1 + r,
             x1, y1 + r,
             x1, y1,
-            x1 + r, y1,
         ]
-        return canvas.create_polygon(points, smooth=True, **kw)
+        return canvas.create_polygon(points, smooth=True, **kwargs)
 
-    # ===================================================================
-    # STANDBY MODE
-    # ===================================================================
+    # ══════════════════════════════════════════════════════════════════════
+    #  STANDBY MODE
+    # ══════════════════════════════════════════════════════════════════════
     def _build_standby(self):
-        if hasattr(self, "standby_frame"):
+        if hasattr(self, 'standby_frame'):
             self.standby_frame.destroy()
-        t = self.theme
-        self.standby_frame = tk.Frame(self.main_frame, bg=t["bg"])
+
+        self.standby_frame = tk.Frame(self.main_frame,
+                                      bg=self.theme["bg"],
+                                      width=SCREEN_W, height=SCREEN_H)
 
         # Clock
-        self._standby_clock_label = tk.Label(
-            self.standby_frame, text="", font=self.font_clock,
-            bg=t["bg"], fg=t["fg"], anchor="w"
-        )
-        self._standby_clock_label.place(x=MARGIN_LEFT, y=40)
+        self.clock_label = tk.Label(self.standby_frame, text="",
+                                    font=self.font_clock,
+                                    bg=self.theme["bg"],
+                                    fg=self.theme["fg"])
+        self.clock_label.place(x=MARGIN_LEFT, y=30)
 
-        # WiFi icon (canvas with arcs)
-        wifi_c = tk.Canvas(self.standby_frame, width=36, height=30,
-                           bg=t["bg"], highlightthickness=0)
-        wifi_c.place(x=720, y=42)
-        self._draw_wifi(wifi_c, t["fg"])
+        # WiFi icon (text placeholder)
+        wifi_lbl = tk.Label(self.standby_frame, text="◉",
+                            font=self.font_body,
+                            bg=self.theme["bg"],
+                            fg=self.theme["muted"])
+        wifi_lbl.place(x=SCREEN_W - MARGIN_LEFT - 30, y=35)
 
-        # "NEXT DOSE" label — small caps tracking style
-        tk.Label(
-            self.standby_frame, text="NEXT DOSE", font=self.font_label,
-            bg=t["bg"], fg=t["muted"]
-        ).place(x=MARGIN_LEFT, y=180)
+        # NEXT DOSE label
+        next_lbl = tk.Label(self.standby_frame, text="NEXT DOSE",
+                            font=self.font_label,
+                            bg=self.theme["bg"],
+                            fg=self.theme["muted"])
+        next_lbl.place(x=MARGIN_LEFT, y=120)
 
-        # Find next dose
-        next_time, next_pills = self._compute_next_dose()
+        # Next dose time (hero)
+        self.next_dose_label = tk.Label(self.standby_frame, text="",
+                                        font=self.font_hero,
+                                        bg=self.theme["bg"],
+                                        fg=self.theme["fg"])
+        self.next_dose_label.place(x=MARGIN_LEFT, y=148)
 
-        # Next dose time — hero element, big
-        self._standby_next_time = tk.Label(
-            self.standby_frame, text=next_time, font=self.font_xl,
-            bg=t["bg"], fg=t["fg"]
-        )
-        self._standby_next_time.place(x=MARGIN_LEFT, y=205)
-
-        # Pills count
-        self._standby_next_pills = tk.Label(
-            self.standby_frame, text=next_pills, font=self.font_lg,
-            bg=t["bg"], fg=t["muted"]
-        )
-        self._standby_next_pills.place(x=MARGIN_LEFT, y=270)
+        # Pill count
+        self.standby_pill_count = tk.Label(self.standby_frame, text="",
+                                           font=self.font_body,
+                                           bg=self.theme["bg"],
+                                           fg=self.theme["muted"])
+        self.standby_pill_count.place(x=MARGIN_LEFT, y=210)
 
         # Camera status
         if not CAMERA_AVAILABLE:
-            tk.Label(
-                self.standby_frame, text="Camera not connected", font=self.font_xs,
-                bg=t["bg"], fg=t["muted"]
-            ).place(x=MARGIN_LEFT, y=440)
+            cam_lbl = tk.Label(self.standby_frame,
+                               text="Camera not connected",
+                               font=self.font_small,
+                               bg=self.theme["bg"],
+                               fg=self.theme["muted"])
+            cam_lbl.place(x=MARGIN_LEFT, y=280)
 
-        # Bind tap on entire standby frame to trigger demo scan
-        self.standby_frame.bind("<Button-1>", lambda e: self._start_dispense("blue"))
+        # Tap to demo dispense
+        self.standby_frame.bind("<Button-1>", self._standby_tap)
+
+    def _standby_tap(self, event=None):
+        self._start_dispense("blue")
 
     def _update_standby(self):
-        try:
-            now = datetime.now().strftime("%-I:%M %p")
-        except ValueError:
-            now = datetime.now().strftime("%I:%M %p").lstrip("0")
-        self._standby_clock_label.configure(text=now)
-        next_time, next_pills = self._compute_next_dose()
-        self._standby_next_time.configure(text=next_time)
-        self._standby_next_pills.configure(text=next_pills)
+        next_time, next_name, total_pills = self._compute_next_dose()
+        self.next_dose_label.configure(text=next_time)
+        self.standby_pill_count.configure(
+            text=f"{total_pills} pills remaining  •  {next_name}")
 
     def _compute_next_dose(self):
-        """Find the soonest upcoming dose across all meds."""
         now = datetime.now()
-        today_name = now.strftime("%a")  # Mon, Tue, ...
+        today_name = now.strftime("%a")
         best_time = None
-        count = 0
+        best_name = ""
+        total = 0
         for key, med in self.meds.items():
-            if today_name in med.get("schedule_days", []):
+            total += med.get("pills_left", 0)
+            sched = med.get("schedule_time", "8:00 AM")
+            days = med.get("schedule_days", ALL_DAYS)
+            if today_name in days:
                 try:
-                    t = datetime.strptime(med["schedule_time"], "%I:%M %p")
-                    dose_dt = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
-                    if dose_dt > now:
-                        if best_time is None or dose_dt < best_time:
-                            best_time = dose_dt
-                            count = 1
-                        elif dose_dt == best_time:
-                            count += 1
+                    t = datetime.strptime(sched, "%I:%M %p").replace(
+                        year=now.year, month=now.month, day=now.day)
+                    if t > now:
+                        if best_time is None or t < best_time:
+                            best_time = t
+                            best_name = med["name"]
                 except Exception:
                     pass
         if best_time:
             try:
-                tstr = best_time.strftime("%-I:%M %p")
+                display = best_time.strftime("%-I:%M %p")
             except ValueError:
-                tstr = best_time.strftime("%I:%M %p").lstrip("0")
-            return tstr, f"{count} Pill{'s' if count != 1 else ''}"
-        return "No doses today", ""
+                display = best_time.strftime("%I:%M %p").lstrip("0")
+        else:
+            display = "No more today"
+        return display, best_name, total
 
-    @staticmethod
-    def _draw_wifi(canvas, color):
-        cx, cy = 18, 26
-        for i, r in enumerate([22, 16, 10]):
-            canvas.create_arc(
-                cx - r, cy - r, cx + r, cy + r,
-                start=45, extent=90, style="arc",
-                outline=color, width=2
-            )
-        canvas.create_oval(cx - 2, cy - 2, cx + 2, cy + 2, fill=color, outline=color)
-
-    # ===================================================================
-    # STORAGE MODE
-    # ===================================================================
+    # ══════════════════════════════════════════════════════════════════════
+    #  STORAGE MODE
+    # ══════════════════════════════════════════════════════════════════════
     def _build_storage(self):
-        if hasattr(self, "storage_frame"):
+        if hasattr(self, 'storage_frame'):
             self.storage_frame.destroy()
-        t = self.theme
-        self.storage_frame = tk.Frame(self.main_frame, bg=t["bg"])
 
-        # Left panel - pill list (wider for breathing room)
-        left = tk.Frame(self.storage_frame, bg=t["bg"], width=240)
-        left.place(x=0, y=0, width=240, height=480)
-        left.pack_propagate(False)
+        self.storage_frame = tk.Frame(self.main_frame,
+                                      bg=self.theme["bg"],
+                                      width=SCREEN_W, height=SCREEN_H)
 
-        tk.Label(left, text="MEDICATIONS", font=self.font_label,
-                 bg=t["bg"], fg=t["muted"]).pack(anchor="w", padx=24, pady=(20, 12))
+        # Left panel — pill list
+        self.storage_left = tk.Frame(self.storage_frame,
+                                     bg=self.theme["bg"],
+                                     width=280, height=SCREEN_H)
+        self.storage_left.place(x=0, y=0, width=280, height=SCREEN_H)
+        self.storage_left.pack_propagate(False)
 
-        self._pill_rows = {}
-        self._pill_row_canvases = {}
-        for key in ["blue", "red", "green", "yellow"]:
-            med = self.meds[key]
+        title = tk.Label(self.storage_left, text="STORAGE",
+                         font=self.font_label,
+                         bg=self.theme["bg"],
+                         fg=self.theme["muted"])
+        title.pack(anchor="w", padx=MARGIN_LEFT, pady=(30, 20))
 
-            # Use a canvas-based row for the left accent bar
-            row_frame = tk.Frame(left, bg=t["bg"], cursor="hand2")
-            row_frame.pack(fill="x", padx=12, pady=2)
+        self.pill_buttons = {}
+        for pill_key in ["blue", "red", "green", "yellow"]:
+            med = self.meds[pill_key]
+            row = tk.Frame(self.storage_left, bg=self.theme["bg"])
+            row.pack(fill="x", padx=(MARGIN_LEFT, 10), pady=6)
 
-            # Accent dot (slightly larger)
-            dot_c = tk.Canvas(row_frame, width=16, height=16, bg=t["bg"], highlightthickness=0)
-            dot_c.pack(side="left", padx=(10, 8), pady=14)
-            dot_c.create_oval(2, 2, 14, 14, fill=med["accent"], outline="")
+            dot_canvas = tk.Canvas(row, width=16, height=16,
+                                   bg=self.theme["bg"],
+                                   highlightthickness=0)
+            dot_canvas.pack(side="left", padx=(0, 10))
+            dot_canvas.create_oval(2, 2, 14, 14,
+                                   fill=med["accent"], outline="")
 
-            lbl = tk.Label(
-                row_frame, text=f"Pill {med['name']}", font=self.font_md,
-                bg=t["bg"], fg=t["fg"], anchor="w"
-            )
-            lbl.pack(side="left", fill="x", expand=True, pady=14)
+            btn = tk.Button(row, text=med["name"],
+                            font=self.font_small_bold,
+                            bg=self.theme["bg"],
+                            fg=self.theme["fg"],
+                            activebackground=self.theme["btn_active"],
+                            activeforeground=self.theme["fg"],
+                            bd=0, anchor="w",
+                            command=lambda k=pill_key: self._select_pill(k))
+            btn.pack(side="left", fill="x", expand=True)
+            self.pill_buttons[pill_key] = btn
 
-            self._pill_rows[key] = (row_frame, lbl, dot_c)
-            for widget in (row_frame, lbl, dot_c):
-                widget.bind("<Button-1>", lambda e, k=key: self._select_pill(k))
-
-        # Right panel
-        self._storage_right = tk.Frame(self.storage_frame, bg=t["bg"])
-        self._storage_right.place(x=240, y=0, width=560, height=480)
+        # Right panel — detail
+        self.storage_right = tk.Frame(self.storage_frame,
+                                      bg=self.theme["card_bg"],
+                                      width=520, height=SCREEN_H)
+        self.storage_right.place(x=280, y=0, width=520, height=SCREEN_H)
+        self.storage_right.pack_propagate(False)
 
         self._build_storage_detail()
 
-    def _select_pill(self, key):
-        self.selected_pill = key
-        self._update_storage()
-
     def _build_storage_detail(self):
-        """Build the right-side detail view for the selected pill."""
-        for w in self._storage_right.winfo_children():
+        for w in self.storage_right.winfo_children():
             w.destroy()
 
-        t = self.theme
         med = self.meds[self.selected_pill]
-        parent = self._storage_right
+        pad_x = 30
 
-        # Internal padding from left edge of right panel: 40px
-        px = 40
+        # Pill name
+        name_lbl = tk.Label(self.storage_right, text=med["name"],
+                            font=self.font_name,
+                            bg=self.theme["card_bg"],
+                            fg=med["accent"])
+        name_lbl.pack(anchor="w", padx=pad_x, pady=(28, 2))
 
-        # Pill visual indicator (larger colored rounded rect)
-        pill_c = tk.Canvas(parent, width=140, height=70, bg=t["bg"], highlightthickness=0)
-        pill_c.place(x=px, y=20)
-        self._canvas_rounded_rect(pill_c, 4, 4, 136, 66, 24,
-                                  fill=med["accent"], outline="")
-        pill_c.create_text(70, 35, text=med["name"], fill="#FFFFFF",
-                           font=self.font_bold_md)
+        # Pill count
+        count_lbl = tk.Label(self.storage_right,
+                             text=f"{med['pills_left']} pills remaining",
+                             font=self.font_body,
+                             bg=self.theme["card_bg"],
+                             fg=self.theme["muted"])
+        count_lbl.pack(anchor="w", padx=pad_x)
 
-        # Pills left — vertically centered with pill visual
-        self._storage_pills_left_label = tk.Label(
-            parent, text=f"{med['pills_left']} Pills Left",
-            font=self.font_bold_lg, bg=t["bg"], fg=t["fg"]
-        )
-        self._storage_pills_left_label.place(x=px + 160, y=38)
+        # Schedule time picker
+        sched_label = tk.Label(self.storage_right, text="SCHEDULE",
+                               font=self.font_label,
+                               bg=self.theme["card_bg"],
+                               fg=self.theme["muted"])
+        sched_label.pack(anchor="w", padx=pad_x, pady=(18, 6))
 
-        # ---- Schedule time ----
-        tk.Label(parent, text="SCHEDULE", font=self.font_label,
-                 bg=t["bg"], fg=t["muted"]).place(x=px, y=120)
-
-        time_frame = tk.Frame(parent, bg=t["bg"])
-        time_frame.place(x=px, y=148)
+        time_frame = tk.Frame(self.storage_right, bg=self.theme["card_bg"])
+        time_frame.pack(anchor="w", padx=pad_x)
 
         # Parse current schedule time
-        try:
-            st = datetime.strptime(med["schedule_time"], "%I:%M %p")
-            self._sch_hour = st.hour % 12 or 12
-            self._sch_minute = st.minute
-            self._sch_ampm = "AM" if st.hour < 12 else "PM"
-        except Exception:
-            self._sch_hour = 8
-            self._sch_minute = 0
-            self._sch_ampm = "AM"
+        parts = med["schedule_time"].split()
+        time_parts = parts[0].split(":")
+        self._sched_hour = int(time_parts[0])
+        self._sched_min = int(time_parts[1])
+        self._sched_ampm = parts[1] if len(parts) > 1 else "AM"
 
-        # Hour control
-        h_frame = tk.Frame(time_frame, bg=t["bg"])
-        h_frame.pack(side="left", padx=(0, 4))
+        # Hour
+        tk.Button(time_frame, text="▲", font=self.font_small,
+                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
+                  activebackground=self.theme["btn_active"], bd=0,
+                  width=3,
+                  command=lambda: self._adjust_schedule("hour", 1)
+                  ).grid(row=0, column=0, padx=2)
+        self.hour_label = tk.Label(time_frame,
+                                   text=str(self._sched_hour),
+                                   font=self.font_body_bold,
+                                   bg=self.theme["card_bg"],
+                                   fg=self.theme["fg"], width=3)
+        self.hour_label.grid(row=1, column=0, padx=2)
+        tk.Button(time_frame, text="▼", font=self.font_small,
+                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
+                  activebackground=self.theme["btn_active"], bd=0,
+                  width=3,
+                  command=lambda: self._adjust_schedule("hour", -1)
+                  ).grid(row=2, column=0, padx=2)
 
-        h_up = tk.Label(h_frame, text="▲", font=self.font_sm,
-                        bg=t["btn_bg"], fg=t["fg"], width=4, pady=6)
-        h_up.pack()
-        h_up.bind("<Button-1>", lambda e: self._adjust_schedule("hour", 1))
+        tk.Label(time_frame, text=":", font=self.font_body_bold,
+                 bg=self.theme["card_bg"],
+                 fg=self.theme["fg"]).grid(row=1, column=1)
 
-        self._sch_hour_label = tk.Label(
-            h_frame, text=f"{self._sch_hour:d}", font=self.font_bold_lg,
-            bg=t["bg"], fg=t["fg"], width=4
-        )
-        self._sch_hour_label.pack()
+        # Minute
+        tk.Button(time_frame, text="▲", font=self.font_small,
+                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
+                  activebackground=self.theme["btn_active"], bd=0,
+                  width=3,
+                  command=lambda: self._adjust_schedule("min", 1)
+                  ).grid(row=0, column=2, padx=2)
+        self.min_label = tk.Label(time_frame,
+                                  text=f"{self._sched_min:02d}",
+                                  font=self.font_body_bold,
+                                  bg=self.theme["card_bg"],
+                                  fg=self.theme["fg"], width=3)
+        self.min_label.grid(row=1, column=2, padx=2)
+        tk.Button(time_frame, text="▼", font=self.font_small,
+                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
+                  activebackground=self.theme["btn_active"], bd=0,
+                  width=3,
+                  command=lambda: self._adjust_schedule("min", -1)
+                  ).grid(row=2, column=2, padx=2)
 
-        h_down = tk.Label(h_frame, text="▼", font=self.font_sm,
-                          bg=t["btn_bg"], fg=t["fg"], width=4, pady=6)
-        h_down.pack()
-        h_down.bind("<Button-1>", lambda e: self._adjust_schedule("hour", -1))
+        # AM/PM
+        tk.Button(time_frame, text="▲", font=self.font_small,
+                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
+                  activebackground=self.theme["btn_active"], bd=0,
+                  width=3,
+                  command=lambda: self._adjust_schedule("ampm", 1)
+                  ).grid(row=0, column=3, padx=(10, 2))
+        self.ampm_label = tk.Label(time_frame,
+                                   text=self._sched_ampm,
+                                   font=self.font_body_bold,
+                                   bg=self.theme["card_bg"],
+                                   fg=self.theme["fg"], width=3)
+        self.ampm_label.grid(row=1, column=3, padx=(10, 2))
+        tk.Button(time_frame, text="▼", font=self.font_small,
+                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
+                  activebackground=self.theme["btn_active"], bd=0,
+                  width=3,
+                  command=lambda: self._adjust_schedule("ampm", -1)
+                  ).grid(row=2, column=3, padx=(10, 2))
 
-        tk.Label(time_frame, text=":", font=self.font_bold_lg,
-                 bg=t["bg"], fg=t["fg"]).pack(side="left")
+        # Day-of-week selector
+        day_label = tk.Label(self.storage_right, text="DAYS",
+                             font=self.font_label,
+                             bg=self.theme["card_bg"],
+                             fg=self.theme["muted"])
+        day_label.pack(anchor="w", padx=pad_x, pady=(14, 6))
 
-        # Minute control
-        m_frame = tk.Frame(time_frame, bg=t["bg"])
-        m_frame.pack(side="left", padx=(4, 8))
+        day_frame = tk.Frame(self.storage_right, bg=self.theme["card_bg"])
+        day_frame.pack(anchor="w", padx=pad_x)
 
-        m_up = tk.Label(m_frame, text="▲", font=self.font_sm,
-                        bg=t["btn_bg"], fg=t["fg"], width=4, pady=6)
-        m_up.pack()
-        m_up.bind("<Button-1>", lambda e: self._adjust_schedule("minute", 1))
-
-        self._sch_min_label = tk.Label(
-            m_frame, text=f"{self._sch_minute:02d}", font=self.font_bold_lg,
-            bg=t["bg"], fg=t["fg"], width=4
-        )
-        self._sch_min_label.pack()
-
-        m_down = tk.Label(m_frame, text="▼", font=self.font_sm,
-                          bg=t["btn_bg"], fg=t["fg"], width=4, pady=6)
-        m_down.pack()
-        m_down.bind("<Button-1>", lambda e: self._adjust_schedule("minute", -1))
-
-        # AM/PM toggle
-        self._sch_ampm_label = tk.Label(
-            time_frame, text=self._sch_ampm, font=self.font_bold_md,
-            bg=t["btn_bg"], fg=t["fg"], padx=12, pady=8
-        )
-        self._sch_ampm_label.pack(side="left", padx=(8, 0))
-        self._sch_ampm_label.bind("<Button-1>", lambda e: self._adjust_schedule("ampm", 0))
-
-        # ---- Day of week selector ----
-        tk.Label(parent, text="DAYS", font=self.font_label,
-                 bg=t["bg"], fg=t["muted"]).place(x=px, y=268)
-
-        days_frame = tk.Frame(parent, bg=t["bg"])
-        days_frame.place(x=px, y=294)
-
-        self._day_buttons = {}
-        for day in ALL_DAYS:
-            active = day in med.get("schedule_days", [])
-            bg_col = med["accent"] if active else t["btn_bg"]
-            fg_col = "#FFFFFF" if active else t["muted"]
-            btn = tk.Label(
-                days_frame, text=day[:2], font=self.font_bold_sm,
-                bg=bg_col, fg=fg_col, width=4, pady=8
-            )
+        self.day_buttons = {}
+        for d in ALL_DAYS:
+            active = d in med.get("schedule_days", [])
+            bg = med["accent"] if active else self.theme["btn_bg"]
+            fg = "#FFFFFF" if active else self.theme["fg"]
+            btn = tk.Button(day_frame, text=d[:2], font=self.font_label,
+                            bg=bg, fg=fg,
+                            activebackground=self.theme["btn_active"],
+                            bd=0, width=3, padx=2, pady=4,
+                            command=lambda dd=d: self._toggle_day(dd))
             btn.pack(side="left", padx=2)
-            btn.bind("<Button-1>", lambda e, d=day: self._toggle_day(d))
-            self._day_buttons[day] = btn
+            self.day_buttons[d] = btn
 
-        # ---- Instructions ----
-        tk.Label(parent, text="INSTRUCTIONS", font=self.font_label,
-                 bg=t["bg"], fg=t["muted"]).place(x=px, y=360)
+        # Instructions
+        inst_lbl = tk.Label(self.storage_right,
+                            text=med.get("take_with", ""),
+                            font=self.font_small,
+                            bg=self.theme["card_bg"],
+                            fg=self.theme["fg"])
+        inst_lbl.pack(anchor="w", padx=pad_x, pady=(18, 2))
 
-        info_text = f"Take with: {med['take_with']}"
-        tk.Label(
-            parent, text=info_text, font=self.font_sm,
-            bg=t["bg"], fg=t["fg"], wraplength=480, justify="left", anchor="nw"
-        ).place(x=px, y=386)
+        # Safety
+        safety_lbl = tk.Label(self.storage_right,
+                              text=med.get("safety", ""),
+                              font=self.font_small,
+                              bg=self.theme["card_bg"],
+                              fg=self.theme["muted"])
+        safety_lbl.pack(anchor="w", padx=pad_x, pady=(2, 10))
 
-        safety_label = tk.Label(
-            parent, text=med["safety"], font=self.font_xs,
-            bg=t["bg"], fg=t["muted"], wraplength=480, justify="left", anchor="nw"
-        )
-        safety_label.place(x=px, y=420)
+    def _select_pill(self, key):
+        self.selected_pill = key
+        self._build_storage_detail()
+        self._update_storage()
+
+    def _update_storage(self):
+        for key, btn in self.pill_buttons.items():
+            if key == self.selected_pill:
+                btn.configure(bg=self.theme["btn_bg"])
+            else:
+                btn.configure(bg=self.theme["bg"])
 
     def _adjust_schedule(self, field, delta):
         if field == "hour":
-            self._sch_hour = ((self._sch_hour - 1 + delta) % 12) + 1
-            self._sch_hour_label.configure(text=f"{self._sch_hour:d}")
-        elif field == "minute":
-            self._sch_minute = (self._sch_minute + delta * 5) % 60
-            self._sch_min_label.configure(text=f"{self._sch_minute:02d}")
+            self._sched_hour += delta
+            if self._sched_hour > 12:
+                self._sched_hour = 1
+            elif self._sched_hour < 1:
+                self._sched_hour = 12
+            self.hour_label.configure(text=str(self._sched_hour))
+        elif field == "min":
+            self._sched_min += delta * 5
+            if self._sched_min >= 60:
+                self._sched_min = 0
+            elif self._sched_min < 0:
+                self._sched_min = 55
+            self.min_label.configure(text=f"{self._sched_min:02d}")
         elif field == "ampm":
-            self._sch_ampm = "PM" if self._sch_ampm == "AM" else "AM"
-            self._sch_ampm_label.configure(text=self._sch_ampm)
+            self._sched_ampm = "PM" if self._sched_ampm == "AM" else "AM"
+            self.ampm_label.configure(text=self._sched_ampm)
 
-        # Save
-        time_str = f"{self._sch_hour}:{self._sch_minute:02d} {self._sch_ampm}"
-        self.meds[self.selected_pill]["schedule_time"] = time_str
+        new_time = f"{self._sched_hour}:{self._sched_min:02d} {self._sched_ampm}"
+        self.meds[self.selected_pill]["schedule_time"] = new_time
         self._save_config()
 
     def _toggle_day(self, day):
-        med = self.meds[self.selected_pill]
-        days = med.get("schedule_days", [])
+        days = self.meds[self.selected_pill].get("schedule_days", [])
         if day in days:
             days.remove(day)
         else:
             days.append(day)
-        med["schedule_days"] = days
+        self.meds[self.selected_pill]["schedule_days"] = days
         self._save_config()
 
-        # Update button appearance
-        t = self.theme
-        active = day in days
-        bg_col = med["accent"] if active else t["btn_bg"]
-        fg_col = "#FFFFFF" if active else t["muted"]
-        self._day_buttons[day].configure(bg=bg_col, fg=fg_col)
-
-    def _update_storage(self):
-        t = self.theme
         med = self.meds[self.selected_pill]
-        # Highlight selected row with card_bg and a left accent bar
-        for key, (row, lbl, dot_c) in self._pill_rows.items():
-            if key == self.selected_pill:
-                row.configure(bg=t["card_bg"])
-                lbl.configure(bg=t["card_bg"])
-                dot_c.configure(bg=t["card_bg"])
-            else:
-                row.configure(bg=t["bg"])
-                lbl.configure(bg=t["bg"])
-                dot_c.configure(bg=t["bg"])
+        for d, btn in self.day_buttons.items():
+            active = d in days
+            bg = med["accent"] if active else self.theme["btn_bg"]
+            fg = "#FFFFFF" if active else self.theme["fg"]
+            btn.configure(bg=bg, fg=fg)
 
-        self._build_storage_detail()
-
-    # ===================================================================
-    # SETTINGS MODE
-    # ===================================================================
+    # ══════════════════════════════════════════════════════════════════════
+    #  SETTINGS MODE
+    # ══════════════════════════════════════════════════════════════════════
     def _build_settings(self):
-        if hasattr(self, "settings_frame"):
+        if hasattr(self, 'settings_frame'):
             self.settings_frame.destroy()
-        t = self.theme
-        self.settings_frame = tk.Frame(self.main_frame, bg=t["bg"])
 
-        # Big bold page title
-        tk.Label(
-            self.settings_frame, text="Settings", font=self.font_name,
-            bg=t["bg"], fg=t["fg"]
-        ).place(x=MARGIN_LEFT, y=40)
+        self.settings_frame = tk.Frame(self.main_frame,
+                                       bg=self.theme["bg"],
+                                       width=SCREEN_W, height=SCREEN_H)
 
-        # Day/Night toggle row
-        row1 = tk.Frame(self.settings_frame, bg=t["bg"])
-        row1.place(x=MARGIN_LEFT, y=140, width=696, height=60)
+        title = tk.Label(self.settings_frame, text="SETTINGS",
+                         font=self.font_label,
+                         bg=self.theme["bg"],
+                         fg=self.theme["muted"])
+        title.place(x=MARGIN_LEFT, y=30)
 
-        tk.Label(row1, text="Day / Night Mode", font=self.font_lg,
-                 bg=t["bg"], fg=t["fg"]).place(x=0, rely=0.5, anchor="w")
+        # Night mode toggle
+        night_lbl = tk.Label(self.settings_frame, text="Day / Night Mode",
+                             font=self.font_body,
+                             bg=self.theme["bg"],
+                             fg=self.theme["fg"])
+        night_lbl.place(x=MARGIN_LEFT, y=80)
 
-        self._night_toggle_canvas = tk.Canvas(
-            row1, width=60, height=32, bg=t["bg"], highlightthickness=0
-        )
-        self._night_toggle_canvas.place(x=640, rely=0.5, anchor="w")
-        self._draw_toggle(self._night_toggle_canvas, self.settings["night_mode"])
-        self._night_toggle_canvas.bind("<Button-1>", self._toggle_night)
+        self.night_toggle = tk.Canvas(self.settings_frame,
+                                      width=60, height=30,
+                                      bg=self.theme["bg"],
+                                      highlightthickness=0)
+        self.night_toggle.place(x=400, y=80)
+        self._draw_toggle(self.night_toggle,
+                          self.settings.get("night_mode", False))
+        self.night_toggle.bind("<Button-1>", self._toggle_night)
 
-        # Divider
-        tk.Frame(self.settings_frame, bg=t["muted"], height=1).place(
-            x=MARGIN_LEFT, y=208, width=696)
+        # Alarm sound toggle
+        alarm_lbl = tk.Label(self.settings_frame, text="Alarm Sound",
+                             font=self.font_body,
+                             bg=self.theme["bg"],
+                             fg=self.theme["fg"])
+        alarm_lbl.place(x=MARGIN_LEFT, y=130)
 
-        # Alarm toggle row
-        row2 = tk.Frame(self.settings_frame, bg=t["bg"])
-        row2.place(x=MARGIN_LEFT, y=220, width=696, height=60)
+        self.alarm_toggle = tk.Canvas(self.settings_frame,
+                                      width=60, height=30,
+                                      bg=self.theme["bg"],
+                                      highlightthickness=0)
+        self.alarm_toggle.place(x=400, y=130)
+        self._draw_toggle(self.alarm_toggle,
+                          self.settings.get("alarm_sound", True))
+        self.alarm_toggle.bind("<Button-1>", self._toggle_alarm)
 
-        tk.Label(row2, text="Alarm Sound", font=self.font_lg,
-                 bg=t["bg"], fg=t["fg"]).place(x=0, rely=0.5, anchor="w")
+        # Update section
+        update_lbl = tk.Label(self.settings_frame,
+                              text="Check for Updates",
+                              font=self.font_body,
+                              bg=self.theme["bg"],
+                              fg=self.theme["fg"])
+        update_lbl.place(x=MARGIN_LEFT, y=200)
 
-        self._alarm_toggle_canvas = tk.Canvas(
-            row2, width=60, height=32, bg=t["bg"], highlightthickness=0
-        )
-        self._alarm_toggle_canvas.place(x=640, rely=0.5, anchor="w")
-        self._draw_toggle(self._alarm_toggle_canvas, self.settings["alarm_sound"])
-        self._alarm_toggle_canvas.bind("<Button-1>", self._toggle_alarm)
+        self.update_btn = tk.Button(self.settings_frame, text="UPDATE",
+                                    font=self.font_btn,
+                                    bg="#4A90D9", fg="#FFFFFF",
+                                    activebackground="#3A7BC8",
+                                    activeforeground="#FFFFFF",
+                                    bd=0, padx=20, pady=6,
+                                    command=self._on_update_pressed)
+        self.update_btn.place(x=400, y=196)
 
-        # Divider
-        tk.Frame(self.settings_frame, bg=t["muted"], height=1).place(
-            x=MARGIN_LEFT, y=288, width=696)
+        self.update_status = tk.Label(self.settings_frame, text="",
+                                      font=self.font_small,
+                                      bg=self.theme["bg"],
+                                      fg=self.theme["muted"])
+        self.update_status.place(x=MARGIN_LEFT, y=250)
 
-        # Update button row
-        row3 = tk.Frame(self.settings_frame, bg=t["bg"])
-        row3.place(x=MARGIN_LEFT, y=300, width=696, height=60)
-
-        tk.Label(row3, text="Check for Updates", font=self.font_lg,
-                 bg=t["bg"], fg=t["fg"]).place(x=0, rely=0.5, anchor="w")
-
-        self._update_btn = tk.Label(
-            row3, text="UPDATE", font=self.font_label,
-            bg="#3478F6", fg="#FFFFFF", padx=16, pady=6,
-            cursor="hand2",
-        )
-        self._update_btn.place(x=610, rely=0.5, anchor="w")
-        self._update_btn.bind("<Button-1>", self._on_update_pressed)
-
-        self._update_status = tk.Label(
-            self.settings_frame, text="", font=self.font_xs,
-            bg=t["bg"], fg=t["muted"]
-        )
-        self._update_status.place(x=MARGIN_LEFT, y=368)
-
-    def _draw_toggle(self, canvas, on):
+    def _draw_toggle(self, canvas, is_on):
         canvas.delete("all")
-        t = self.theme
-        canvas.configure(bg=t["bg"])
-        if on:
-            # Track
-            self._canvas_rounded_rect(canvas, 0, 2, 58, 30, 14, fill="#3478F6", outline="")
-            # Knob
-            canvas.create_oval(30, 4, 56, 28, fill="#FFFFFF", outline="")
+        if is_on:
+            self._canvas_rounded_rect(canvas, 0, 0, 60, 30, 15,
+                                      fill="#4A90D9", outline="")
+            canvas.create_oval(32, 2, 58, 28, fill="#FFFFFF", outline="")
         else:
-            self._canvas_rounded_rect(canvas, 0, 2, 58, 30, 14, fill=t["muted"], outline="")
-            canvas.create_oval(2, 4, 28, 28, fill="#FFFFFF", outline="")
+            self._canvas_rounded_rect(canvas, 0, 0, 60, 30, 15,
+                                      fill=self.theme["btn_bg"], outline="")
+            canvas.create_oval(2, 2, 28, 28, fill="#FFFFFF", outline="")
 
     def _toggle_night(self, event=None):
-        self.settings["night_mode"] = not self.settings["night_mode"]
-        if self.settings["night_mode"]:
-            self.theme = dict(DARK_THEME)
-        else:
-            self.theme = dict(LIGHT_THEME)
+        self.settings["night_mode"] = not self.settings.get("night_mode",
+                                                            False)
         self._save_config()
         self._apply_theme()
 
     def _toggle_alarm(self, event=None):
-        self.settings["alarm_sound"] = not self.settings["alarm_sound"]
-        self._draw_toggle(self._alarm_toggle_canvas, self.settings["alarm_sound"])
+        self.settings["alarm_sound"] = not self.settings.get("alarm_sound",
+                                                             True)
         self._save_config()
+        self._draw_toggle(self.alarm_toggle,
+                          self.settings["alarm_sound"])
 
-    def _on_update_pressed(self, event=None):
-        self._update_btn.configure(bg="#555555")
-        self._update_status.configure(text="Checking for updates...")
-        self.root.update_idletasks()
-        threading.Thread(target=self._do_update_check, daemon=True).start()
+    # ── Update System ──────────────────────────────────────────────────────
+    def _on_update_pressed(self):
+        self.update_status.configure(text="Checking...")
+        self.update_btn.configure(state="disabled")
+        t = threading.Thread(target=self._do_update_check, daemon=True)
+        t.start()
 
     def _do_update_check(self):
-        import hashlib
         try:
             import urllib.request
-            app_path = os.path.join(APP_DIR, "dose_app.py")
-            if not os.path.isfile(app_path):
-                app_path = os.path.abspath(__file__)
+            import hashlib
 
-            with open(app_path, "rb") as f:
-                local_hash = hashlib.md5(f.read()).hexdigest()
-
-            req = urllib.request.Request(RAW_URL + "/dose_app.py")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                remote_data = resp.read()
+            # Check remote dose_app.py
+            url = RAW_URL + "/dose_app.py"
+            req = urllib.request.Request(url)
+            resp = urllib.request.urlopen(req, timeout=15)
+            remote_data = resp.read()
             remote_hash = hashlib.md5(remote_data).hexdigest()
 
-            if local_hash == remote_hash:
-                self.root.after(0, self._update_result, "already_current", None)
-                return
+            # Local hash
+            local_path = os.path.abspath(__file__)
+            with open(local_path, "rb") as f:
+                local_hash = hashlib.md5(f.read()).hexdigest()
 
-            self.root.after(0, self._update_result, "available", remote_data)
+            if remote_hash == local_hash:
+                self.root.after(0, self._update_result,
+                                "You're on the latest version.")
+            else:
+                self.root.after(0, self._apply_update, remote_data)
+        except Exception as e:
+            self.root.after(0, self._update_result,
+                            f"No internet or error: {e}")
+
+    def _update_result(self, msg):
+        try:
+            self.update_status.configure(text=msg)
+            self.update_btn.configure(state="normal")
         except Exception:
-            self.root.after(0, self._update_result, "error", None)
-
-    def _update_result(self, status, remote_data):
-        self._update_btn.configure(bg="#3478F6")
-        if status == "already_current":
-            self._update_status.configure(text="You're on the latest version.", fg="#5B9BFF")
-        elif status == "error":
-            self._update_status.configure(text="No internet — try again later.", fg="#FF6B6B")
-        elif status == "available":
-            self._update_status.configure(text="Downloading update...", fg="#5B9BFF")
-            self.root.update_idletasks()
-            threading.Thread(
-                target=self._apply_update, args=(remote_data,), daemon=True
-            ).start()
+            pass
 
     def _apply_update(self, remote_data):
-        import urllib.request
         try:
-            os.makedirs(APP_DIR, exist_ok=True)
-            with open(os.path.join(APP_DIR, "dose_app.py"), "wb") as f:
-                f.write(remote_data)
-            for extra in ("DOSE.sh", "dose_logo.png"):
+            self.update_status.configure(text="Downloading...")
+        except Exception:
+            pass
+
+        def do_download():
+            try:
+                import urllib.request
+
+                # Write dose_app.py
+                local_path = os.path.abspath(__file__)
+                with open(local_path, "wb") as f:
+                    f.write(remote_data)
+
+                # Try to fetch DOSE.sh
                 try:
-                    req = urllib.request.Request(RAW_URL + "/" + extra)
-                    with urllib.request.urlopen(req, timeout=10) as resp:
-                        with open(os.path.join(APP_DIR, extra), "wb") as f:
-                            f.write(resp.read())
+                    url_sh = RAW_URL + "/DOSE.sh"
+                    resp = urllib.request.urlopen(url_sh, timeout=15)
+                    sh_data = resp.read()
+                    sh_path = os.path.join(APP_DIR, "DOSE.sh")
+                    os.makedirs(APP_DIR, exist_ok=True)
+                    with open(sh_path, "wb") as f:
+                        f.write(sh_data)
+                    os.chmod(sh_path, 0o755)
                 except Exception:
                     pass
-            self.root.after(0, self._finish_update)
-        except Exception:
-            self.root.after(0, lambda: self._update_status.configure(
-                text="Update failed — try again.", fg="#FF6B6B"))
+
+                # Try to fetch dose_logo.png
+                try:
+                    url_logo = RAW_URL + "/dose_logo.png"
+                    resp = urllib.request.urlopen(url_logo, timeout=15)
+                    logo_data = resp.read()
+                    logo_path = os.path.join(APP_DIR, "dose_logo.png")
+                    with open(logo_path, "wb") as f:
+                        f.write(logo_data)
+                except Exception:
+                    pass
+
+                self.root.after(0, self._finish_update)
+            except Exception as e:
+                self.root.after(0, self._update_result,
+                                f"Update failed: {e}")
+
+        t = threading.Thread(target=do_download, daemon=True)
+        t.start()
 
     def _finish_update(self):
-        self._update_status.configure(text="Updated! Restarting...", fg="#5B9BFF")
-        self.root.update_idletasks()
-        self.root.after(500, self._restart_app)
+        try:
+            self.update_status.configure(text="Updated! Restarting...")
+        except Exception:
+            pass
+        self.root.after(2000, self._restart_app)
 
     def _restart_app(self):
-        self.camera_running = False
-        if self.camera:
-            try:
+        try:
+            if self.camera and self.camera_running:
+                self.camera_running = False
                 self.camera.stop()
-            except Exception:
-                pass
-        self.root.destroy()
-        os.execv(
-            sys.executable,
-            [sys.executable, os.path.join(APP_DIR, "dose_app.py")],
-        )
+                self.camera.close()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        try:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception:
+            sys.exit(0)
 
-    def _update_settings(self):
-        pass  # Already built fresh via _build_settings
-
-    # ===================================================================
-    # DISPENSING FLOW
-    # ===================================================================
+    # ══════════════════════════════════════════════════════════════════════
+    #  DISPENSING FLOW (Overlay)
+    # ══════════════════════════════════════════════════════════════════════
     def _build_overlay(self):
-        """Pre-build the overlay frame structure (redrawn per state)."""
         for w in self.overlay_frame.winfo_children():
             w.destroy()
+        self.overlay_frame.configure(bg=self.theme["bg"])
 
     def _start_dispense(self, pill_key):
-        if self.dispensing_active:
-            return
-        self.dispensing_active = True
-        self.dispense_pill_key = pill_key
+        self.dispense_pill = pill_key
+        self.dispense_state = 1
+        self.overlay_frame.place(x=0, y=0,
+                                 width=SCREEN_W, height=SCREEN_H)
+        self._raise_widget(self.overlay_frame)
+        self._raise_widget(self.d_btn_canvas)
         self._show_dispense_read()
 
     def _end_dispense(self):
-        self.dispensing_active = False
-        self.dispense_state = None
-        self.dispense_pill_key = None
-        if self.dispense_return_id:
-            self.root.after_cancel(self.dispense_return_id)
-            self.dispense_return_id = None
+        self.dispense_state = 0
+        self.dispense_pill = None
+        if self.hold_after_id:
+            self.root.after_cancel(self.hold_after_id)
+            self.hold_after_id = None
         self.overlay_frame.place_forget()
         self._show_mode(self.mode)
 
+    # ── Stage 1: READ ──────────────────────────────────────────────────────
     def _show_dispense_read(self):
-        """State 1: READ - show pill info with Yes/No."""
-        self.dispense_state = "READ"
-        t = self.theme
-        med = self.meds[self.dispense_pill_key]
-
         for w in self.overlay_frame.winfo_children():
             w.destroy()
-        self.overlay_frame.configure(bg=t["bg"])
-        self.overlay_frame.place(x=0, y=0, width=800, height=480)
-        self._raise_widget(self.overlay_frame)
-        self._raise_widget(self.d_btn_canvas)
 
-        # Pill name — centered, accent color
-        tk.Label(
-            self.overlay_frame, text=f"Pill {med['name']}", font=self.font_name,
-            bg=t["bg"], fg=med["accent"]
-        ).place(relx=0.5, y=60, anchor="n")
+        med = self.meds.get(self.dispense_pill, self.meds["blue"])
 
-        # Take with label
-        tk.Label(
-            self.overlay_frame, text="TAKE WITH", font=self.font_label,
-            bg=t["bg"], fg=t["muted"]
-        ).place(relx=0.5, y=120, anchor="n")
+        lbl_stage = tk.Label(self.overlay_frame, text="SCAN RESULT",
+                             font=self.font_label,
+                             bg=self.theme["bg"],
+                             fg=self.theme["muted"])
+        lbl_stage.place(x=MARGIN_LEFT, y=40)
 
-        # Take with instructions
-        tk.Label(
-            self.overlay_frame, text=med["take_with"], font=self.font_md,
-            bg=t["bg"], fg=t["fg"], wraplength=600, justify="center"
-        ).place(relx=0.5, y=148, anchor="n")
+        lbl_name = tk.Label(self.overlay_frame, text=med["name"],
+                            font=self.font_name,
+                            bg=self.theme["bg"],
+                            fg=med["accent"])
+        lbl_name.place(x=MARGIN_LEFT, y=72)
 
-        # Question
-        tk.Label(
-            self.overlay_frame, text="Would you like to take this medication?",
-            font=self.font_bold_md, bg=t["bg"], fg=t["fg"]
-        ).place(relx=0.5, y=240, anchor="n")
+        lbl_count = tk.Label(self.overlay_frame,
+                             text=f"{med['pills_left']} pills remaining",
+                             font=self.font_body,
+                             bg=self.theme["bg"],
+                             fg=self.theme["muted"])
+        lbl_count.place(x=MARGIN_LEFT, y=125)
 
-        # Yes button — wider (240px)
-        yes_c = tk.Canvas(self.overlay_frame, width=240, height=56,
-                          bg=t["bg"], highlightthickness=0)
-        yes_c.place(relx=0.5, y=300, anchor="n", x=-130)
-        self._canvas_rounded_rect(yes_c, 0, 0, 240, 56, 12, fill="#3478F6", outline="")
-        yes_c.create_text(120, 28, text="Yes", fill="#FFFFFF", font=self.font_bold_md)
-        yes_c.bind("<Button-1>", lambda e: self._show_dispense_hold())
+        lbl_take = tk.Label(self.overlay_frame,
+                            text=med.get("take_with", ""),
+                            font=self.font_small,
+                            bg=self.theme["bg"],
+                            fg=self.theme["fg"])
+        lbl_take.place(x=MARGIN_LEFT, y=170)
 
-        # No button — wider (240px)
-        no_c = tk.Canvas(self.overlay_frame, width=240, height=56,
-                         bg=t["bg"], highlightthickness=0)
-        no_c.place(relx=0.5, y=300, anchor="n", x=130)
-        self._canvas_rounded_rect(no_c, 0, 0, 240, 56, 12,
-                                  fill=t["btn_bg"], outline=t["muted"])
-        no_c.create_text(120, 28, text="No", fill=t["fg"], font=self.font_bold_md)
-        no_c.bind("<Button-1>", lambda e: self._end_dispense())
+        lbl_safety = tk.Label(self.overlay_frame,
+                              text=med.get("safety", ""),
+                              font=self.font_small,
+                              bg=self.theme["bg"],
+                              fg=self.theme["muted"])
+        lbl_safety.place(x=MARGIN_LEFT, y=200)
 
+        lbl_q = tk.Label(self.overlay_frame, text="Dispense this medication?",
+                         font=self.font_body_bold,
+                         bg=self.theme["bg"],
+                         fg=self.theme["fg"])
+        lbl_q.place(x=MARGIN_LEFT, y=280)
+
+        btn_yes = tk.Button(self.overlay_frame, text="Yes",
+                            font=self.font_btn_lg,
+                            bg="#4A90D9", fg="#FFFFFF",
+                            activebackground="#3A7BC8",
+                            activeforeground="#FFFFFF",
+                            bd=0, padx=40, pady=12,
+                            command=self._read_yes)
+        btn_yes.place(x=MARGIN_LEFT, y=340)
+
+        btn_no = tk.Button(self.overlay_frame, text="No",
+                           font=self.font_btn_lg,
+                           bg=self.theme["btn_bg"],
+                           fg=self.theme["fg"],
+                           activebackground=self.theme["btn_active"],
+                           activeforeground=self.theme["fg"],
+                           bd=0, padx=40, pady=12,
+                           command=self._end_dispense)
+        btn_no.place(x=220, y=340)
+
+    def _read_yes(self):
+        self.dispense_state = 2
+        self._show_dispense_hold()
+
+    # ── Stage 2: HOLD ─────────────────────────────────────────────────────
     def _show_dispense_hold(self):
-        """State 2: HOLD - hold to confirm with progress bar."""
-        self.dispense_state = "HOLD"
-        t = self.theme
-
         for w in self.overlay_frame.winfo_children():
             w.destroy()
-        self.overlay_frame.configure(bg=t["bg"])
-        self.overlay_frame.place(x=0, y=0, width=800, height=480)
-        self._raise_widget(self.overlay_frame)
+
+        med = self.meds.get(self.dispense_pill, self.meds["blue"])
+
+        lbl_inst = tk.Label(self.overlay_frame,
+                            text="PRESS AND HOLD TO DISPENSE",
+                            font=self.font_label,
+                            bg=self.theme["bg"],
+                            fg=self.theme["muted"])
+        lbl_inst.place(x=MARGIN_LEFT, y=80)
+
+        lbl_name = tk.Label(self.overlay_frame, text=med["name"],
+                            font=self.font_title,
+                            bg=self.theme["bg"],
+                            fg=med["accent"])
+        lbl_name.place(x=MARGIN_LEFT, y=120)
+
+        # Progress bar canvas
+        self.hold_canvas = tk.Canvas(self.overlay_frame,
+                                     width=SCREEN_W - 2 * MARGIN_LEFT,
+                                     height=40,
+                                     bg=self.theme["card_bg"],
+                                     highlightthickness=0)
+        self.hold_canvas.place(x=MARGIN_LEFT, y=200)
+
+        self.hold_progress_bar = self.hold_canvas.create_rectangle(
+            0, 0, 0, 40, fill=med["accent"], outline="")
+
+        self.hold_label = tk.Label(self.overlay_frame,
+                                   text="Hold for 3 seconds...",
+                                   font=self.font_body,
+                                   bg=self.theme["bg"],
+                                   fg=self.theme["fg"])
+        self.hold_label.place(x=MARGIN_LEFT, y=260)
+
+        # Hold area — large invisible frame for touch target
+        self.hold_area = tk.Frame(self.overlay_frame,
+                                  bg=self.theme["bg"],
+                                  width=SCREEN_W,
+                                  height=SCREEN_H)
+        self.hold_area.place(x=0, y=0, width=SCREEN_W, height=SCREEN_H)
+        self._raise_widget(self.hold_canvas)
+        self._raise_widget(lbl_inst)
+        self._raise_widget(lbl_name)
+        self._raise_widget(self.hold_label)
         self._raise_widget(self.d_btn_canvas)
 
-        tk.Label(
-            self.overlay_frame, text="Hold to confirm", font=self.font_name,
-            bg=t["bg"], fg=t["fg"]
-        ).place(relx=0.5, y=140, anchor="n")
+        # Bind press/release to overlay frame and all children
+        self._bind_hold_recursive(self.overlay_frame)
 
-        tk.Label(
-            self.overlay_frame, text="Keep pressing to proceed...", font=self.font_md,
-            bg=t["bg"], fg=t["muted"]
-        ).place(relx=0.5, y=200, anchor="n")
-
-        # Progress bar — wider (600px centered)
-        self._hold_bar_canvas = tk.Canvas(
-            self.overlay_frame, width=600, height=24,
-            bg=t["bg"], highlightthickness=0
-        )
-        self._hold_bar_canvas.place(relx=0.5, y=260, anchor="n")
-        # Track
-        self._canvas_rounded_rect(self._hold_bar_canvas, 0, 0, 600, 24, 12,
-                                  fill=t["btn_bg"], outline="")
-        # Fill (starts at 0)
-        self._hold_fill_id = self._canvas_rounded_rect(
-            self._hold_bar_canvas, 0, 0, 1, 24, 12,
-            fill="#3478F6", outline=""
-        )
-
-        # Touch area — bind to ALL widgets so tapping anywhere works
-        for widget in [self.overlay_frame] + list(self.overlay_frame.winfo_children()):
-            widget.bind("<ButtonPress-1>", self._hold_press)
-            widget.bind("<ButtonRelease-1>", self._hold_release)
-
-        self.hold_start = None
-        self.hold_timer_id = None
+    def _bind_hold_recursive(self, widget):
+        widget.bind("<ButtonPress-1>", self._hold_press)
+        widget.bind("<ButtonRelease-1>", self._hold_release)
+        for child in widget.winfo_children():
+            self._bind_hold_recursive(child)
 
     def _hold_press(self, event=None):
-        if self.dispense_state != "HOLD":
+        if self.dispense_state != 2:
             return
         self.hold_start = time.time()
         self._hold_update()
 
     def _hold_release(self, event=None):
-        if self.dispense_state != "HOLD":
+        if self.dispense_state != 2:
             return
-        # Cancel
-        self.hold_start = None
-        if self.hold_timer_id:
-            self.root.after_cancel(self.hold_timer_id)
-            self.hold_timer_id = None
-        # Reset bar
+        self.hold_start = 0
+        if self.hold_after_id:
+            self.root.after_cancel(self.hold_after_id)
+            self.hold_after_id = None
+        # Reset progress bar
         try:
-            self._hold_bar_canvas.delete(self._hold_fill_id)
-            self._hold_fill_id = self._canvas_rounded_rect(
-                self._hold_bar_canvas, 0, 0, 1, 24, 12,
-                fill="#3478F6", outline=""
-            )
+            self.hold_canvas.coords(self.hold_progress_bar, 0, 0, 0, 40)
+            self.hold_label.configure(text="Hold for 3 seconds...")
         except Exception:
             pass
 
     def _hold_update(self):
-        if self.hold_start is None or self.dispense_state != "HOLD":
+        if self.dispense_state != 2 or self.hold_start == 0:
             return
         elapsed = time.time() - self.hold_start
-        frac = min(elapsed / 3.0, 1.0)
-        width = max(2, int(600 * frac))
-
+        bar_w = SCREEN_W - 2 * MARGIN_LEFT
+        frac = min(elapsed / HOLD_TIME, 1.0)
         try:
-            self._hold_bar_canvas.delete(self._hold_fill_id)
-            self._hold_fill_id = self._canvas_rounded_rect(
-                self._hold_bar_canvas, 0, 0, width, 24, 12,
-                fill="#3478F6", outline=""
-            )
+            self.hold_canvas.coords(self.hold_progress_bar,
+                                    0, 0, int(bar_w * frac), 40)
+            remaining = max(0, HOLD_TIME - elapsed)
+            self.hold_label.configure(
+                text=f"Hold for {remaining:.1f} seconds...")
         except Exception:
             pass
 
-        if frac >= 1.0:
-            # Unbind to prevent accidental re-triggers
-            self.overlay_frame.unbind("<ButtonPress-1>")
-            self.overlay_frame.unbind("<ButtonRelease-1>")
-            self.hold_start = None
+        if elapsed >= HOLD_TIME:
+            self.hold_start = 0
+            self.dispense_state = 3
             self._show_dispense_confirm()
             return
 
-        self.hold_timer_id = self.root.after(50, self._hold_update)
+        self.hold_after_id = self.root.after(50, self._hold_update)
 
+    # ── Stage 3: CONFIRM ───────────────────────────────────────────────────
     def _show_dispense_confirm(self):
-        """State 3: CONFIRM - confirmed, press to dispense."""
-        self.dispense_state = "CONFIRM"
-        t = self.theme
-        med = self.meds[self.dispense_pill_key]
-
         for w in self.overlay_frame.winfo_children():
             w.destroy()
-        self.overlay_frame.configure(bg=t["bg"])
-        self.overlay_frame.place(x=0, y=0, width=800, height=480)
-        self._raise_widget(self.overlay_frame)
-        self._raise_widget(self.d_btn_canvas)
 
-        tk.Label(
-            self.overlay_frame, text="CONFIRMED", font=self.font_name,
-            bg=t["bg"], fg="#3478F6"
-        ).place(relx=0.5, y=140, anchor="n")
+        med = self.meds.get(self.dispense_pill, self.meds["blue"])
 
-        tk.Label(
-            self.overlay_frame, text="Press down to dispense", font=self.font_md,
-            bg=t["bg"], fg=t["muted"]
-        ).place(relx=0.5, y=200, anchor="n")
+        lbl_ready = tk.Label(self.overlay_frame, text="READY",
+                             font=self.font_label,
+                             bg=self.theme["bg"],
+                             fg=self.theme["muted"])
+        lbl_ready.place(x=MARGIN_LEFT, y=80)
 
-        # Dispense button
-        disp_c = tk.Canvas(self.overlay_frame, width=260, height=64,
-                           bg=t["bg"], highlightthickness=0)
-        disp_c.place(relx=0.5, y=270, anchor="n")
-        self._canvas_rounded_rect(disp_c, 0, 0, 260, 64, 14,
-                                  fill=med["accent"], outline="")
-        disp_c.create_text(130, 32, text="Dispense", fill="#FFFFFF",
-                           font=self.font_bold_lg)
-        disp_c.bind("<Button-1>", lambda e: self._do_dispense())
+        lbl_name = tk.Label(self.overlay_frame, text=med["name"],
+                            font=self.font_title,
+                            bg=self.theme["bg"],
+                            fg=med["accent"])
+        lbl_name.place(x=MARGIN_LEFT, y=120)
 
-    def _do_dispense(self):
-        """Actually dispense: decrement count, play sound, show state 4."""
-        med = self.meds[self.dispense_pill_key]
+        lbl_inst = tk.Label(self.overlay_frame,
+                            text="Press down to dispense",
+                            font=self.font_body,
+                            bg=self.theme["bg"],
+                            fg=self.theme["fg"])
+        lbl_inst.place(x=MARGIN_LEFT, y=200)
+
+        btn_dispense = tk.Button(self.overlay_frame, text="DISPENSE",
+                                 font=self.font_btn_lg,
+                                 bg=med["accent"], fg="#FFFFFF",
+                                 activebackground=med["accent"],
+                                 activeforeground="#FFFFFF",
+                                 bd=0, padx=60, pady=16,
+                                 command=self._confirm_dispense)
+        btn_dispense.place(x=MARGIN_LEFT, y=270)
+
+        btn_cancel = tk.Button(self.overlay_frame, text="Cancel",
+                               font=self.font_btn,
+                               bg=self.theme["btn_bg"],
+                               fg=self.theme["fg"],
+                               activebackground=self.theme["btn_active"],
+                               activeforeground=self.theme["fg"],
+                               bd=0, padx=30, pady=12,
+                               command=self._end_dispense)
+        btn_cancel.place(x=MARGIN_LEFT, y=350)
+
+    def _confirm_dispense(self):
+        med = self.meds.get(self.dispense_pill, self.meds["blue"])
         if med["pills_left"] > 0:
             med["pills_left"] -= 1
-        self._save_config()
-
-        # Play alarm sound if enabled
-        if self.settings.get("alarm_sound", True):
-            self._play_sound()
-
+            self._save_config()
+        self.dispense_state = 4
+        self._play_sound()
         self._show_dispense_done()
 
+    # ── Stage 4: DISPENSED ─────────────────────────────────────────────────
     def _show_dispense_done(self):
-        """State 4: DISPENSED - show confirmation, auto-return after 4s."""
-        self.dispense_state = "DISPENSED"
-        t = self.theme
-        med = self.meds[self.dispense_pill_key]
-
         for w in self.overlay_frame.winfo_children():
             w.destroy()
-        self.overlay_frame.configure(bg=t["bg"])
-        self.overlay_frame.place(x=0, y=0, width=800, height=480)
-        self._raise_widget(self.overlay_frame)
-        self._raise_widget(self.d_btn_canvas)
 
-        tk.Label(
-            self.overlay_frame, text=f"Dispensed: {med['name']}", font=self.font_name,
-            bg=t["bg"], fg=med["accent"]
-        ).place(relx=0.5, y=180, anchor="n")
+        med = self.meds.get(self.dispense_pill, self.meds["blue"])
 
-        # Bottom strip — full width with proper padding
-        strip = tk.Frame(self.overlay_frame, bg=t["card_bg"], height=48)
-        strip.place(x=0, y=432, width=800, height=48)
-        tk.Label(
-            strip, text="Please check before taking medication",
-            font=self.font_md, bg=t["card_bg"], fg=t["muted"]
-        ).place(relx=0.5, rely=0.5, anchor="center")
+        lbl_done = tk.Label(self.overlay_frame, text="DISPENSED",
+                            font=self.font_label,
+                            bg=self.theme["bg"],
+                            fg=self.theme["muted"])
+        lbl_done.place(x=MARGIN_LEFT, y=80)
 
-        # Auto-return
-        self.dispense_return_id = self.root.after(4000, self._end_dispense)
+        lbl_name = tk.Label(self.overlay_frame, text=med["name"],
+                            font=self.font_name,
+                            bg=self.theme["bg"],
+                            fg=med["accent"])
+        lbl_name.place(x=MARGIN_LEFT, y=120)
+
+        check_lbl = tk.Label(self.overlay_frame, text="✓",
+                             font=tkfont.Font(family="DejaVu Sans",
+                                              size=72),
+                             bg=self.theme["bg"],
+                             fg="#4AD97A")
+        check_lbl.place(x=SCREEN_W // 2 - 40, y=200)
+
+        lbl_count = tk.Label(self.overlay_frame,
+                             text=f"{med['pills_left']} pills remaining",
+                             font=self.font_body,
+                             bg=self.theme["bg"],
+                             fg=self.theme["muted"])
+        lbl_count.place(x=MARGIN_LEFT, y=380)
+
+        self.root.after(4000, self._end_dispense)
 
     def _play_sound(self):
         try:
-            subprocess.Popen(
-                ["aplay", "/usr/share/sounds/alsa/Front_Center.wav"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
+            subprocess.Popen(["aplay", "-q",
+                              "/usr/share/sounds/alsa/Front_Center.wav"],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
         except Exception:
             try:
                 self.root.bell()
             except Exception:
                 pass
 
-    # ===================================================================
-    # CAMERA / QR
-    # ===================================================================
+    # ══════════════════════════════════════════════════════════════════════
+    #  CAMERA
+    # ══════════════════════════════════════════════════════════════════════
     def _start_camera(self):
-        if not CAMERA_AVAILABLE:
-            return
         try:
             self.camera = Picamera2()
             config = self.camera.create_still_configuration(
-                main={"size": (320, 240)}
-            )
+                main={"size": (320, 240)})
             self.camera.configure(config)
             self.camera.start()
             self.camera_running = True
-            self.camera_thread = threading.Thread(target=self._camera_loop, daemon=True)
-            self.camera_thread.start()
+            t = threading.Thread(target=self._camera_loop, daemon=True)
+            t.start()
         except Exception:
+            self.camera = None
             self.camera_running = False
 
     def _camera_loop(self):
         while self.camera_running:
             try:
                 frame = self.camera.capture_array()
-                img = Image.fromarray(frame)
-                codes = pyzbar_decode(img)
-                for code in codes:
-                    data = code.data.decode("utf-8").strip().lower()
-                    if data in self.meds:
-                        self.root.after(0, self._start_dispense, data)
-                        time.sleep(3)
-                        break
+                if PIL_AVAILABLE:
+                    img = Image.fromarray(frame)
+                    results = pyzbar_decode(img)
+                    for r in results:
+                        data = r.data.decode("utf-8", errors="ignore").lower()
+                        if data in self.meds and self.dispense_state == 0:
+                            self.root.after(0, self._start_dispense, data)
+                            time.sleep(2)
+                            break
+                time.sleep(0.3)
             except Exception:
-                pass
-            time.sleep(0.5)
+                time.sleep(1)
 
-    # ===================================================================
-    # Run
-    # ===================================================================
+    # ══════════════════════════════════════════════════════════════════════
+    #  RUN
+    # ══════════════════════════════════════════════════════════════════════
     def run(self):
-        self.root.mainloop()
-        # Cleanup
-        self.camera_running = False
-        if self.camera:
+        try:
+            self.root.mainloop()
+        finally:
             try:
-                self.camera.stop()
+                if self.camera and self.camera_running:
+                    self.camera_running = False
+                    self.camera.stop()
+                    self.camera.close()
             except Exception:
                 pass
 
 
-# ===================================================================
-# Entry point
-# ===================================================================
+# ═══════════════════════════════════════════════════════════════════════════
+#  Entry point
+# ═══════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     try:
         app = DoseApp()
@@ -1310,9 +1341,8 @@ if __name__ == "__main__":
     except Exception as e:
         import traceback
         err = traceback.format_exc()
-        log_path = os.path.join(
-            os.path.expanduser("~"), "dose-home-station", "crash.log"
-        )
+        log_path = os.path.join(os.path.expanduser("~"),
+                                "dose-home-station", "crash.log")
         try:
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             with open(log_path, "w") as f:
