@@ -129,59 +129,6 @@ APP_DIR = os.path.expanduser("~/dose-home-station")
 RAW_URL = "https://raw.githubusercontent.com/relude117-star/doseconceptprototype/claude/quirky-brown-vkHwi"
 
 
-def _check_for_updates():
-    """Check GitHub for a newer version and offer to update via tkinter dialog."""
-    import hashlib
-    import tkinter.messagebox as tkmb
-    try:
-        import urllib.request
-        app_path = os.path.join(APP_DIR, "dose_app.py")
-        if not os.path.isfile(app_path):
-            app_path = os.path.abspath(__file__)
-
-        with open(app_path, "rb") as f:
-            local_hash = hashlib.md5(f.read()).hexdigest()
-
-        req = urllib.request.Request(RAW_URL + "/dose_app.py")
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            remote_data = resp.read()
-        remote_hash = hashlib.md5(remote_data).hexdigest()
-
-        if local_hash == remote_hash:
-            return
-
-        hidden = tk.Tk()
-        hidden.withdraw()
-        answer = tkmb.askyesno(
-            "DOSE Update",
-            "An update is available.\nWould you like to update now?",
-            parent=hidden,
-        )
-        hidden.destroy()
-
-        if not answer:
-            return
-
-        os.makedirs(APP_DIR, exist_ok=True)
-        with open(os.path.join(APP_DIR, "dose_app.py"), "wb") as f:
-            f.write(remote_data)
-
-        for extra in ("DOSE.sh", "dose_logo.png"):
-            try:
-                req2 = urllib.request.Request(RAW_URL + "/" + extra)
-                with urllib.request.urlopen(req2, timeout=8) as resp2:
-                    with open(os.path.join(APP_DIR, extra), "wb") as f2:
-                        f2.write(resp2.read())
-            except Exception:
-                pass
-
-        os.execv(
-            sys.executable,
-            [sys.executable, os.path.join(APP_DIR, "dose_app.py")],
-        )
-    except Exception:
-        pass
-
 
 # ---------------------------------------------------------------------------
 # Theme palettes
@@ -900,6 +847,31 @@ class DoseApp:
         self._draw_toggle(self._alarm_toggle_canvas, self.settings["alarm_sound"])
         self._alarm_toggle_canvas.bind("<Button-1>", self._toggle_alarm)
 
+        # Divider
+        tk.Frame(self.settings_frame, bg=t["muted"], height=1).place(
+            x=MARGIN_LEFT, y=288, width=696)
+
+        # Update button row
+        row3 = tk.Frame(self.settings_frame, bg=t["bg"])
+        row3.place(x=MARGIN_LEFT, y=300, width=696, height=60)
+
+        tk.Label(row3, text="Check for Updates", font=self.font_lg,
+                 bg=t["bg"], fg=t["fg"]).place(x=0, rely=0.5, anchor="w")
+
+        self._update_btn = tk.Label(
+            row3, text="UPDATE", font=self.font_label,
+            bg="#3478F6", fg="#FFFFFF", padx=16, pady=6,
+            cursor="hand2",
+        )
+        self._update_btn.place(x=610, rely=0.5, anchor="w")
+        self._update_btn.bind("<Button-1>", self._on_update_pressed)
+
+        self._update_status = tk.Label(
+            self.settings_frame, text="", font=self.font_xs,
+            bg=t["bg"], fg=t["muted"]
+        )
+        self._update_status.place(x=MARGIN_LEFT, y=368)
+
     def _draw_toggle(self, canvas, on):
         canvas.delete("all")
         t = self.theme
@@ -926,6 +898,86 @@ class DoseApp:
         self.settings["alarm_sound"] = not self.settings["alarm_sound"]
         self._draw_toggle(self._alarm_toggle_canvas, self.settings["alarm_sound"])
         self._save_config()
+
+    def _on_update_pressed(self, event=None):
+        self._update_btn.configure(bg="#555555")
+        self._update_status.configure(text="Checking for updates...")
+        self.root.update_idletasks()
+        threading.Thread(target=self._do_update_check, daemon=True).start()
+
+    def _do_update_check(self):
+        import hashlib
+        try:
+            import urllib.request
+            app_path = os.path.join(APP_DIR, "dose_app.py")
+            if not os.path.isfile(app_path):
+                app_path = os.path.abspath(__file__)
+
+            with open(app_path, "rb") as f:
+                local_hash = hashlib.md5(f.read()).hexdigest()
+
+            req = urllib.request.Request(RAW_URL + "/dose_app.py")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                remote_data = resp.read()
+            remote_hash = hashlib.md5(remote_data).hexdigest()
+
+            if local_hash == remote_hash:
+                self.root.after(0, self._update_result, "already_current", None)
+                return
+
+            self.root.after(0, self._update_result, "available", remote_data)
+        except Exception:
+            self.root.after(0, self._update_result, "error", None)
+
+    def _update_result(self, status, remote_data):
+        self._update_btn.configure(bg="#3478F6")
+        if status == "already_current":
+            self._update_status.configure(text="You're on the latest version.", fg="#5B9BFF")
+        elif status == "error":
+            self._update_status.configure(text="No internet — try again later.", fg="#FF6B6B")
+        elif status == "available":
+            self._update_status.configure(text="Downloading update...", fg="#5B9BFF")
+            self.root.update_idletasks()
+            threading.Thread(
+                target=self._apply_update, args=(remote_data,), daemon=True
+            ).start()
+
+    def _apply_update(self, remote_data):
+        import urllib.request
+        try:
+            os.makedirs(APP_DIR, exist_ok=True)
+            with open(os.path.join(APP_DIR, "dose_app.py"), "wb") as f:
+                f.write(remote_data)
+            for extra in ("DOSE.sh", "dose_logo.png"):
+                try:
+                    req = urllib.request.Request(RAW_URL + "/" + extra)
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        with open(os.path.join(APP_DIR, extra), "wb") as f:
+                            f.write(resp.read())
+                except Exception:
+                    pass
+            self.root.after(0, self._finish_update)
+        except Exception:
+            self.root.after(0, lambda: self._update_status.configure(
+                text="Update failed — try again.", fg="#FF6B6B"))
+
+    def _finish_update(self):
+        self._update_status.configure(text="Updated! Restarting...", fg="#5B9BFF")
+        self.root.update_idletasks()
+        self.root.after(500, self._restart_app)
+
+    def _restart_app(self):
+        self.camera_running = False
+        if self.camera:
+            try:
+                self.camera.stop()
+            except Exception:
+                pass
+        self.root.destroy()
+        os.execv(
+            sys.executable,
+            [sys.executable, os.path.join(APP_DIR, "dose_app.py")],
+        )
 
     def _update_settings(self):
         pass  # Already built fresh via _build_settings
@@ -1244,6 +1296,5 @@ class DoseApp:
 # Entry point
 # ===================================================================
 if __name__ == "__main__":
-    _check_for_updates()
     app = DoseApp()
     app.run()
