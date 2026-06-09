@@ -343,9 +343,17 @@ class DoseApp:
         c.delete("all")
         c.configure(bg=self.theme["bg"])
         if PIL_AVAILABLE and not hasattr(self, '_d_logo_img'):
-            raw = base64.b64decode(DOSE_LOGO_B64)
-            pil_img = Image.open(io.BytesIO(raw)).resize((48, 48), Image.LANCZOS)
-            self._d_logo_img = ImageTk.PhotoImage(pil_img)
+            try:
+                raw = base64.b64decode(DOSE_LOGO_B64)
+                pil_img = Image.open(io.BytesIO(raw))
+                resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
+                if resample:
+                    pil_img = pil_img.resize((48, 48), resample)
+                else:
+                    pil_img = pil_img.resize((48, 48))
+                self._d_logo_img = ImageTk.PhotoImage(pil_img)
+            except Exception:
+                pass
         if hasattr(self, '_d_logo_img'):
             c.create_image(24, 24, image=self._d_logo_img)
         else:
@@ -1296,5 +1304,26 @@ class DoseApp:
 # Entry point
 # ===================================================================
 if __name__ == "__main__":
-    app = DoseApp()
-    app.run()
+    try:
+        app = DoseApp()
+        app.run()
+    except Exception as e:
+        import traceback
+        err = traceback.format_exc()
+        log_path = os.path.join(
+            os.path.expanduser("~"), "dose-home-station", "crash.log"
+        )
+        try:
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            with open(log_path, "w") as f:
+                f.write(err)
+        except Exception:
+            pass
+        print("\n  DOSE crashed. Error:\n")
+        print(err)
+        print(f"\n  Error log saved to: {log_path}")
+        print("\n  Press Enter to close...")
+        try:
+            input()
+        except Exception:
+            pass
