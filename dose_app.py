@@ -99,6 +99,11 @@ LIGHT_THEME = {
     "popup_bg": "#E0E0DE",
 }
 
+# Grid constants
+MARGIN_LEFT = 52
+MARGIN_RIGHT = 52
+RIGHT_EDGE = 800 - MARGIN_RIGHT  # 748
+
 
 # ===================================================================
 # Main Application
@@ -129,15 +134,17 @@ class DoseApp:
                 break
         self.font_family = family
 
-        self.font_xs = tkfont.Font(family=family, size=10)
-        self.font_sm = tkfont.Font(family=family, size=12)
-        self.font_md = tkfont.Font(family=family, size=14)
-        self.font_lg = tkfont.Font(family=family, size=20)
-        self.font_xl = tkfont.Font(family=family, size=28)
-        self.font_clock = tkfont.Font(family=family, size=36, weight="bold")
-        self.font_bold_sm = tkfont.Font(family=family, size=12, weight="bold")
-        self.font_bold_md = tkfont.Font(family=family, size=14, weight="bold")
-        self.font_bold_lg = tkfont.Font(family=family, size=18, weight="bold")
+        self.font_clock = tkfont.Font(family=family, size=32, weight="normal")
+        self.font_xl = tkfont.Font(family=family, size=44, weight="normal")
+        self.font_name = tkfont.Font(family=family, size=36, weight="bold")
+        self.font_lg = tkfont.Font(family=family, size=20, weight="normal")
+        self.font_md = tkfont.Font(family=family, size=16, weight="normal")
+        self.font_sm = tkfont.Font(family=family, size=13, weight="normal")
+        self.font_label = tkfont.Font(family=family, size=11, weight="bold")
+        self.font_xs = tkfont.Font(family=family, size=10, weight="normal")
+        self.font_bold_sm = tkfont.Font(family=family, size=13, weight="bold")
+        self.font_bold_md = tkfont.Font(family=family, size=16, weight="bold")
+        self.font_bold_lg = tkfont.Font(family=family, size=20, weight="bold")
 
         # ---- State -------------------------------------------------
         self.meds = {}
@@ -187,7 +194,7 @@ class DoseApp:
             self.root, width=48, height=48,
             bg=self.theme["bg"], highlightthickness=0, bd=0
         )
-        self.d_btn_canvas.place(x=740, y=422)
+        self.d_btn_canvas.place(x=740, y=424)
         self._draw_d_button()
         self.d_btn_canvas.bind("<Button-1>", self._on_d_pressed)
 
@@ -314,14 +321,15 @@ class DoseApp:
             btn = tk.Label(
                 self.popup_frame, text=label, font=self.font_md,
                 bg=t["popup_bg"], fg=t["fg"],
-                padx=20, pady=10, anchor="w"
+                padx=24, pady=14, anchor="w"
             )
             btn.pack(fill="x")
             btn.bind("<Button-1>", lambda e, m=mode: self._menu_pick(m))
             btn.bind("<Enter>", lambda e, b=btn: b.configure(bg=t["btn_active"]))
             btn.bind("<Leave>", lambda e, b=btn: b.configure(bg=t["popup_bg"]))
 
-        self.popup_frame.place(x=680, y=280, width=110)
+        # Place wider menu, right-aligned with D button, above it
+        self.popup_frame.place(x=608, y=280, width=180)
         self._raise_widget(self.popup_frame)
 
         # Auto-dismiss after 45 s
@@ -416,48 +424,46 @@ class DoseApp:
             self.standby_frame, text="", font=self.font_clock,
             bg=t["bg"], fg=t["fg"], anchor="w"
         )
-        self._standby_clock_label.place(x=40, y=30)
+        self._standby_clock_label.place(x=MARGIN_LEFT, y=40)
 
         # WiFi icon (canvas with arcs)
         wifi_c = tk.Canvas(self.standby_frame, width=36, height=30,
                            bg=t["bg"], highlightthickness=0)
-        wifi_c.place(x=720, y=35)
+        wifi_c.place(x=720, y=42)
         self._draw_wifi(wifi_c, t["fg"])
 
-        # "NEXT DOSE" section
+        # "NEXT DOSE" label — small caps tracking style
         tk.Label(
-            self.standby_frame, text="NEXT DOSE", font=self.font_xs,
+            self.standby_frame, text="NEXT DOSE", font=self.font_label,
             bg=t["bg"], fg=t["muted"]
-        ).place(x=40, y=160)
+        ).place(x=MARGIN_LEFT, y=180)
 
         # Find next dose
         next_time, next_pills = self._compute_next_dose()
+
+        # Next dose time — hero element, big
         self._standby_next_time = tk.Label(
             self.standby_frame, text=next_time, font=self.font_xl,
             bg=t["bg"], fg=t["fg"]
         )
-        self._standby_next_time.place(x=40, y=185)
+        self._standby_next_time.place(x=MARGIN_LEFT, y=205)
 
+        # Pills count
         self._standby_next_pills = tk.Label(
-            self.standby_frame, text=next_pills, font=self.font_md,
+            self.standby_frame, text=next_pills, font=self.font_lg,
             bg=t["bg"], fg=t["muted"]
         )
-        self._standby_next_pills.place(x=40, y=230)
+        self._standby_next_pills.place(x=MARGIN_LEFT, y=270)
 
         # Camera status
         if not CAMERA_AVAILABLE:
             tk.Label(
                 self.standby_frame, text="Camera not connected", font=self.font_xs,
                 bg=t["bg"], fg=t["muted"]
-            ).place(x=40, y=420)
+            ).place(x=MARGIN_LEFT, y=440)
 
-        # Tap to simulate QR scan
-        sim_label = tk.Label(
-            self.standby_frame, text="Tap here to simulate scan",
-            font=self.font_xs, bg=t["bg"], fg=t["muted"]
-        )
-        sim_label.place(x=40, y=380)
-        sim_label.bind("<Button-1>", lambda e: self._start_dispense("blue"))
+        # Bind tap on entire standby frame to trigger demo scan
+        self.standby_frame.bind("<Button-1>", lambda e: self._start_dispense("blue"))
 
     def _update_standby(self):
         try:
@@ -516,38 +522,41 @@ class DoseApp:
         t = self.theme
         self.storage_frame = tk.Frame(self.main_frame, bg=t["bg"])
 
-        # Left panel - pill list
-        left = tk.Frame(self.storage_frame, bg=t["bg"], width=220)
-        left.place(x=0, y=0, width=220, height=480)
+        # Left panel - pill list (wider for breathing room)
+        left = tk.Frame(self.storage_frame, bg=t["bg"], width=240)
+        left.place(x=0, y=0, width=240, height=480)
         left.pack_propagate(False)
 
-        tk.Label(left, text="MEDICATIONS", font=self.font_xs,
-                 bg=t["bg"], fg=t["muted"]).pack(anchor="w", padx=16, pady=(20, 10))
+        tk.Label(left, text="MEDICATIONS", font=self.font_label,
+                 bg=t["bg"], fg=t["muted"]).pack(anchor="w", padx=24, pady=(20, 12))
 
         self._pill_rows = {}
+        self._pill_row_canvases = {}
         for key in ["blue", "red", "green", "yellow"]:
             med = self.meds[key]
-            row = tk.Frame(left, bg=t["bg"], cursor="hand2")
-            row.pack(fill="x", padx=8, pady=2)
 
-            # Accent dot
-            dot_c = tk.Canvas(row, width=14, height=14, bg=t["bg"], highlightthickness=0)
-            dot_c.pack(side="left", padx=(8, 6), pady=12)
-            dot_c.create_oval(2, 2, 12, 12, fill=med["accent"], outline="")
+            # Use a canvas-based row for the left accent bar
+            row_frame = tk.Frame(left, bg=t["bg"], cursor="hand2")
+            row_frame.pack(fill="x", padx=12, pady=2)
+
+            # Accent dot (slightly larger)
+            dot_c = tk.Canvas(row_frame, width=16, height=16, bg=t["bg"], highlightthickness=0)
+            dot_c.pack(side="left", padx=(10, 8), pady=14)
+            dot_c.create_oval(2, 2, 14, 14, fill=med["accent"], outline="")
 
             lbl = tk.Label(
-                row, text=f"Pill {med['name']}", font=self.font_md,
+                row_frame, text=f"Pill {med['name']}", font=self.font_md,
                 bg=t["bg"], fg=t["fg"], anchor="w"
             )
-            lbl.pack(side="left", fill="x", expand=True, pady=12)
+            lbl.pack(side="left", fill="x", expand=True, pady=14)
 
-            self._pill_rows[key] = (row, lbl, dot_c)
-            for widget in (row, lbl, dot_c):
+            self._pill_rows[key] = (row_frame, lbl, dot_c)
+            for widget in (row_frame, lbl, dot_c):
                 widget.bind("<Button-1>", lambda e, k=key: self._select_pill(k))
 
         # Right panel
         self._storage_right = tk.Frame(self.storage_frame, bg=t["bg"])
-        self._storage_right.place(x=220, y=0, width=580, height=480)
+        self._storage_right.place(x=240, y=0, width=560, height=480)
 
         self._build_storage_detail()
 
@@ -564,27 +573,30 @@ class DoseApp:
         med = self.meds[self.selected_pill]
         parent = self._storage_right
 
-        # Pill visual indicator (colored rounded rect)
-        pill_c = tk.Canvas(parent, width=120, height=60, bg=t["bg"], highlightthickness=0)
-        pill_c.place(x=30, y=20)
-        self._canvas_rounded_rect(pill_c, 4, 4, 116, 56, 20,
+        # Internal padding from left edge of right panel: 40px
+        px = 40
+
+        # Pill visual indicator (larger colored rounded rect)
+        pill_c = tk.Canvas(parent, width=140, height=70, bg=t["bg"], highlightthickness=0)
+        pill_c.place(x=px, y=20)
+        self._canvas_rounded_rect(pill_c, 4, 4, 136, 66, 24,
                                   fill=med["accent"], outline="")
-        pill_c.create_text(60, 30, text=med["name"], fill="#FFFFFF",
+        pill_c.create_text(70, 35, text=med["name"], fill="#FFFFFF",
                            font=self.font_bold_md)
 
-        # Pills left
+        # Pills left — vertically centered with pill visual
         self._storage_pills_left_label = tk.Label(
             parent, text=f"{med['pills_left']} Pills Left",
             font=self.font_bold_lg, bg=t["bg"], fg=t["fg"]
         )
-        self._storage_pills_left_label.place(x=170, y=30)
+        self._storage_pills_left_label.place(x=px + 160, y=38)
 
         # ---- Schedule time ----
-        tk.Label(parent, text="SCHEDULE", font=self.font_xs,
-                 bg=t["bg"], fg=t["muted"]).place(x=30, y=100)
+        tk.Label(parent, text="SCHEDULE", font=self.font_label,
+                 bg=t["bg"], fg=t["muted"]).place(x=px, y=120)
 
         time_frame = tk.Frame(parent, bg=t["bg"])
-        time_frame.place(x=30, y=122)
+        time_frame.place(x=px, y=148)
 
         # Parse current schedule time
         try:
@@ -602,18 +614,18 @@ class DoseApp:
         h_frame.pack(side="left", padx=(0, 4))
 
         h_up = tk.Label(h_frame, text="▲", font=self.font_sm,
-                        bg=t["btn_bg"], fg=t["fg"], width=3, pady=4)
+                        bg=t["btn_bg"], fg=t["fg"], width=4, pady=6)
         h_up.pack()
         h_up.bind("<Button-1>", lambda e: self._adjust_schedule("hour", 1))
 
         self._sch_hour_label = tk.Label(
             h_frame, text=f"{self._sch_hour:d}", font=self.font_bold_lg,
-            bg=t["bg"], fg=t["fg"], width=3
+            bg=t["bg"], fg=t["fg"], width=4
         )
         self._sch_hour_label.pack()
 
         h_down = tk.Label(h_frame, text="▼", font=self.font_sm,
-                          bg=t["btn_bg"], fg=t["fg"], width=3, pady=4)
+                          bg=t["btn_bg"], fg=t["fg"], width=4, pady=6)
         h_down.pack()
         h_down.bind("<Button-1>", lambda e: self._adjust_schedule("hour", -1))
 
@@ -625,18 +637,18 @@ class DoseApp:
         m_frame.pack(side="left", padx=(4, 8))
 
         m_up = tk.Label(m_frame, text="▲", font=self.font_sm,
-                        bg=t["btn_bg"], fg=t["fg"], width=3, pady=4)
+                        bg=t["btn_bg"], fg=t["fg"], width=4, pady=6)
         m_up.pack()
         m_up.bind("<Button-1>", lambda e: self._adjust_schedule("minute", 1))
 
         self._sch_min_label = tk.Label(
             m_frame, text=f"{self._sch_minute:02d}", font=self.font_bold_lg,
-            bg=t["bg"], fg=t["fg"], width=3
+            bg=t["bg"], fg=t["fg"], width=4
         )
         self._sch_min_label.pack()
 
         m_down = tk.Label(m_frame, text="▼", font=self.font_sm,
-                          bg=t["btn_bg"], fg=t["fg"], width=3, pady=4)
+                          bg=t["btn_bg"], fg=t["fg"], width=4, pady=6)
         m_down.pack()
         m_down.bind("<Button-1>", lambda e: self._adjust_schedule("minute", -1))
 
@@ -649,11 +661,11 @@ class DoseApp:
         self._sch_ampm_label.bind("<Button-1>", lambda e: self._adjust_schedule("ampm", 0))
 
         # ---- Day of week selector ----
-        tk.Label(parent, text="DAYS", font=self.font_xs,
-                 bg=t["bg"], fg=t["muted"]).place(x=30, y=240)
+        tk.Label(parent, text="DAYS", font=self.font_label,
+                 bg=t["bg"], fg=t["muted"]).place(x=px, y=268)
 
         days_frame = tk.Frame(parent, bg=t["bg"])
-        days_frame.place(x=30, y=262)
+        days_frame.place(x=px, y=294)
 
         self._day_buttons = {}
         for day in ALL_DAYS:
@@ -662,27 +674,27 @@ class DoseApp:
             fg_col = "#FFFFFF" if active else t["muted"]
             btn = tk.Label(
                 days_frame, text=day[:2], font=self.font_bold_sm,
-                bg=bg_col, fg=fg_col, width=3, pady=6
+                bg=bg_col, fg=fg_col, width=4, pady=8
             )
             btn.pack(side="left", padx=2)
             btn.bind("<Button-1>", lambda e, d=day: self._toggle_day(d))
             self._day_buttons[day] = btn
 
-        # ---- Safety / info ----
-        tk.Label(parent, text="INSTRUCTIONS", font=self.font_xs,
-                 bg=t["bg"], fg=t["muted"]).place(x=30, y=330)
+        # ---- Instructions ----
+        tk.Label(parent, text="INSTRUCTIONS", font=self.font_label,
+                 bg=t["bg"], fg=t["muted"]).place(x=px, y=360)
 
         info_text = f"Take with: {med['take_with']}"
         tk.Label(
-            parent, text=info_text, font=self.font_xs,
-            bg=t["bg"], fg=t["fg"], wraplength=500, justify="left", anchor="nw"
-        ).place(x=30, y=352)
+            parent, text=info_text, font=self.font_sm,
+            bg=t["bg"], fg=t["fg"], wraplength=480, justify="left", anchor="nw"
+        ).place(x=px, y=386)
 
         safety_label = tk.Label(
             parent, text=med["safety"], font=self.font_xs,
-            bg=t["bg"], fg=t["muted"], wraplength=500, justify="left", anchor="nw"
+            bg=t["bg"], fg=t["muted"], wraplength=480, justify="left", anchor="nw"
         )
-        safety_label.place(x=30, y=390)
+        safety_label.place(x=px, y=420)
 
     def _adjust_schedule(self, field, delta):
         if field == "hour":
@@ -719,7 +731,8 @@ class DoseApp:
 
     def _update_storage(self):
         t = self.theme
-        # Highlight selected row
+        med = self.meds[self.selected_pill]
+        # Highlight selected row with card_bg and a left accent bar
         for key, (row, lbl, dot_c) in self._pill_rows.items():
             if key == self.selected_pill:
                 row.configure(bg=t["card_bg"])
@@ -741,40 +754,41 @@ class DoseApp:
         t = self.theme
         self.settings_frame = tk.Frame(self.main_frame, bg=t["bg"])
 
+        # Big bold page title
         tk.Label(
-            self.settings_frame, text="Settings", font=self.font_bold_lg,
+            self.settings_frame, text="Settings", font=self.font_name,
             bg=t["bg"], fg=t["fg"]
-        ).place(x=40, y=30)
+        ).place(x=MARGIN_LEFT, y=40)
 
-        # Day/Night toggle
+        # Day/Night toggle row
         row1 = tk.Frame(self.settings_frame, bg=t["bg"])
-        row1.place(x=40, y=100, width=720, height=60)
+        row1.place(x=MARGIN_LEFT, y=140, width=696, height=60)
 
-        tk.Label(row1, text="Day / Night Mode", font=self.font_md,
+        tk.Label(row1, text="Day / Night Mode", font=self.font_lg,
                  bg=t["bg"], fg=t["fg"]).place(x=0, rely=0.5, anchor="w")
 
         self._night_toggle_canvas = tk.Canvas(
             row1, width=60, height=32, bg=t["bg"], highlightthickness=0
         )
-        self._night_toggle_canvas.place(x=620, rely=0.5, anchor="w")
+        self._night_toggle_canvas.place(x=640, rely=0.5, anchor="w")
         self._draw_toggle(self._night_toggle_canvas, self.settings["night_mode"])
         self._night_toggle_canvas.bind("<Button-1>", self._toggle_night)
 
         # Divider
         tk.Frame(self.settings_frame, bg=t["muted"], height=1).place(
-            x=40, y=170, width=720)
+            x=MARGIN_LEFT, y=208, width=696)
 
-        # Alarm toggle
+        # Alarm toggle row
         row2 = tk.Frame(self.settings_frame, bg=t["bg"])
-        row2.place(x=40, y=190, width=720, height=60)
+        row2.place(x=MARGIN_LEFT, y=220, width=696, height=60)
 
-        tk.Label(row2, text="Alarm Sound", font=self.font_md,
+        tk.Label(row2, text="Alarm Sound", font=self.font_lg,
                  bg=t["bg"], fg=t["fg"]).place(x=0, rely=0.5, anchor="w")
 
         self._alarm_toggle_canvas = tk.Canvas(
             row2, width=60, height=32, bg=t["bg"], highlightthickness=0
         )
-        self._alarm_toggle_canvas.place(x=620, rely=0.5, anchor="w")
+        self._alarm_toggle_canvas.place(x=640, rely=0.5, anchor="w")
         self._draw_toggle(self._alarm_toggle_canvas, self.settings["alarm_sound"])
         self._alarm_toggle_canvas.bind("<Button-1>", self._toggle_alarm)
 
@@ -846,43 +860,45 @@ class DoseApp:
         self._raise_widget(self.overlay_frame)
         self._raise_widget(self.d_btn_canvas)
 
-        # Pill name
+        # Pill name — centered, accent color
         tk.Label(
-            self.overlay_frame, text=f"Pill {med['name']}", font=self.font_xl,
+            self.overlay_frame, text=f"Pill {med['name']}", font=self.font_name,
             bg=t["bg"], fg=med["accent"]
-        ).place(x=60, y=40)
+        ).place(relx=0.5, y=60, anchor="n")
 
-        # Take with
+        # Take with label
         tk.Label(
-            self.overlay_frame, text="TAKE WITH", font=self.font_xs,
+            self.overlay_frame, text="TAKE WITH", font=self.font_label,
             bg=t["bg"], fg=t["muted"]
-        ).place(x=60, y=110)
+        ).place(relx=0.5, y=120, anchor="n")
+
+        # Take with instructions
         tk.Label(
             self.overlay_frame, text=med["take_with"], font=self.font_md,
-            bg=t["bg"], fg=t["fg"], wraplength=680, justify="left"
-        ).place(x=60, y=135)
+            bg=t["bg"], fg=t["fg"], wraplength=600, justify="center"
+        ).place(relx=0.5, y=148, anchor="n")
 
         # Question
         tk.Label(
             self.overlay_frame, text="Would you like to take this medication?",
             font=self.font_bold_md, bg=t["bg"], fg=t["fg"]
-        ).place(x=60, y=240)
+        ).place(relx=0.5, y=240, anchor="n")
 
-        # Yes button
-        yes_c = tk.Canvas(self.overlay_frame, width=200, height=56,
+        # Yes button — wider (240px)
+        yes_c = tk.Canvas(self.overlay_frame, width=240, height=56,
                           bg=t["bg"], highlightthickness=0)
-        yes_c.place(x=60, y=300)
-        self._canvas_rounded_rect(yes_c, 0, 0, 200, 56, 12, fill="#3478F6", outline="")
-        yes_c.create_text(100, 28, text="Yes", fill="#FFFFFF", font=self.font_bold_md)
+        yes_c.place(relx=0.5, y=300, anchor="n", x=-130)
+        self._canvas_rounded_rect(yes_c, 0, 0, 240, 56, 12, fill="#3478F6", outline="")
+        yes_c.create_text(120, 28, text="Yes", fill="#FFFFFF", font=self.font_bold_md)
         yes_c.bind("<Button-1>", lambda e: self._show_dispense_hold())
 
-        # No button
-        no_c = tk.Canvas(self.overlay_frame, width=200, height=56,
+        # No button — wider (240px)
+        no_c = tk.Canvas(self.overlay_frame, width=240, height=56,
                          bg=t["bg"], highlightthickness=0)
-        no_c.place(x=300, y=300)
-        self._canvas_rounded_rect(no_c, 0, 0, 200, 56, 12,
+        no_c.place(relx=0.5, y=300, anchor="n", x=130)
+        self._canvas_rounded_rect(no_c, 0, 0, 240, 56, 12,
                                   fill=t["btn_bg"], outline=t["muted"])
-        no_c.create_text(100, 28, text="No", fill=t["fg"], font=self.font_bold_md)
+        no_c.create_text(120, 28, text="No", fill=t["fg"], font=self.font_bold_md)
         no_c.bind("<Button-1>", lambda e: self._end_dispense())
 
     def _show_dispense_hold(self):
@@ -898,23 +914,23 @@ class DoseApp:
         self._raise_widget(self.d_btn_canvas)
 
         tk.Label(
-            self.overlay_frame, text="Hold to confirm", font=self.font_xl,
+            self.overlay_frame, text="Hold to confirm", font=self.font_name,
             bg=t["bg"], fg=t["fg"]
         ).place(relx=0.5, y=140, anchor="n")
 
         tk.Label(
-            self.overlay_frame, text="Keep pressing to proceed...", font=self.font_sm,
+            self.overlay_frame, text="Keep pressing to proceed...", font=self.font_md,
             bg=t["bg"], fg=t["muted"]
         ).place(relx=0.5, y=200, anchor="n")
 
-        # Progress bar
+        # Progress bar — wider (600px centered)
         self._hold_bar_canvas = tk.Canvas(
-            self.overlay_frame, width=500, height=24,
+            self.overlay_frame, width=600, height=24,
             bg=t["bg"], highlightthickness=0
         )
         self._hold_bar_canvas.place(relx=0.5, y=260, anchor="n")
         # Track
-        self._canvas_rounded_rect(self._hold_bar_canvas, 0, 0, 500, 24, 12,
+        self._canvas_rounded_rect(self._hold_bar_canvas, 0, 0, 600, 24, 12,
                                   fill=t["btn_bg"], outline="")
         # Fill (starts at 0)
         self._hold_fill_id = self._canvas_rounded_rect(
@@ -959,7 +975,7 @@ class DoseApp:
             return
         elapsed = time.time() - self.hold_start
         frac = min(elapsed / 3.0, 1.0)
-        width = max(2, int(500 * frac))
+        width = max(2, int(600 * frac))
 
         try:
             self._hold_bar_canvas.delete(self._hold_fill_id)
@@ -994,7 +1010,7 @@ class DoseApp:
         self._raise_widget(self.d_btn_canvas)
 
         tk.Label(
-            self.overlay_frame, text="CONFIRMED", font=self.font_xl,
+            self.overlay_frame, text="CONFIRMED", font=self.font_name,
             bg=t["bg"], fg="#3478F6"
         ).place(relx=0.5, y=140, anchor="n")
 
@@ -1040,16 +1056,16 @@ class DoseApp:
         self._raise_widget(self.d_btn_canvas)
 
         tk.Label(
-            self.overlay_frame, text=f"Dispensed: {med['name']}", font=self.font_xl,
+            self.overlay_frame, text=f"Dispensed: {med['name']}", font=self.font_name,
             bg=t["bg"], fg=med["accent"]
         ).place(relx=0.5, y=180, anchor="n")
 
-        # Bottom strip
+        # Bottom strip — full width with proper padding
         strip = tk.Frame(self.overlay_frame, bg=t["card_bg"], height=48)
         strip.place(x=0, y=432, width=800, height=48)
         tk.Label(
             strip, text="Please check before taking medication",
-            font=self.font_sm, bg=t["card_bg"], fg=t["muted"]
+            font=self.font_md, bg=t["card_bg"], fg=t["muted"]
         ).place(relx=0.5, rely=0.5, anchor="center")
 
         # Auto-return
