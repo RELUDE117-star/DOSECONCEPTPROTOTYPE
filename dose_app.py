@@ -322,7 +322,7 @@ class DoseApp:
             btn.bind("<Leave>", lambda e, b=btn: b.configure(bg=t["popup_bg"]))
 
         self.popup_frame.place(x=680, y=280, width=110)
-        self.popup_frame.lift()
+        self._raise_widget(self.popup_frame)
 
         # Auto-dismiss after 45 s
         if self.menu_timeout_id:
@@ -843,7 +843,7 @@ class DoseApp:
             w.destroy()
         self.overlay_frame.configure(bg=t["bg"])
         self.overlay_frame.place(x=0, y=0, width=800, height=480)
-        self.overlay_frame.lift()
+        self._raise_widget(self.overlay_frame)
         self._raise_widget(self.d_btn_canvas)
 
         # Pill name
@@ -894,7 +894,7 @@ class DoseApp:
             w.destroy()
         self.overlay_frame.configure(bg=t["bg"])
         self.overlay_frame.place(x=0, y=0, width=800, height=480)
-        self.overlay_frame.lift()
+        self._raise_widget(self.overlay_frame)
         self._raise_widget(self.d_btn_canvas)
 
         tk.Label(
@@ -989,7 +989,7 @@ class DoseApp:
             w.destroy()
         self.overlay_frame.configure(bg=t["bg"])
         self.overlay_frame.place(x=0, y=0, width=800, height=480)
-        self.overlay_frame.lift()
+        self._raise_widget(self.overlay_frame)
         self._raise_widget(self.d_btn_canvas)
 
         tk.Label(
@@ -1035,7 +1035,7 @@ class DoseApp:
             w.destroy()
         self.overlay_frame.configure(bg=t["bg"])
         self.overlay_frame.place(x=0, y=0, width=800, height=480)
-        self.overlay_frame.lift()
+        self._raise_widget(self.overlay_frame)
         self._raise_widget(self.d_btn_canvas)
 
         tk.Label(
