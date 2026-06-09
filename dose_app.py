@@ -219,6 +219,11 @@ class DoseApp:
         # Focus so Esc works
         self.root.focus_force()
 
+    @staticmethod
+    def _raise_widget(widget):
+        """Raise a widget in the stacking order. Works for Canvas too."""
+        widget.tk.call('raise', widget._w)
+
     # ---------------------------------------------------------------
     # Config persistence
     # ---------------------------------------------------------------
@@ -357,7 +362,7 @@ class DoseApp:
             self._update_settings()
 
         # Keep D button on top
-        self.d_btn_canvas.tkraise()
+        self._raise_widget(self.d_btn_canvas)
 
     # ---------------------------------------------------------------
     # Clock
@@ -839,7 +844,7 @@ class DoseApp:
         self.overlay_frame.configure(bg=t["bg"])
         self.overlay_frame.place(x=0, y=0, width=800, height=480)
         self.overlay_frame.lift()
-        self.d_btn_canvas.tkraise()
+        self._raise_widget(self.d_btn_canvas)
 
         # Pill name
         tk.Label(
@@ -890,7 +895,7 @@ class DoseApp:
         self.overlay_frame.configure(bg=t["bg"])
         self.overlay_frame.place(x=0, y=0, width=800, height=480)
         self.overlay_frame.lift()
-        self.d_btn_canvas.tkraise()
+        self._raise_widget(self.d_btn_canvas)
 
         tk.Label(
             self.overlay_frame, text="Hold to confirm", font=self.font_xl,
@@ -985,7 +990,7 @@ class DoseApp:
         self.overlay_frame.configure(bg=t["bg"])
         self.overlay_frame.place(x=0, y=0, width=800, height=480)
         self.overlay_frame.lift()
-        self.d_btn_canvas.tkraise()
+        self._raise_widget(self.d_btn_canvas)
 
         tk.Label(
             self.overlay_frame, text="CONFIRMED", font=self.font_xl,
@@ -1031,7 +1036,7 @@ class DoseApp:
         self.overlay_frame.configure(bg=t["bg"])
         self.overlay_frame.place(x=0, y=0, width=800, height=480)
         self.overlay_frame.lift()
-        self.d_btn_canvas.tkraise()
+        self._raise_widget(self.d_btn_canvas)
 
         tk.Label(
             self.overlay_frame, text=f"Dispensed: {med['name']}", font=self.font_xl,
