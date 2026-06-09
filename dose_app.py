@@ -922,9 +922,10 @@ class DoseApp:
             fill="#3478F6", outline=""
         )
 
-        # Touch area (full overlay)
-        self.overlay_frame.bind("<ButtonPress-1>", self._hold_press)
-        self.overlay_frame.bind("<ButtonRelease-1>", self._hold_release)
+        # Touch area — bind to ALL widgets so tapping anywhere works
+        for widget in [self.overlay_frame] + list(self.overlay_frame.winfo_children()):
+            widget.bind("<ButtonPress-1>", self._hold_press)
+            widget.bind("<ButtonRelease-1>", self._hold_release)
 
         self.hold_start = None
         self.hold_timer_id = None

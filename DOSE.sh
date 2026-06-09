@@ -95,4 +95,14 @@ echo "  Starting DOSE..."
 echo "  Press Esc to exit."
 echo ""
 export DISPLAY=:0
-python3 "$APP_DIR/dose_app.py"
+python3 "$APP_DIR/dose_app.py" 2>"$APP_DIR/error.log"
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
+    echo ""
+    echo "  DOSE crashed. Error details:"
+    echo ""
+    cat "$APP_DIR/error.log"
+    echo ""
+    echo "  Press any key to close..."
+    read -n 1 -s
+fi
