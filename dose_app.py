@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 DOSE Home Station — Prototype Application
-v2.0 — QR-to-load, MPR121 touch, persistent counts, auto-update
+v3.0 — Standby/Storage/Settings modes + QR-to-load + MPR121 touch + auto-update
 
-States: IDLE → (QR scan) → QTY_CONFIRM → IDLE
-        IDLE → READ → HOLD → CONFIRM → DISPENSED → IDLE
+Modes: Standby (default), Storage (pill cards + QR load), Settings
+Dispensing overlay: READ → HOLD → CONFIRM → DISPENSED
 
 Meds start empty (count 0). Scan a QR to load a slot.
 MPR121 pads 0-3 map to blue/red/green/yellow.
+Auto-update checks GitHub on launch + UPDATE button in Settings.
 
 Gracefully handles missing hardware.
 """
@@ -22,28 +23,25 @@ import subprocess
 import base64
 import io
 import tkinter as tk
-from tkinter import font as tkfont
+import tkinter.font as tkfont
+from datetime import datetime
 from urllib.request import urlopen
 from urllib.error import URLError
 
+# ── Graceful optional imports ──────────────────────────────────────────────
+PIL_AVAILABLE = False
 try:
     from PIL import Image, ImageTk
-    HAVE_PIL = True
-except ImportError:
-    HAVE_PIL = False
+    PIL_AVAILABLE = True
+except Exception:
+    pass
 
+CAMERA_AVAILABLE = False
 try:
-    from pyzbar.pyzbar import decode as qr_decode
-    HAVE_PYZBAR = True
-except ImportError:
-    HAVE_PYZBAR = False
-
-HAVE_CAMERA = False
-Picamera2 = None
-try:
-    from picamera2 import Picamera2 as _Picamera2
-    Picamera2 = _Picamera2
-    HAVE_CAMERA = True
+    from picamera2 import Picamera2
+    from pyzbar.pyzbar import decode as pyzbar_decode
+    if PIL_AVAILABLE:
+        CAMERA_AVAILABLE = True
 except Exception:
     pass
 
@@ -58,19 +56,21 @@ try:
 except Exception:
     pass
 
-# ── Design tokens ──
-SCREEN_BG    = "#070708"
-SCREEN_FG    = "#F4F4F2"
-SCREEN_MUTED = "#7E8186"
-CARD_BG      = "#141418"
-
+# ── Constants ──────────────────────────────────────────────────────────────
 SCREEN_W = 800
 SCREEN_H = 480
-CAPTURE_RES = (1280, 720)
+MARGIN_LEFT = 52
 HOLD_TIME = 3.0
 DISPENSED_TIME = 4.0
-SCAN_INTERVAL = 100
 DEFAULT_QTY = 30
+ALL_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+CONFIG_PATH = os.path.expanduser("~/.dose_config.json")
+DATA_PATH = os.path.expanduser("~/dose-home-station/med_data.json")
+APP_DIR = os.path.expanduser("~/dose-home-station")
+APP_FILE = os.path.join(APP_DIR, "dose_app.py")
+RAW_URL = ("https://raw.githubusercontent.com/relude117-star/"
+           "doseconceptprototype/claude/quirky-brown-vkHwi")
 
 SLOT_KEYS = ["blue", "red", "green", "yellow"]
 
@@ -81,18 +81,25 @@ SLOT_DEFS = {
     "yellow": {"accent": "#E6C34A", "pad": 3},
 }
 
-S_IDLE        = "idle"
-S_QTY_CONFIRM = "qty_confirm"
-S_READ        = "read"
-S_HOLD        = "hold"
-S_CONFIRM     = "confirm"
-S_DISPENSED   = "dispensed"
+DARK_THEME = {
+    "bg": "#070708",
+    "fg": "#F4F4F2",
+    "muted": "#7E8186",
+    "card_bg": "#141418",
+    "btn_bg": "#1E1E24",
+    "btn_active": "#2A2A32",
+    "popup_bg": "#1A1A20",
+}
 
-DATA_PATH = os.path.expanduser("~/dose-home-station/med_data.json")
-APP_DIR = os.path.expanduser("~/dose-home-station")
-APP_FILE = os.path.join(APP_DIR, "dose_app.py")
-RAW_URL = ("https://raw.githubusercontent.com/relude117-star/"
-           "doseconceptprototype/claude/quirky-brown-vkHwi/dose_app.py")
+LIGHT_THEME = {
+    "bg": "#F4F4F2",
+    "fg": "#1A1A1C",
+    "muted": "#888888",
+    "card_bg": "#E8E8E6",
+    "btn_bg": "#DCDCDA",
+    "btn_active": "#D0D0CE",
+    "popup_bg": "#E0E0DE",
+}
 
 DOSE_LOGO_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAABCGlDQ1BJQ0MgUHJvZmlsZQAAeJxj"
@@ -131,23 +138,13 @@ DOSE_LOGO_B64 = (
 )
 
 
+# ── Helpers ────────────────────────────────────────────────────────────────
 def _raise(widget):
     """Raise widget in stacking order — safe for Canvas too."""
     widget.tk.call('raise', widget._w)
 
 
-def _pick_font(root):
-    preferred = ["Nunito", "Nunito Sans", "SF Pro Display", "Inter",
-                 "Helvetica Neue", "Roboto", "DejaVu Sans"]
-    available = set(tkfont.families(root))
-    for name in preferred:
-        if name in available:
-            return name
-    return "DejaVu Sans"
-
-
-def _load_data():
-    """Load persisted medication data. Returns dict keyed by slot."""
+def _load_med_data():
     try:
         with open(DATA_PATH, "r") as f:
             return json.load(f)
@@ -155,8 +152,7 @@ def _load_data():
         return {}
 
 
-def _save_data(data):
-    """Persist medication data."""
+def _save_med_data(data):
     try:
         os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
         with open(DATA_PATH, "w") as f:
@@ -165,35 +161,68 @@ def _save_data(data):
         pass
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  DoseApp
+# ═══════════════════════════════════════════════════════════════════════════
 class DoseApp:
-    def __init__(self, root):
-        self.root = root
-        self.state = S_IDLE
-        self.current_med = None
-        self.hold_start = 0.0
-        self.photo = None
-        self.logo_photo = None
-        self.show_preview = False
-        self.cam = None
-        self.mpr = None
-        self.mpr_prev = [False] * 12
-        self.settings = {"constant_scan": False}
 
-        # Medication state: slot_key -> {name, count, loaded, take_with}
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("DOSE")
+        self.root.geometry(f"{SCREEN_W}x{SCREEN_H}+0+0")
+        try:
+            self.root.attributes("-fullscreen", True)
+        except Exception:
+            pass
+        self.root.configure(cursor="none")
+        self.root.resizable(False, False)
+
+        # ── Fonts ──────────────────────────────────────────────────────────
+        preferred = "Nunito"
+        fallback = "DejaVu Sans"
+        families = tkfont.families(self.root)
+        base = preferred if preferred in families else fallback
+
+        self.font_clock = tkfont.Font(family=base, size=32)
+        self.font_hero = tkfont.Font(family=base, size=44, weight="bold")
+        self.font_name = tkfont.Font(family=base, size=36, weight="bold")
+        self.font_body = tkfont.Font(family=base, size=20)
+        self.font_body_bold = tkfont.Font(family=base, size=20, weight="bold")
+        self.font_label = tkfont.Font(family=base, size=11, weight="bold")
+        self.font_small = tkfont.Font(family=base, size=14)
+        self.font_small_bold = tkfont.Font(family=base, size=14, weight="bold")
+        self.font_btn = tkfont.Font(family=base, size=16, weight="bold")
+        self.font_btn_lg = tkfont.Font(family=base, size=18, weight="bold")
+        self.font_title = tkfont.Font(family=base, size=24, weight="bold")
+        self.font_medium = tkfont.Font(family=base, size=18)
+        self.font_bold_lg = tkfont.Font(family=base, size=28, weight="bold")
+        self.font_count = tkfont.Font(family=base, size=48, weight="bold")
+
+        # ── State ──────────────────────────────────────────────────────────
         self.med_data = {}
-        self._init_med_data()
-
-        # Hardware detection
-        self.has_camera = False
-        if HAVE_CAMERA and HAVE_PIL and HAVE_PYZBAR:
-            try:
-                cam = Picamera2()
-                cam.close()
-                self.has_camera = True
-            except Exception:
-                pass
-
+        self.settings = {"night_mode": False, "alarm_sound": True,
+                         "constant_scan": False}
+        self.theme = dict(DARK_THEME)
+        self.mode = "standby"
+        self.selected_pill = "blue"
+        self.dispense_state = 0
+        self.dispense_pill = None
+        self.hold_start = 0
+        self.hold_after_id = None
+        self.menu_visible = False
+        self.menu_dismiss_id = None
+        self.camera = None
+        self.camera_running = False
+        self.mpr = None
         self.has_touch = False
+        self.mpr_prev = [False] * 12
+
+        # ── Config + Med data ──────────────────────────────────────────────
+        self._load_config()
+        self._init_med_data()
+        self._apply_theme_colors()
+
+        # ── MPR121 init ────────────────────────────────────────────────────
         if HAVE_MPR121:
             try:
                 import board, busio
@@ -203,257 +232,58 @@ class DoseApp:
             except Exception:
                 pass
 
-        # ── Window setup ──
-        root.title("DOSE Home Station")
-        root.configure(bg=SCREEN_BG)
-        root.geometry(f"{SCREEN_W}x{SCREEN_H}")
-        try:
-            root.attributes("-fullscreen", True)
-        except Exception:
-            pass
-        root.config(cursor="none")
+        # ── Root frames ────────────────────────────────────────────────────
+        self.main_frame = tk.Frame(self.root, bg=self.theme["bg"],
+                                   width=SCREEN_W, height=SCREEN_H)
+        self.main_frame.place(x=0, y=0, width=SCREEN_W, height=SCREEN_H)
 
-        root.bind("<Escape>", lambda _: self._quit())
-        root.bind("c", lambda _: self._toggle_preview())
-        root.bind("<Button-1>", self._on_tap)
+        self.overlay_frame = tk.Frame(self.root, bg=self.theme["bg"],
+                                      width=SCREEN_W, height=SCREEN_H)
 
-        # ── Fonts ──
-        fam = _pick_font(root)
-        self.fam = fam
-        self.f_clock = tkfont.Font(family=fam, size=30)
-        self.f_label = tkfont.Font(family=fam, size=13, weight="bold")
-        self.f_xl    = tkfont.Font(family=fam, size=44)
-        self.f_name  = tkfont.Font(family=fam, size=36, weight="bold")
-        self.f_pills = tkfont.Font(family=fam, size=24)
-        self.f_body  = tkfont.Font(family=fam, size=19)
-        self.f_big   = tkfont.Font(family=fam, size=36, weight="bold")
-        self.f_hint  = tkfont.Font(family=fam, size=16)
-        self.f_wm    = tkfont.Font(family=fam, size=18)
-        self.f_strip = tkfont.Font(family=fam, size=17)
-        self.f_hw    = tkfont.Font(family=fam, size=11)
-        self.f_count = tkfont.Font(family=fam, size=60, weight="bold")
-        self.f_btn   = tkfont.Font(family=fam, size=18, weight="bold")
-        self.f_small = tkfont.Font(family=fam, size=14)
+        # D button canvas — 48x48 in bottom-right
+        self.d_btn_canvas = tk.Canvas(self.root, width=48, height=48,
+                                      highlightthickness=0,
+                                      bg=self.theme["bg"], bd=0)
+        self.d_btn_canvas.place(x=740, y=424)
+        self._draw_d_button()
+        self.d_btn_canvas.bind("<Button-1>", self._on_d_pressed)
 
-        # ── Top bar ──
-        self.clock_label = tk.Label(root, text="", fg=SCREEN_FG, bg=SCREEN_BG,
-                                    font=self.f_clock)
-        self.clock_label.place(x=52, y=40)
+        # Popup menu frame
+        self.popup_frame = tk.Frame(self.root, bg=self.theme["popup_bg"],
+                                    highlightbackground=self.theme["muted"],
+                                    highlightthickness=1)
 
-        # Logo
-        try:
-            raw = base64.b64decode(DOSE_LOGO_B64)
-            logo_img = Image.open(io.BytesIO(raw)).resize((36, 36),
-                                                           Image.LANCZOS)
-            self.logo_photo = ImageTk.PhotoImage(logo_img)
-            tk.Label(root, image=self.logo_photo, bg=SCREEN_BG).place(x=680, y=42)
-        except Exception:
-            pass
+        # ── Bindings ───────────────────────────────────────────────────────
+        self.root.bind("<Escape>", lambda e: self._quit())
 
-        wifi = tk.Canvas(root, width=40, height=32, bg=SCREEN_BG, highlightthickness=0)
-        wifi.place(x=730, y=44)
-        self._draw_wifi(wifi, SCREEN_FG)
+        # ── Build all modes ────────────────────────────────────────────────
+        self._build_standby()
+        self._build_storage()
+        self._build_settings()
+        self._build_overlay()
 
-        self.wm_label = tk.Label(root, text="dose", fg="#9A9DA2", bg=SCREEN_BG,
-                                 font=self.f_wm)
-        self.wm_label.place(x=718, y=430)
-
-        # ══════════════════════════════════════
-        # IDLE FRAME — shows slot cards
-        # ══════════════════════════════════════
-        self.idle_frame = tk.Frame(root, bg=SCREEN_BG)
-        self.idle_frame.place(x=0, y=100, width=SCREEN_W, height=SCREEN_H - 100)
-
-        tk.Label(self.idle_frame, text="MEDICATIONS", fg=SCREEN_MUTED, bg=SCREEN_BG,
-                 font=self.f_label).place(x=52, y=10)
-
-        self.slot_cards = {}
-        for i, key in enumerate(SLOT_KEYS):
-            x = 52 + i * 180
-            card = tk.Frame(self.idle_frame, bg=CARD_BG, highlightthickness=0)
-            card.place(x=x, y=42, width=168, height=200)
-
-            accent = SLOT_DEFS[key]["accent"]
-
-            tk.Frame(card, bg=accent, height=6).place(x=0, y=0, width=168)
-
-            name_lbl = tk.Label(card, text="—", fg=SCREEN_FG, bg=CARD_BG,
-                                font=self.f_btn, anchor="w")
-            name_lbl.place(x=14, y=24)
-
-            count_lbl = tk.Label(card, text="0", fg=accent, bg=CARD_BG,
-                                 font=self.f_count)
-            count_lbl.place(x=14, y=60)
-
-            status_lbl = tk.Label(card, text="NOT LOADED", fg=SCREEN_MUTED,
-                                  bg=CARD_BG, font=self.f_hw)
-            status_lbl.place(x=14, y=160)
-
-            self.slot_cards[key] = {
-                "card": card, "name_lbl": name_lbl,
-                "count_lbl": count_lbl, "status_lbl": status_lbl,
-            }
-
-        # Scan hint at bottom
-        self.scan_hint = tk.Label(self.idle_frame, fg=SCREEN_MUTED, bg=SCREEN_BG,
-                                  font=self.f_hint)
-        self.scan_hint.place(x=52, y=270)
-        self._update_scan_hint()
-
-        # Hardware status
-        hw_parts = []
-        if not self.has_camera:
-            hw_parts.append("Camera not connected")
-        if not self.has_touch:
-            hw_parts.append("Touch sensor not connected")
-        if hw_parts:
-            tk.Label(self.idle_frame, text="  ·  ".join(hw_parts),
-                     fg="#444444", bg=SCREEN_BG, font=self.f_hw).place(x=52, y=330)
-
-        # Update button
-        self.update_btn = tk.Label(self.idle_frame, text="UPDATE",
-                                   fg=SCREEN_FG, bg="#1E1E24",
-                                   font=self.f_small, padx=14, pady=6,
-                                   cursor="hand2")
-        self.update_btn.place(x=680, y=270)
-        self.update_btn.bind("<Button-1>", lambda _: self._on_update_pressed())
-
-        self.update_status = tk.Label(self.idle_frame, text="", fg=SCREEN_MUTED,
-                                      bg=SCREEN_BG, font=self.f_hw)
-        self.update_status.place(x=52, y=310)
-
-        # ══════════════════════════════════════
-        # QTY CONFIRM FRAME
-        # ══════════════════════════════════════
-        self.qty_frame = tk.Frame(root, bg=SCREEN_BG)
-        self.qty_frame.place(x=0, y=100, width=SCREEN_W, height=SCREEN_H - 100)
-        self._qty_slot = None
-        self._qty_value = DEFAULT_QTY
-
-        tk.Label(self.qty_frame, text="MEDICATION LOADED", fg=SCREEN_MUTED,
-                 bg=SCREEN_BG, font=self.f_label).place(x=52, y=10)
-
-        self.qty_med_name = tk.Label(self.qty_frame, text="", fg=SCREEN_FG,
-                                     bg=SCREEN_BG, font=self.f_name)
-        self.qty_med_name.place(x=52, y=36)
-
-        tk.Label(self.qty_frame, text="HOW MANY PILLS?", fg=SCREEN_MUTED,
-                 bg=SCREEN_BG, font=self.f_label).place(x=52, y=110)
-
-        self.qty_display = tk.Label(self.qty_frame, text="30", fg="#5B9BFF",
-                                    bg=SCREEN_BG, font=self.f_count)
-        self.qty_display.place(x=52, y=140)
-
-        minus_btn = tk.Label(self.qty_frame, text="−", fg=SCREEN_FG, bg="#1E1E24",
-                             font=self.f_big, width=3, cursor="hand2")
-        minus_btn.place(x=250, y=140, height=80)
-        minus_btn.bind("<Button-1>", lambda _: self._qty_adjust(-1))
-
-        plus_btn = tk.Label(self.qty_frame, text="+", fg=SCREEN_FG, bg="#1E1E24",
-                            font=self.f_big, width=3, cursor="hand2")
-        plus_btn.place(x=370, y=140, height=80)
-        plus_btn.bind("<Button-1>", lambda _: self._qty_adjust(1))
-
-        confirm_qty_btn = tk.Label(self.qty_frame, text="CONFIRM", fg="#FFFFFF",
-                                   bg="#3478F6", font=self.f_btn, padx=40, pady=12,
-                                   cursor="hand2")
-        confirm_qty_btn.place(x=52, y=280)
-        confirm_qty_btn.bind("<Button-1>", lambda _: self._qty_commit())
-
-        # ══════════════════════════════════════
-        # READ FRAME
-        # ══════════════════════════════════════
-        self.read_frame = tk.Frame(root, bg=SCREEN_BG)
-        self.read_frame.place(x=0, y=100, width=SCREEN_W, height=SCREEN_H - 100)
-
-        self.read_name = tk.Label(self.read_frame, text="", fg=SCREEN_FG, bg=SCREEN_BG,
-                                  font=self.f_name, anchor="w")
-        self.read_name.place(x=52, y=30)
-
-        tk.Label(self.read_frame, text="TAKE WITH", fg=SCREEN_MUTED, bg=SCREEN_BG,
-                 font=self.f_label).place(x=52, y=90)
-        self.read_take = tk.Label(self.read_frame, text="", fg=SCREEN_FG, bg=SCREEN_BG,
-                                  font=self.f_body, anchor="nw", justify="left",
-                                  wraplength=620)
-        self.read_take.place(x=52, y=116, width=620)
-
-        self.read_count = tk.Label(self.read_frame, text="", fg=SCREEN_MUTED,
-                                   bg=SCREEN_BG, font=self.f_pills)
-        self.read_count.place(x=52, y=200)
-
-        self.read_hint = tk.Label(self.read_frame, text="Hold to confirm",
-                                  fg=SCREEN_MUTED, bg=SCREEN_BG, font=self.f_hint)
-        self.read_hint.place(x=52, y=290)
-
-        # ══════════════════════════════════════
-        # HOLD FRAME
-        # ══════════════════════════════════════
-        self.hold_frame = tk.Frame(root, bg=SCREEN_BG)
-        self.hold_frame.place(x=0, y=100, width=SCREEN_W, height=SCREEN_H - 100)
-
-        self.hold_name = tk.Label(self.hold_frame, text="", fg=SCREEN_FG, bg=SCREEN_BG,
-                                  font=self.f_name, anchor="w")
-        self.hold_name.place(x=52, y=30)
-
-        tk.Label(self.hold_frame, text="HOLD TO CONFIRM", fg=SCREEN_MUTED,
-                 bg=SCREEN_BG, font=self.f_label).place(x=52, y=110)
-        tk.Label(self.hold_frame, text="Keep holding…", fg=SCREEN_FG,
-                 bg=SCREEN_BG, font=self.f_body).place(x=52, y=136)
-
-        self.prog_canvas = tk.Canvas(self.hold_frame, width=620, height=8,
-                                     bg=SCREEN_BG, highlightthickness=0)
-        self.prog_canvas.place(x=52, y=260)
-
-        # ══════════════════════════════════════
-        # CONFIRM FRAME
-        # ══════════════════════════════════════
-        self.confirm_frame = tk.Frame(root, bg=SCREEN_BG)
-        self.confirm_frame.place(x=0, y=100, width=SCREEN_W, height=SCREEN_H - 100)
-
-        tk.Label(self.confirm_frame, text="CONFIRMED", fg=SCREEN_MUTED,
-                 bg=SCREEN_BG, font=self.f_label).place(x=52, y=50)
-        tk.Label(self.confirm_frame, text="Press down\nto dispense",
-                 fg=SCREEN_FG, bg=SCREEN_BG, font=self.f_big,
-                 anchor="nw", justify="left").place(x=52, y=80)
-
-        # ══════════════════════════════════════
-        # DISPENSED FRAME
-        # ══════════════════════════════════════
-        self.dispensed_frame = tk.Frame(root, bg=SCREEN_BG)
-        self.dispensed_frame.place(x=0, y=100, width=SCREEN_W, height=SCREEN_H - 100)
-
-        tk.Label(self.dispensed_frame, text="DISPENSED", fg=SCREEN_MUTED,
-                 bg=SCREEN_BG, font=self.f_label).place(x=52, y=50)
-        self.disp_name = tk.Label(self.dispensed_frame, text="", fg=SCREEN_FG,
-                                  bg=SCREEN_BG, font=self.f_big, anchor="w")
-        self.disp_name.place(x=52, y=80)
-        self.disp_remaining = tk.Label(self.dispensed_frame, text="", fg=SCREEN_MUTED,
-                                       bg=SCREEN_BG, font=self.f_pills)
-        self.disp_remaining.place(x=52, y=140)
-
-        self.strip_frame = tk.Frame(self.dispensed_frame, bg="#1A1A1C")
-        self.strip_frame.place(x=0, y=260, width=SCREEN_W, height=50)
-        tk.Frame(self.strip_frame, bg="#2A2A2E", height=1).place(x=0, y=0,
-                                                                  width=SCREEN_W)
-        self.strip_label = tk.Label(self.strip_frame, text="", fg=SCREEN_FG,
-                                    bg="#1A1A1C", font=self.f_strip, anchor="w")
-        self.strip_label.place(x=52, y=14)
-
-        # ── Camera preview ──
-        self.preview_label = tk.Label(root, bg=SCREEN_BG, highlightthickness=0)
-
-        # ── Start ──
-        self._go_idle()
+        # ── Show initial mode ──────────────────────────────────────────────
+        self._show_mode("standby")
         self._tick_clock()
-        self._init_camera()
+
+        if CAMERA_AVAILABLE:
+            self._start_camera()
         if self.has_touch:
             self._poll_touch()
+
         # Auto-check for updates on launch
         self.root.after(2000, lambda: self._do_update_check(silent=True))
 
-    # ── Med data management ──────────────────────────────────────────
+        self.root.focus_force()
+
+    # ── Safe widget raising ────────────────────────────────────────────────
+    @staticmethod
+    def _raise_widget(widget):
+        widget.tk.call('raise', widget._w)
+
+    # ── Med data management ────────────────────────────────────────────────
     def _init_med_data(self):
-        saved = _load_data()
+        saved = _load_med_data()
         for key in SLOT_KEYS:
             if key in saved:
                 self.med_data[key] = saved[key]
@@ -463,10 +293,12 @@ class DoseApp:
                     "count": 0,
                     "loaded": False,
                     "take_with": "",
+                    "schedule_time": "8:00 AM",
+                    "schedule_days": list(ALL_DAYS),
                 }
 
-    def _save(self):
-        _save_data(self.med_data)
+    def _save_med(self):
+        _save_med_data(self.med_data)
 
     def _is_loaded(self, key):
         return self.med_data.get(key, {}).get("loaded", False)
@@ -474,13 +306,361 @@ class DoseApp:
     def _get_count(self, key):
         return self.med_data.get(key, {}).get("count", 0)
 
-    # ── UI refresh ───────────────────────────────────────────────────
-    def _refresh_cards(self):
+    # ── Config persistence ─────────────────────────────────────────────────
+    def _load_config(self):
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, "r") as f:
+                    loaded = json.load(f)
+                saved_settings = loaded.get("settings", {})
+                for k in self.settings:
+                    if k in saved_settings:
+                        self.settings[k] = saved_settings[k]
+            except Exception:
+                pass
+
+    def _save_config(self):
+        data = {"settings": self.settings}
+        try:
+            os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    # ── Theme ──────────────────────────────────────────────────────────────
+    def _apply_theme_colors(self):
+        if self.settings.get("night_mode", False):
+            self.theme = dict(LIGHT_THEME)
+        else:
+            self.theme = dict(DARK_THEME)
+
+    def _apply_theme(self):
+        self._apply_theme_colors()
+        self.root.configure(bg=self.theme["bg"])
+        self.main_frame.configure(bg=self.theme["bg"])
+        self.overlay_frame.configure(bg=self.theme["bg"])
+        self.d_btn_canvas.configure(bg=self.theme["bg"])
+        self.popup_frame.configure(bg=self.theme["popup_bg"],
+                                   highlightbackground=self.theme["muted"])
+        self._draw_d_button()
+        self._build_standby()
+        self._build_storage()
+        self._build_settings()
+        self._build_overlay()
+        self._show_mode(self.mode)
+
+    # ── Canvas helper ──────────────────────────────────────────────────────
+    @staticmethod
+    def _canvas_rounded_rect(canvas, x1, y1, x2, y2, r, **kwargs):
+        points = [
+            x1 + r, y1, x1 + r, y1, x2 - r, y1, x2 - r, y1,
+            x2, y1, x2, y1 + r, x2, y1 + r, x2, y2 - r,
+            x2, y2 - r, x2, y2, x2 - r, y2, x2 - r, y2,
+            x1 + r, y2, x1 + r, y2, x1, y2, x1, y2 - r,
+            x1, y2 - r, x1, y1 + r, x1, y1 + r, x1, y1,
+        ]
+        return canvas.create_polygon(points, smooth=True, **kwargs)
+
+    # ── D Button drawing ───────────────────────────────────────────────────
+    def _draw_d_button(self):
+        self.d_btn_canvas.delete("all")
+        loaded = False
+        try:
+            if PIL_AVAILABLE:
+                raw = base64.b64decode(DOSE_LOGO_B64)
+                img = Image.open(io.BytesIO(raw))
+                resample = getattr(Image, 'LANCZOS',
+                                   getattr(Image, 'ANTIALIAS', None))
+                img = img.resize((48, 48), resample)
+                self._d_logo_img = ImageTk.PhotoImage(img)
+                self.d_btn_canvas.create_image(24, 24,
+                                               image=self._d_logo_img)
+                loaded = True
+        except Exception:
+            pass
+        if not loaded:
+            self._canvas_rounded_rect(self.d_btn_canvas, 2, 2, 46, 46,
+                                      12, fill="#4A90D9", outline="")
+            self.d_btn_canvas.create_text(24, 24, text="D",
+                                          fill="white",
+                                          font=self.font_btn_lg)
+
+    # ── D Menu ─────────────────────────────────────────────────────────────
+    def _on_d_pressed(self, event=None):
+        if self.menu_visible:
+            self._hide_menu()
+        else:
+            self._show_menu()
+
+    def _show_menu(self):
+        self.menu_visible = True
+        for w in self.popup_frame.winfo_children():
+            w.destroy()
+
+        items = [("Standby", "standby"), ("Storage", "storage"),
+                 ("Settings", "settings")]
+        for label, mode_val in items:
+            btn = tk.Button(self.popup_frame, text=label,
+                            font=self.font_small_bold,
+                            bg=self.theme["popup_bg"],
+                            fg=self.theme["fg"],
+                            activebackground=self.theme["btn_active"],
+                            activeforeground=self.theme["fg"],
+                            bd=0, padx=20, pady=10, anchor="w",
+                            command=lambda m=mode_val: self._menu_pick(m))
+            btn.pack(fill="x")
+
+        self.popup_frame.place(x=640, y=340, width=150)
+        self._raise_widget(self.popup_frame)
+
+        if self.menu_dismiss_id:
+            self.root.after_cancel(self.menu_dismiss_id)
+        self.menu_dismiss_id = self.root.after(45000, self._hide_menu)
+
+    def _hide_menu(self):
+        self.menu_visible = False
+        self.popup_frame.place_forget()
+        if self.menu_dismiss_id:
+            self.root.after_cancel(self.menu_dismiss_id)
+            self.menu_dismiss_id = None
+
+    def _menu_pick(self, mode_val):
+        self._hide_menu()
+        if self.dispense_state > 0:
+            self._end_dispense()
+        self._show_mode(mode_val)
+
+    # ── Mode switching ─────────────────────────────────────────────────────
+    def _show_mode(self, mode):
+        self.mode = mode
+        self.standby_frame.place_forget()
+        self.storage_frame.place_forget()
+        self.settings_frame.place_forget()
+        self.overlay_frame.place_forget()
+
+        if mode == "standby":
+            self.standby_frame.place(x=0, y=0,
+                                     width=SCREEN_W, height=SCREEN_H)
+            self._update_standby()
+        elif mode == "storage":
+            self.storage_frame.place(x=0, y=0,
+                                     width=SCREEN_W, height=SCREEN_H)
+            self._update_storage()
+        elif mode == "settings":
+            self.settings_frame.place(x=0, y=0,
+                                      width=SCREEN_W, height=SCREEN_H)
+
+        self._raise_widget(self.d_btn_canvas)
+
+    # ── Clock ──────────────────────────────────────────────────────────────
+    def _tick_clock(self):
+        try:
+            now_str = datetime.now().strftime("%-I:%M %p")
+        except ValueError:
+            now_str = datetime.now().strftime("%I:%M %p").lstrip("0")
+        try:
+            self.clock_label.configure(text=now_str)
+        except Exception:
+            pass
+        self.root.after(1000, self._tick_clock)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  STANDBY MODE
+    # ══════════════════════════════════════════════════════════════════════
+    def _build_standby(self):
+        if hasattr(self, 'standby_frame'):
+            self.standby_frame.destroy()
+
+        self.standby_frame = tk.Frame(self.main_frame,
+                                      bg=self.theme["bg"],
+                                      width=SCREEN_W, height=SCREEN_H)
+
+        # Clock
+        self.clock_label = tk.Label(self.standby_frame, text="",
+                                    font=self.font_clock,
+                                    bg=self.theme["bg"],
+                                    fg=self.theme["fg"])
+        self.clock_label.place(x=MARGIN_LEFT, y=30)
+
+        # WiFi icon
+        wifi_canvas = tk.Canvas(self.standby_frame, width=40, height=32,
+                                bg=self.theme["bg"], highlightthickness=0)
+        wifi_canvas.place(x=SCREEN_W - MARGIN_LEFT - 40, y=35)
+        self._draw_wifi(wifi_canvas, self.theme["muted"])
+
+        # NEXT DOSE label
+        tk.Label(self.standby_frame, text="NEXT DOSE",
+                 font=self.font_label,
+                 bg=self.theme["bg"],
+                 fg=self.theme["muted"]).place(x=MARGIN_LEFT, y=120)
+
+        self.next_dose_label = tk.Label(self.standby_frame, text="",
+                                        font=self.font_hero,
+                                        bg=self.theme["bg"],
+                                        fg=self.theme["fg"])
+        self.next_dose_label.place(x=MARGIN_LEFT, y=148)
+
+        self.standby_pill_count = tk.Label(self.standby_frame, text="",
+                                           font=self.font_body,
+                                           bg=self.theme["bg"],
+                                           fg=self.theme["muted"])
+        self.standby_pill_count.place(x=MARGIN_LEFT, y=210)
+
+        # Hardware status
+        hw_parts = []
+        if not CAMERA_AVAILABLE:
+            hw_parts.append("Camera not connected")
+        if not self.has_touch:
+            hw_parts.append("Touch sensor not connected")
+        if hw_parts:
+            tk.Label(self.standby_frame, text="  ·  ".join(hw_parts),
+                     font=self.font_small,
+                     bg=self.theme["bg"],
+                     fg="#444444").place(x=MARGIN_LEFT, y=280)
+
+        # Scan hint
+        self.standby_scan_hint = tk.Label(self.standby_frame, text="",
+                                          font=self.font_small,
+                                          bg=self.theme["bg"],
+                                          fg=self.theme["muted"])
+        self.standby_scan_hint.place(x=MARGIN_LEFT, y=320)
+
+        self.standby_frame.bind("<Button-1>", self._standby_tap)
+
+    def _standby_tap(self, event=None):
+        for key in SLOT_KEYS:
+            if self._is_loaded(key) and self._get_count(key) > 0:
+                self._start_dispense(key)
+                return
+
+    def _update_standby(self):
+        next_time, next_name, total_pills = self._compute_next_dose()
+        self.next_dose_label.configure(text=next_time)
+        self.standby_pill_count.configure(
+            text=f"{total_pills} pills remaining  ·  {next_name}")
+
+        loaded = sum(1 for k in SLOT_KEYS if self._is_loaded(k))
+        if loaded == 0:
+            self.standby_scan_hint.configure(
+                text="Scan a medication QR to load a slot")
+        elif loaded < 4:
+            self.standby_scan_hint.configure(
+                text=f"{loaded}/4 loaded — scan more QR codes")
+        else:
+            self.standby_scan_hint.configure(text="All slots loaded")
+
+    def _compute_next_dose(self):
+        now = datetime.now()
+        today_name = now.strftime("%a")
+        best_time = None
+        best_name = ""
+        total = 0
+        for key in SLOT_KEYS:
+            md = self.med_data[key]
+            if not md.get("loaded"):
+                continue
+            total += md.get("count", 0)
+            sched = md.get("schedule_time", "8:00 AM")
+            days = md.get("schedule_days", ALL_DAYS)
+            if today_name in days:
+                try:
+                    t = datetime.strptime(sched, "%I:%M %p").replace(
+                        year=now.year, month=now.month, day=now.day)
+                    if t > now:
+                        if best_time is None or t < best_time:
+                            best_time = t
+                            best_name = md["name"]
+                except Exception:
+                    pass
+        if best_time:
+            try:
+                display = best_time.strftime("%-I:%M %p")
+            except ValueError:
+                display = best_time.strftime("%I:%M %p").lstrip("0")
+        else:
+            display = "No more today"
+        return display, best_name, total
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  STORAGE MODE — pill cards with QR-loaded data
+    # ══════════════════════════════════════════════════════════════════════
+    def _build_storage(self):
+        if hasattr(self, 'storage_frame'):
+            self.storage_frame.destroy()
+
+        self.storage_frame = tk.Frame(self.main_frame,
+                                      bg=self.theme["bg"],
+                                      width=SCREEN_W, height=SCREEN_H)
+
+        tk.Label(self.storage_frame, text="STORAGE",
+                 font=self.font_label,
+                 bg=self.theme["bg"],
+                 fg=self.theme["muted"]).place(x=MARGIN_LEFT, y=20)
+
+        # Slot cards
+        self.slot_cards = {}
+        for i, key in enumerate(SLOT_KEYS):
+            x = MARGIN_LEFT + i * 180
+            card = tk.Frame(self.storage_frame, bg=self.theme["card_bg"],
+                            highlightthickness=0)
+            card.place(x=x, y=52, width=168, height=200)
+
+            accent = SLOT_DEFS[key]["accent"]
+
+            tk.Frame(card, bg=accent, height=6).place(x=0, y=0, width=168)
+
+            name_lbl = tk.Label(card, text="—", fg=self.theme["fg"],
+                                bg=self.theme["card_bg"],
+                                font=self.font_btn_lg, anchor="w")
+            name_lbl.place(x=14, y=24)
+
+            count_lbl = tk.Label(card, text="0", fg=accent,
+                                 bg=self.theme["card_bg"],
+                                 font=self.font_count)
+            count_lbl.place(x=14, y=60)
+
+            status_lbl = tk.Label(card, text="NOT LOADED",
+                                  fg=self.theme["muted"],
+                                  bg=self.theme["card_bg"],
+                                  font=self.font_label)
+            status_lbl.place(x=14, y=160)
+
+            card.bind("<Button-1>",
+                      lambda e, k=key: self._storage_card_tap(k))
+            name_lbl.bind("<Button-1>",
+                          lambda e, k=key: self._storage_card_tap(k))
+            count_lbl.bind("<Button-1>",
+                           lambda e, k=key: self._storage_card_tap(k))
+
+            self.slot_cards[key] = {
+                "card": card, "name_lbl": name_lbl,
+                "count_lbl": count_lbl, "status_lbl": status_lbl,
+            }
+
+        # Scan hint at bottom
+        self.storage_scan_hint = tk.Label(self.storage_frame, text="",
+                                          fg=self.theme["muted"],
+                                          bg=self.theme["bg"],
+                                          font=self.font_small)
+        self.storage_scan_hint.place(x=MARGIN_LEFT, y=280)
+
+        # Schedule editor (shown below cards for selected pill)
+        self.sched_frame = tk.Frame(self.storage_frame,
+                                    bg=self.theme["bg"])
+        self.sched_frame.place(x=MARGIN_LEFT, y=310,
+                               width=SCREEN_W - 2 * MARGIN_LEFT, height=150)
+
+    def _storage_card_tap(self, key):
+        if self._is_loaded(key) and self._get_count(key) > 0:
+            self._start_dispense(key)
+
+    def _update_storage(self):
         for key in SLOT_KEYS:
             c = self.slot_cards[key]
             md = self.med_data[key]
             accent = SLOT_DEFS[key]["accent"]
-            if md["loaded"]:
+            if md.get("loaded"):
                 c["name_lbl"].configure(text=md["name"])
                 c["count_lbl"].configure(text=str(md["count"]))
                 if md["count"] > 0:
@@ -490,42 +670,78 @@ class DoseApp:
             else:
                 c["name_lbl"].configure(text="—")
                 c["count_lbl"].configure(text="0")
-                c["status_lbl"].configure(text="NOT LOADED", fg=SCREEN_MUTED)
+                c["status_lbl"].configure(text="NOT LOADED",
+                                          fg=self.theme["muted"])
 
-    def _update_scan_hint(self):
         loaded = sum(1 for k in SLOT_KEYS if self._is_loaded(k))
         if loaded == 0:
-            self.scan_hint.configure(text="Scan a medication QR to load a slot")
+            self.storage_scan_hint.configure(
+                text="Scan a medication QR code to load a slot")
         elif loaded < 4:
-            self.scan_hint.configure(text=f"{loaded}/4 loaded — scan more QR codes")
+            self.storage_scan_hint.configure(
+                text=f"{loaded}/4 loaded — scan more QR codes")
         else:
-            self.scan_hint.configure(text="All slots loaded")
+            self.storage_scan_hint.configure(text="All slots loaded")
 
-    # ── Safe raise helper ────────────────────────────────────────────
-    def _show_frame(self, frame):
-        _raise(frame)
-        _raise(self.wm_label)
-
-    # ── State transitions ────────────────────────────────────────────
-    def _go_idle(self):
-        self.state = S_IDLE
-        self.current_med = None
-        self._refresh_cards()
-        self._update_scan_hint()
-        self._show_frame(self.idle_frame)
-
-    def _go_qty_confirm(self, slot_key, med_name):
-        self.state = S_QTY_CONFIRM
+    # ══════════════════════════════════════════════════════════════════════
+    #  QTY CONFIRM (overlay for first-time QR load)
+    # ══════════════════════════════════════════════════════════════════════
+    def _show_qty_confirm(self, slot_key, med_name):
         self._qty_slot = slot_key
         md = self.med_data[slot_key]
-        if md["loaded"] and md["count"] > 0:
+        if md.get("loaded") and md["count"] > 0:
             self._qty_value = md["count"]
         else:
             self._qty_value = DEFAULT_QTY
+
+        for w in self.overlay_frame.winfo_children():
+            w.destroy()
+
         accent = SLOT_DEFS[slot_key]["accent"]
-        self.qty_med_name.configure(text=med_name, fg=accent)
-        self.qty_display.configure(text=str(self._qty_value), fg=accent)
-        self._show_frame(self.qty_frame)
+
+        self.overlay_frame.place(x=0, y=0,
+                                 width=SCREEN_W, height=SCREEN_H)
+        self._raise_widget(self.overlay_frame)
+        self._raise_widget(self.d_btn_canvas)
+
+        tk.Label(self.overlay_frame, text="MEDICATION LOADED",
+                 fg=self.theme["muted"], bg=self.theme["bg"],
+                 font=self.font_label).place(x=MARGIN_LEFT, y=40)
+
+        tk.Label(self.overlay_frame, text=med_name,
+                 fg=accent, bg=self.theme["bg"],
+                 font=self.font_name).place(x=MARGIN_LEFT, y=70)
+
+        tk.Label(self.overlay_frame, text="HOW MANY PILLS?",
+                 fg=self.theme["muted"], bg=self.theme["bg"],
+                 font=self.font_label).place(x=MARGIN_LEFT, y=150)
+
+        self.qty_display = tk.Label(self.overlay_frame,
+                                    text=str(self._qty_value),
+                                    fg=accent, bg=self.theme["bg"],
+                                    font=self.font_count)
+        self.qty_display.place(x=MARGIN_LEFT, y=175)
+
+        minus_btn = tk.Label(self.overlay_frame, text="−",
+                             fg=self.theme["fg"], bg=self.theme["btn_bg"],
+                             font=self.font_bold_lg, width=3, cursor="hand2")
+        minus_btn.place(x=250, y=180, height=70)
+        minus_btn.bind("<Button-1>", lambda _: self._qty_adjust(-1))
+
+        plus_btn = tk.Label(self.overlay_frame, text="+",
+                            fg=self.theme["fg"], bg=self.theme["btn_bg"],
+                            font=self.font_bold_lg, width=3, cursor="hand2")
+        plus_btn.place(x=370, y=180, height=70)
+        plus_btn.bind("<Button-1>", lambda _: self._qty_adjust(1))
+
+        confirm_btn = tk.Button(self.overlay_frame, text="CONFIRM",
+                                fg="#FFFFFF", bg="#3478F6",
+                                activebackground="#2A60C8",
+                                activeforeground="#FFFFFF",
+                                font=self.font_btn_lg, bd=0,
+                                padx=40, pady=12,
+                                command=self._qty_commit)
+        confirm_btn.place(x=MARGIN_LEFT, y=320)
 
     def _qty_adjust(self, delta):
         self._qty_value = max(1, self._qty_value + delta)
@@ -537,97 +753,511 @@ class DoseApp:
         if key and key in self.med_data:
             self.med_data[key]["count"] = self._qty_value
             self.med_data[key]["loaded"] = True
-            self._save()
-        self._go_idle()
+            self._save_med()
+        self.overlay_frame.place_forget()
+        self._show_mode(self.mode)
 
-    def _go_read(self, key):
-        md = self.med_data[key]
-        if not md["loaded"] or md["count"] <= 0:
+    # ══════════════════════════════════════════════════════════════════════
+    #  SETTINGS MODE
+    # ══════════════════════════════════════════════════════════════════════
+    def _build_settings(self):
+        if hasattr(self, 'settings_frame'):
+            self.settings_frame.destroy()
+
+        self.settings_frame = tk.Frame(self.main_frame,
+                                       bg=self.theme["bg"],
+                                       width=SCREEN_W, height=SCREEN_H)
+
+        tk.Label(self.settings_frame, text="SETTINGS",
+                 font=self.font_label,
+                 bg=self.theme["bg"],
+                 fg=self.theme["muted"]).place(x=MARGIN_LEFT, y=30)
+
+        # Night mode toggle
+        tk.Label(self.settings_frame, text="Day / Night Mode",
+                 font=self.font_body,
+                 bg=self.theme["bg"],
+                 fg=self.theme["fg"]).place(x=MARGIN_LEFT, y=80)
+
+        self.night_toggle = tk.Canvas(self.settings_frame,
+                                      width=60, height=30,
+                                      bg=self.theme["bg"],
+                                      highlightthickness=0)
+        self.night_toggle.place(x=400, y=80)
+        self._draw_toggle(self.night_toggle,
+                          self.settings.get("night_mode", False))
+        self.night_toggle.bind("<Button-1>", self._toggle_night)
+
+        # Alarm sound toggle
+        tk.Label(self.settings_frame, text="Alarm Sound",
+                 font=self.font_body,
+                 bg=self.theme["bg"],
+                 fg=self.theme["fg"]).place(x=MARGIN_LEFT, y=130)
+
+        self.alarm_toggle = tk.Canvas(self.settings_frame,
+                                      width=60, height=30,
+                                      bg=self.theme["bg"],
+                                      highlightthickness=0)
+        self.alarm_toggle.place(x=400, y=130)
+        self._draw_toggle(self.alarm_toggle,
+                          self.settings.get("alarm_sound", True))
+        self.alarm_toggle.bind("<Button-1>", self._toggle_alarm)
+
+        # Update section
+        tk.Label(self.settings_frame, text="Check for Updates",
+                 font=self.font_body,
+                 bg=self.theme["bg"],
+                 fg=self.theme["fg"]).place(x=MARGIN_LEFT, y=200)
+
+        self.update_btn = tk.Button(self.settings_frame, text="UPDATE",
+                                    font=self.font_btn,
+                                    bg="#4A90D9", fg="#FFFFFF",
+                                    activebackground="#3A7BC8",
+                                    activeforeground="#FFFFFF",
+                                    bd=0, padx=20, pady=6,
+                                    command=self._on_update_pressed)
+        self.update_btn.place(x=400, y=196)
+
+        self.update_status = tk.Label(self.settings_frame, text="",
+                                      font=self.font_small,
+                                      bg=self.theme["bg"],
+                                      fg=self.theme["muted"])
+        self.update_status.place(x=MARGIN_LEFT, y=250)
+
+        # Constant scan toggle
+        tk.Label(self.settings_frame, text="Constant QR Scan",
+                 font=self.font_body,
+                 bg=self.theme["bg"],
+                 fg=self.theme["fg"]).place(x=MARGIN_LEFT, y=310)
+
+        self.scan_toggle = tk.Canvas(self.settings_frame,
+                                     width=60, height=30,
+                                     bg=self.theme["bg"],
+                                     highlightthickness=0)
+        self.scan_toggle.place(x=400, y=310)
+        self._draw_toggle(self.scan_toggle,
+                          self.settings.get("constant_scan", False))
+        self.scan_toggle.bind("<Button-1>", self._toggle_constant_scan)
+
+    def _draw_toggle(self, canvas, is_on):
+        canvas.delete("all")
+        if is_on:
+            self._canvas_rounded_rect(canvas, 0, 0, 60, 30, 15,
+                                      fill="#4A90D9", outline="")
+            canvas.create_oval(32, 2, 58, 28, fill="#FFFFFF", outline="")
+        else:
+            self._canvas_rounded_rect(canvas, 0, 0, 60, 30, 15,
+                                      fill=self.theme["btn_bg"], outline="")
+            canvas.create_oval(2, 2, 28, 28, fill="#FFFFFF", outline="")
+
+    def _toggle_night(self, event=None):
+        self.settings["night_mode"] = not self.settings.get("night_mode",
+                                                            False)
+        self._save_config()
+        self._apply_theme()
+
+    def _toggle_alarm(self, event=None):
+        self.settings["alarm_sound"] = not self.settings.get("alarm_sound",
+                                                             True)
+        self._save_config()
+        self._draw_toggle(self.alarm_toggle, self.settings["alarm_sound"])
+
+    def _toggle_constant_scan(self, event=None):
+        self.settings["constant_scan"] = not self.settings.get(
+            "constant_scan", False)
+        self._save_config()
+        self._draw_toggle(self.scan_toggle, self.settings["constant_scan"])
+
+    # ── Auto-update ────────────────────────────────────────────────────────
+    def _on_update_pressed(self):
+        self.update_status.configure(text="Checking...")
+        self.update_btn.configure(state="disabled")
+        threading.Thread(target=self._do_update_check, daemon=True).start()
+
+    def _do_update_check(self, silent=False):
+        try:
+            url = RAW_URL + "/dose_app.py"
+            resp = urlopen(url, timeout=15)
+            remote_data = resp.read()
+        except Exception:
+            if not silent:
+                self.root.after(0, self._update_result,
+                                "No internet — try later")
             return
-        self.state = S_READ
-        self.current_med = key
-        accent = SLOT_DEFS[key]["accent"]
-        self.read_name.configure(text=md["name"], fg=accent)
-        self.read_take.configure(text=md.get("take_with", ""))
-        self.read_count.configure(text=f"{md['count']} left")
-        self._show_frame(self.read_frame)
 
-    def _go_hold(self):
-        if not self.current_med:
+        remote_hash = hashlib.md5(remote_data).hexdigest()
+
+        local_hash = ""
+        local_path = os.path.abspath(__file__)
+        try:
+            with open(local_path, "rb") as f:
+                local_hash = hashlib.md5(f.read()).hexdigest()
+        except Exception:
+            pass
+
+        if remote_hash == local_hash:
+            if not silent:
+                self.root.after(0, self._update_result,
+                                "Already up to date")
             return
-        self.state = S_HOLD
-        self.hold_start = time.monotonic()
-        md = self.med_data[self.current_med]
-        accent = SLOT_DEFS[self.current_med]["accent"]
-        self.hold_name.configure(text=md["name"], fg=accent)
-        self._show_frame(self.hold_frame)
-        self._update_progress()
 
-    def _go_confirm(self):
-        self.state = S_CONFIRM
-        self._show_frame(self.confirm_frame)
+        self.root.after(0, self._apply_update, remote_data)
 
-    def _go_dispensed(self):
-        self.state = S_DISPENSED
-        key = self.current_med
+    def _update_result(self, msg):
+        try:
+            self.update_status.configure(text=msg)
+            self.update_btn.configure(state="normal")
+        except Exception:
+            pass
+
+    def _apply_update(self, remote_data):
+        try:
+            self.update_status.configure(text="Downloading...")
+        except Exception:
+            pass
+
+        def do_download():
+            try:
+                local_path = os.path.abspath(__file__)
+                with open(local_path, "wb") as f:
+                    f.write(remote_data)
+
+                # Also update in APP_DIR
+                os.makedirs(APP_DIR, exist_ok=True)
+                app_copy = os.path.join(APP_DIR, "dose_app.py")
+                with open(app_copy, "wb") as f:
+                    f.write(remote_data)
+
+                # Fetch DOSE.sh
+                try:
+                    resp = urlopen(RAW_URL + "/DOSE.sh", timeout=15)
+                    sh_data = resp.read()
+                    sh_path = os.path.join(APP_DIR, "DOSE.sh")
+                    with open(sh_path, "wb") as f:
+                        f.write(sh_data)
+                    os.chmod(sh_path, 0o755)
+                except Exception:
+                    pass
+
+                self.root.after(0, self._finish_update)
+            except Exception as e:
+                self.root.after(0, self._update_result,
+                                f"Update failed: {e}")
+
+        threading.Thread(target=do_download, daemon=True).start()
+
+    def _finish_update(self):
+        try:
+            self.update_status.configure(text="Updated! Restarting...")
+        except Exception:
+            pass
+        self.root.after(2000, self._restart_app)
+
+    def _restart_app(self):
+        try:
+            if self.camera and self.camera_running:
+                self.camera_running = False
+                self.camera.stop()
+                self.camera.close()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        try:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception:
+            sys.exit(0)
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  DISPENSING FLOW (Overlay)
+    # ══════════════════════════════════════════════════════════════════════
+    def _build_overlay(self):
+        for w in self.overlay_frame.winfo_children():
+            w.destroy()
+        self.overlay_frame.configure(bg=self.theme["bg"])
+
+    def _start_dispense(self, pill_key):
+        md = self.med_data.get(pill_key, {})
+        if not md.get("loaded") or md.get("count", 0) <= 0:
+            return
+        self.dispense_pill = pill_key
+        self.dispense_state = 1
+        self.overlay_frame.place(x=0, y=0,
+                                 width=SCREEN_W, height=SCREEN_H)
+        self._raise_widget(self.overlay_frame)
+        self._raise_widget(self.d_btn_canvas)
+        self._show_dispense_read()
+
+    def _end_dispense(self):
+        self.dispense_state = 0
+        self.dispense_pill = None
+        if self.hold_after_id:
+            self.root.after_cancel(self.hold_after_id)
+            self.hold_after_id = None
+        self.overlay_frame.place_forget()
+        self._show_mode(self.mode)
+
+    # ── Stage 1: READ ──────────────────────────────────────────────────────
+    def _show_dispense_read(self):
+        for w in self.overlay_frame.winfo_children():
+            w.destroy()
+
+        md = self.med_data[self.dispense_pill]
+        accent = SLOT_DEFS[self.dispense_pill]["accent"]
+
+        tk.Label(self.overlay_frame, text="SCAN RESULT",
+                 font=self.font_label,
+                 bg=self.theme["bg"],
+                 fg=self.theme["muted"]).place(x=MARGIN_LEFT, y=40)
+
+        tk.Label(self.overlay_frame, text=md["name"],
+                 font=self.font_name,
+                 bg=self.theme["bg"],
+                 fg=accent).place(x=MARGIN_LEFT, y=72)
+
+        tk.Label(self.overlay_frame,
+                 text=f"{md['count']} pills remaining",
+                 font=self.font_body,
+                 bg=self.theme["bg"],
+                 fg=self.theme["muted"]).place(x=MARGIN_LEFT, y=125)
+
+        take_with = md.get("take_with", "")
+        if take_with:
+            tk.Label(self.overlay_frame, text=take_with,
+                     font=self.font_small,
+                     bg=self.theme["bg"],
+                     fg=self.theme["fg"]).place(x=MARGIN_LEFT, y=170)
+
+        tk.Label(self.overlay_frame, text="Dispense this medication?",
+                 font=self.font_body_bold,
+                 bg=self.theme["bg"],
+                 fg=self.theme["fg"]).place(x=MARGIN_LEFT, y=280)
+
+        tk.Button(self.overlay_frame, text="Yes",
+                  font=self.font_btn_lg,
+                  bg="#4A90D9", fg="#FFFFFF",
+                  activebackground="#3A7BC8",
+                  activeforeground="#FFFFFF",
+                  bd=0, padx=40, pady=12,
+                  command=self._read_yes).place(x=MARGIN_LEFT, y=340)
+
+        tk.Button(self.overlay_frame, text="No",
+                  font=self.font_btn_lg,
+                  bg=self.theme["btn_bg"],
+                  fg=self.theme["fg"],
+                  activebackground=self.theme["btn_active"],
+                  activeforeground=self.theme["fg"],
+                  bd=0, padx=40, pady=12,
+                  command=self._end_dispense).place(x=220, y=340)
+
+    def _read_yes(self):
+        self.dispense_state = 2
+        self._show_dispense_hold()
+
+    # ── Stage 2: HOLD ─────────────────────────────────────────────────────
+    def _show_dispense_hold(self):
+        for w in self.overlay_frame.winfo_children():
+            w.destroy()
+
+        md = self.med_data[self.dispense_pill]
+        accent = SLOT_DEFS[self.dispense_pill]["accent"]
+
+        tk.Label(self.overlay_frame, text="PRESS AND HOLD TO DISPENSE",
+                 font=self.font_label,
+                 bg=self.theme["bg"],
+                 fg=self.theme["muted"]).place(x=MARGIN_LEFT, y=80)
+
+        lbl_name = tk.Label(self.overlay_frame, text=md["name"],
+                            font=self.font_title,
+                            bg=self.theme["bg"],
+                            fg=accent)
+        lbl_name.place(x=MARGIN_LEFT, y=120)
+
+        self.hold_canvas = tk.Canvas(self.overlay_frame,
+                                     width=SCREEN_W - 2 * MARGIN_LEFT,
+                                     height=40,
+                                     bg=self.theme["card_bg"],
+                                     highlightthickness=0)
+        self.hold_canvas.place(x=MARGIN_LEFT, y=200)
+
+        self.hold_progress_bar = self.hold_canvas.create_rectangle(
+            0, 0, 0, 40, fill=accent, outline="")
+
+        self.hold_label = tk.Label(self.overlay_frame,
+                                   text="Hold for 3 seconds...",
+                                   font=self.font_body,
+                                   bg=self.theme["bg"],
+                                   fg=self.theme["fg"])
+        self.hold_label.place(x=MARGIN_LEFT, y=260)
+
+        self.hold_area = tk.Frame(self.overlay_frame,
+                                  bg=self.theme["bg"],
+                                  width=SCREEN_W, height=SCREEN_H)
+        self.hold_area.place(x=0, y=0, width=SCREEN_W, height=SCREEN_H)
+        self._raise_widget(self.hold_canvas)
+        self._raise_widget(lbl_name)
+        self._raise_widget(self.hold_label)
+        self._raise_widget(self.d_btn_canvas)
+
+        self._bind_hold_recursive(self.overlay_frame)
+
+    def _bind_hold_recursive(self, widget):
+        widget.bind("<ButtonPress-1>", self._hold_press)
+        widget.bind("<ButtonRelease-1>", self._hold_release)
+        for child in widget.winfo_children():
+            self._bind_hold_recursive(child)
+
+    def _hold_press(self, event=None):
+        if self.dispense_state != 2:
+            return
+        self.hold_start = time.time()
+        self._hold_update()
+
+    def _hold_release(self, event=None):
+        if self.dispense_state != 2:
+            return
+        self.hold_start = 0
+        if self.hold_after_id:
+            self.root.after_cancel(self.hold_after_id)
+            self.hold_after_id = None
+        try:
+            self.hold_canvas.coords(self.hold_progress_bar, 0, 0, 0, 40)
+            self.hold_label.configure(text="Hold for 3 seconds...")
+        except Exception:
+            pass
+
+    def _hold_update(self):
+        if self.dispense_state != 2 or self.hold_start == 0:
+            return
+        elapsed = time.time() - self.hold_start
+        bar_w = SCREEN_W - 2 * MARGIN_LEFT
+        frac = min(elapsed / HOLD_TIME, 1.0)
+        try:
+            self.hold_canvas.coords(self.hold_progress_bar,
+                                    0, 0, int(bar_w * frac), 40)
+            remaining = max(0, HOLD_TIME - elapsed)
+            self.hold_label.configure(
+                text=f"Hold for {remaining:.1f} seconds...")
+        except Exception:
+            pass
+
+        if elapsed >= HOLD_TIME:
+            self.hold_start = 0
+            self.dispense_state = 3
+            self._show_dispense_confirm()
+            return
+
+        self.hold_after_id = self.root.after(50, self._hold_update)
+
+    # ── Stage 3: CONFIRM ───────────────────────────────────────────────────
+    def _show_dispense_confirm(self):
+        for w in self.overlay_frame.winfo_children():
+            w.destroy()
+
+        md = self.med_data[self.dispense_pill]
+        accent = SLOT_DEFS[self.dispense_pill]["accent"]
+
+        tk.Label(self.overlay_frame, text="READY",
+                 font=self.font_label,
+                 bg=self.theme["bg"],
+                 fg=self.theme["muted"]).place(x=MARGIN_LEFT, y=80)
+
+        tk.Label(self.overlay_frame, text=md["name"],
+                 font=self.font_title,
+                 bg=self.theme["bg"],
+                 fg=accent).place(x=MARGIN_LEFT, y=120)
+
+        tk.Label(self.overlay_frame, text="Press down to dispense",
+                 font=self.font_body,
+                 bg=self.theme["bg"],
+                 fg=self.theme["fg"]).place(x=MARGIN_LEFT, y=200)
+
+        tk.Button(self.overlay_frame, text="DISPENSE",
+                  font=self.font_btn_lg,
+                  bg=accent, fg="#FFFFFF",
+                  activebackground=accent,
+                  activeforeground="#FFFFFF",
+                  bd=0, padx=60, pady=16,
+                  command=self._confirm_dispense
+                  ).place(x=MARGIN_LEFT, y=270)
+
+        tk.Button(self.overlay_frame, text="Cancel",
+                  font=self.font_btn,
+                  bg=self.theme["btn_bg"],
+                  fg=self.theme["fg"],
+                  activebackground=self.theme["btn_active"],
+                  activeforeground=self.theme["fg"],
+                  bd=0, padx=30, pady=12,
+                  command=self._end_dispense
+                  ).place(x=MARGIN_LEFT, y=350)
+
+    def _confirm_dispense(self):
+        key = self.dispense_pill
         md = self.med_data[key]
-
         if md["count"] > 0:
             md["count"] -= 1
         if md["count"] <= 0:
             md["loaded"] = False
             md["count"] = 0
-        self._save()
+        self._save_med()
+        self.dispense_state = 4
+        self._play_sound()
+        self._show_dispense_done()
 
-        accent = SLOT_DEFS[key]["accent"]
-        self.disp_name.configure(text=md["name"], fg=accent)
+    # ── Stage 4: DISPENSED ─────────────────────────────────────────────────
+    def _show_dispense_done(self):
+        for w in self.overlay_frame.winfo_children():
+            w.destroy()
+
+        md = self.med_data[self.dispense_pill]
+        accent = SLOT_DEFS[self.dispense_pill]["accent"]
+
+        tk.Label(self.overlay_frame, text="DISPENSED",
+                 font=self.font_label,
+                 bg=self.theme["bg"],
+                 fg=self.theme["muted"]).place(x=MARGIN_LEFT, y=80)
+
+        tk.Label(self.overlay_frame, text=md["name"],
+                 font=self.font_name,
+                 bg=self.theme["bg"],
+                 fg=accent).place(x=MARGIN_LEFT, y=120)
+
+        tk.Label(self.overlay_frame, text="✓",
+                 font=tkfont.Font(family="DejaVu Sans", size=72),
+                 bg=self.theme["bg"],
+                 fg="#4AD97A").place(x=SCREEN_W // 2 - 40, y=200)
+
         remaining = md["count"]
         if remaining > 0:
-            self.disp_remaining.configure(text=f"{remaining} remaining")
+            text = f"{remaining} pills remaining"
         else:
-            self.disp_remaining.configure(text="Slot now empty — scan to reload")
-        self.strip_label.configure(
-            text=f"Dispensed: {md['name']}  ·  please check before taking")
-        self._show_frame(self.dispensed_frame)
-        self.root.after(int(DISPENSED_TIME * 1000), self._dispensed_timeout)
+            text = "Slot empty — scan QR to reload"
+        tk.Label(self.overlay_frame, text=text,
+                 font=self.font_body,
+                 bg=self.theme["bg"],
+                 fg=self.theme["muted"]).place(x=MARGIN_LEFT, y=380)
 
-    def _dispensed_timeout(self):
-        if self.state == S_DISPENSED:
-            self._go_idle()
+        self.root.after(int(DISPENSED_TIME * 1000), self._end_dispense)
 
-    # ── Progress bar ─────────────────────────────────────────────────
-    def _update_progress(self):
-        if self.state != S_HOLD:
+    def _play_sound(self):
+        if not self.settings.get("alarm_sound", True):
             return
-        elapsed = time.monotonic() - self.hold_start
-        frac = min(elapsed / HOLD_TIME, 1.0)
-        accent = SLOT_DEFS.get(self.current_med, {}).get("accent", "#5B9BFF")
+        try:
+            subprocess.Popen(["aplay", "-q",
+                              "/usr/share/sounds/alsa/Front_Center.wav"],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except Exception:
+            try:
+                self.root.bell()
+            except Exception:
+                pass
 
-        self.prog_canvas.delete("all")
-        self.prog_canvas.create_rectangle(0, 0, 620, 8, fill="#2A2A2E", outline="")
-        self.prog_canvas.create_rectangle(0, 0, int(620 * frac), 8,
-                                          fill=accent, outline="")
-        if frac >= 1.0:
-            self._go_confirm()
-        else:
-            self.root.after(30, self._update_progress)
-
-    # ── Tap handling ─────────────────────────────────────────────────
-    def _on_tap(self, event=None):
-        if self.state == S_IDLE:
-            if not self.has_camera:
-                for key in SLOT_KEYS:
-                    if self._is_loaded(key) and self._get_count(key) > 0:
-                        self._go_read(key)
-                        return
-        elif self.state == S_READ:
-            self._go_hold()
-        elif self.state == S_CONFIRM:
-            self._go_dispensed()
-        elif self.state == S_DISPENSED:
-            self._go_idle()
-
-    # ── MPR121 polling ───────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════
+    #  MPR121 TOUCH POLLING
+    # ══════════════════════════════════════════════════════════════════════
     def _poll_touch(self):
         if not self.mpr:
             return
@@ -644,53 +1274,44 @@ class DoseApp:
         self.root.after(50, self._poll_touch)
 
     def _on_pad_press(self, key):
-        if self.state == S_IDLE:
+        if self.dispense_state == 0:
             if self._is_loaded(key) and self._get_count(key) > 0:
-                self._go_read(key)
-        elif self.state == S_READ and self.current_med == key:
-            self._go_hold()
-        elif self.state == S_CONFIRM:
-            self._go_dispensed()
+                self._start_dispense(key)
 
-    # ── Camera / QR scanning ─────────────────────────────────────────
-    def _init_camera(self):
-        if not self.has_camera:
-            return
+    # ══════════════════════════════════════════════════════════════════════
+    #  CAMERA / QR SCANNING
+    # ══════════════════════════════════════════════════════════════════════
+    def _start_camera(self):
         try:
-            self.cam = Picamera2()
-            config = self.cam.create_preview_configuration(
-                main={"size": CAPTURE_RES, "format": "RGB888"})
-            self.cam.configure(config)
-            self.cam.start()
+            self.camera = Picamera2()
+            config = self.camera.create_preview_configuration(
+                main={"size": (1280, 720), "format": "RGB888"})
+            self.camera.configure(config)
+            self.camera.start()
             try:
-                self.cam.set_controls({"AfMode": 2})
+                self.camera.set_controls({"AfMode": 2})
             except Exception:
                 pass
-            self.root.after(200, self._scan_loop)
+            self.camera_running = True
+            threading.Thread(target=self._camera_loop, daemon=True).start()
         except Exception:
-            self.has_camera = False
-            self.cam = None
+            self.camera = None
+            self.camera_running = False
 
-    def _scan_loop(self):
-        if not self.cam:
-            return
-        try:
-            arr = self.cam.capture_array()
-            img = Image.fromarray(arr[:, :, ::-1])
-
-            for code in qr_decode(img):
-                text = code.data.decode("utf-8", "ignore").strip()
-                self._handle_qr(text)
-                break
-
-            if self.show_preview:
-                disp = img.resize((200, 120))
-                self.photo = ImageTk.PhotoImage(disp)
-                self.preview_label.configure(image=self.photo)
-        except Exception:
-            pass
-
-        self.root.after(SCAN_INTERVAL, self._scan_loop)
+    def _camera_loop(self):
+        while self.camera_running:
+            try:
+                frame = self.camera.capture_array()
+                img = Image.fromarray(frame[:, :, ::-1])
+                results = pyzbar_decode(img)
+                for r in results:
+                    text = r.data.decode("utf-8", errors="ignore").strip()
+                    self.root.after(0, self._handle_qr, text)
+                    time.sleep(2)
+                    break
+                time.sleep(0.1)
+            except Exception:
+                time.sleep(1)
 
     def _handle_qr(self, raw_text):
         """Parse QR payload and route to the right slot."""
@@ -707,90 +1328,16 @@ class DoseApp:
 
         md = self.med_data[slot]
 
-        if self.state == S_IDLE:
-            if not md["loaded"] or md["count"] <= 0:
+        if self.dispense_state == 0:
+            if not md.get("loaded") or md.get("count", 0) <= 0:
                 md["name"] = med_name
                 md["take_with"] = ""
-                self._save()
-                self._go_qty_confirm(slot, med_name)
+                self._save_med()
+                self._show_qty_confirm(slot, med_name)
             else:
-                self._go_read(slot)
+                self._start_dispense(slot)
 
-    # ── Auto-update ──────────────────────────────────────────────────
-    def _on_update_pressed(self):
-        self.update_btn.configure(text="CHECKING…", bg="#333338")
-        self.update_status.configure(text="Checking for updates…")
-        threading.Thread(target=self._do_update_check, daemon=True).start()
-
-    def _do_update_check(self, silent=False):
-        try:
-            resp = urlopen(RAW_URL, timeout=10)
-            remote_code = resp.read()
-        except Exception:
-            if not silent:
-                self.root.after(0, self._update_result,
-                                "No internet — try later", False)
-            return
-
-        local_hash = ""
-        try:
-            with open(APP_FILE, "rb") as f:
-                local_hash = hashlib.md5(f.read()).hexdigest()
-        except FileNotFoundError:
-            pass
-
-        remote_hash = hashlib.md5(remote_code).hexdigest()
-        if local_hash == remote_hash:
-            if not silent:
-                self.root.after(0, self._update_result, "Already up to date", False)
-            return
-
-        try:
-            os.makedirs(APP_DIR, exist_ok=True)
-            with open(APP_FILE, "wb") as f:
-                f.write(remote_code)
-        except Exception:
-            if not silent:
-                self.root.after(0, self._update_result, "Write failed", False)
-            return
-
-        self.root.after(0, self._update_result, "Updated! Restarting…", True)
-
-    def _update_result(self, msg, needs_restart):
-        self.update_btn.configure(text="UPDATE", bg="#1E1E24")
-        self.update_status.configure(text=msg)
-        if needs_restart:
-            self.root.after(1500, self._restart_app)
-
-    def _restart_app(self):
-        try:
-            if self.cam:
-                self.cam.stop()
-        except Exception:
-            pass
-        self.root.destroy()
-        os.execv(sys.executable, [sys.executable, APP_FILE])
-
-    # ── Preview toggle ───────────────────────────────────────────────
-    def _toggle_preview(self):
-        if not self.has_camera:
-            return
-        self.show_preview = not self.show_preview
-        if self.show_preview:
-            self.preview_label.place(x=24, y=340, width=200, height=120)
-            _raise(self.preview_label)
-        else:
-            self.preview_label.place_forget()
-
-    # ── Clock ────────────────────────────────────────────────────────
-    def _tick_clock(self):
-        try:
-            self.clock_label.configure(text=time.strftime("%-I:%M %p"))
-        except ValueError:
-            self.clock_label.configure(text=time.strftime("%I:%M %p").lstrip("0"))
-        self.root.after(1000, self._tick_clock)
-
-    # ── WiFi icon ────────────────────────────────────────────────────
+    # ── WiFi icon ──────────────────────────────────────────────────────────
     def _draw_wifi(self, canvas, color):
         cx, cy = 19, 26
         for r in (16, 11, 6):
@@ -800,29 +1347,42 @@ class DoseApp:
         canvas.create_oval(cx - 2, cy - 2, cx + 2, cy + 2,
                            fill=color, outline=color)
 
-    # ── Quit ─────────────────────────────────────────────────────────
+    # ── Quit ───────────────────────────────────────────────────────────────
     def _quit(self):
         try:
-            if self.cam:
-                self.cam.stop()
+            if self.camera and self.camera_running:
+                self.camera_running = False
+                self.camera.stop()
+                self.camera.close()
         except Exception:
             pass
         self.root.destroy()
 
+    # ── Run ────────────────────────────────────────────────────────────────
+    def run(self):
+        try:
+            self.root.mainloop()
+        finally:
+            try:
+                if self.camera and self.camera_running:
+                    self.camera_running = False
+                    self.camera.stop()
+                    self.camera.close()
+            except Exception:
+                pass
 
-def main():
-    root = tk.Tk()
-    app = DoseApp(root)
-    root.mainloop()
 
-
+# ═══════════════════════════════════════════════════════════════════════════
+#  Entry point
+# ═══════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     try:
-        main()
+        app = DoseApp()
+        app.run()
     except Exception:
         import traceback
         err = traceback.format_exc()
-        log_path = os.path.expanduser("~/dose-home-station/crash.log")
+        log_path = os.path.join(APP_DIR, "crash.log")
         try:
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             with open(log_path, "w") as f:
@@ -830,8 +1390,8 @@ if __name__ == "__main__":
         except Exception:
             pass
         print(f"\n  DOSE crashed:\n\n{err}")
-        print(f"  Log: {log_path}")
-        print("  Press Enter to close...")
+        print(f"\n  Log: {log_path}")
+        print("\n  Press Enter to close...")
         try:
             input()
         except Exception:
