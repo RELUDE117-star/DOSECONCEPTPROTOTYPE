@@ -22,7 +22,8 @@ if [ ! -f "$APP_DIR/.ready" ]; then
     sudo apt update -y
     sudo apt install -y python3-tk python3-pil python3-pil.imagetk libzbar0 python3-pip fonts-nunito curl 2>/dev/null || true
     sudo apt install -y python3-picamera2 2>/dev/null || true
-    pip install --break-system-packages pyzbar Pillow 2>/dev/null || pip install pyzbar Pillow 2>/dev/null || true
+    pip install --break-system-packages pyzbar Pillow adafruit-circuitpython-mpr121 "qrcode[pil]" 2>/dev/null \
+        || pip install pyzbar Pillow adafruit-circuitpython-mpr121 "qrcode[pil]" 2>/dev/null || true
 fi
 
 # ── Copy app files ──
