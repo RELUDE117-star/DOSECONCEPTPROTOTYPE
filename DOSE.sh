@@ -20,10 +20,22 @@ if [ ! -f "$APP_DIR/.ready" ]; then
     echo "  You may be asked for your password."
     echo ""
     sudo apt update -y
-    sudo apt install -y python3-tk python3-pil python3-pil.imagetk libzbar0 python3-pip fonts-nunito curl 2>/dev/null || true
+    sudo apt install -y python3-tk python3-pil python3-pil.imagetk libzbar0 python3-pip fonts-nunito curl python3-smbus i2c-tools 2>/dev/null || true
     sudo apt install -y python3-picamera2 2>/dev/null || true
     pip install --break-system-packages pyzbar Pillow adafruit-circuitpython-mpr121 "qrcode[pil]" 2>/dev/null \
         || pip install pyzbar Pillow adafruit-circuitpython-mpr121 "qrcode[pil]" 2>/dev/null || true
+fi
+
+# ── Auto-enable I2C for MPR121 touch sensor ──
+if ! grep -q "^dtparam=i2c_arm=on" /boot/config.txt 2>/dev/null && \
+   ! grep -q "^dtparam=i2c_arm=on" /boot/firmware/config.txt 2>/dev/null; then
+    echo "  Enabling I2C for touch sensor..."
+    sudo raspi-config nonint do_i2c 0 2>/dev/null || true
+    echo "  I2C enabled (reboot may be needed on first setup)"
+fi
+# Load i2c module now if not already loaded
+if ! lsmod | grep -q i2c_dev 2>/dev/null; then
+    sudo modprobe i2c-dev 2>/dev/null || true
 fi
 
 # ── Copy app files ──

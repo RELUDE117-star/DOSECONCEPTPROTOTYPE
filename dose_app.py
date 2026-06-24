@@ -20,8 +20,6 @@ import sys
 import time
 import threading
 import subprocess
-import base64
-import io
 import tkinter as tk
 import tkinter.font as tkfont
 from datetime import datetime
@@ -101,41 +99,18 @@ LIGHT_THEME = {
     "popup_bg": "#E0E0DE",
 }
 
-DOSE_LOGO_B64 = (
-    "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"
-    "DQXm1BIVyT4AAAAASUVORK5CYII="
-)
+def _find_logo():
+    """Find dose_logo.png — check app dir, script dir, then cwd."""
+    candidates = [
+        os.path.join(APP_DIR, "dose_logo.png"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "dose_logo.png"),
+        "dose_logo.png",
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -368,15 +343,16 @@ class DoseApp:
         loaded = False
         try:
             if PIL_AVAILABLE:
-                raw = base64.b64decode(DOSE_LOGO_B64)
-                img = Image.open(io.BytesIO(raw))
-                resample = getattr(Image, 'LANCZOS',
-                                   getattr(Image, 'ANTIALIAS', None))
-                img = img.resize((48, 48), resample)
-                self._d_logo_img = ImageTk.PhotoImage(img)
-                self.d_btn_canvas.create_image(24, 24,
-                                               image=self._d_logo_img)
-                loaded = True
+                logo_path = _find_logo()
+                if logo_path:
+                    img = Image.open(logo_path)
+                    resample = getattr(Image, 'LANCZOS',
+                                       getattr(Image, 'ANTIALIAS', None))
+                    img = img.resize((48, 48), resample)
+                    self._d_logo_img = ImageTk.PhotoImage(img)
+                    self.d_btn_canvas.create_image(24, 24,
+                                                   image=self._d_logo_img)
+                    loaded = True
         except Exception:
             pass
         if not loaded:
@@ -598,13 +574,13 @@ class DoseApp:
                  bg=self.theme["bg"],
                  fg=self.theme["muted"]).place(x=MARGIN_LEFT, y=20)
 
-        # Slot cards
+        # Slot cards (compact — 120px tall to fit detail below)
         self.slot_cards = {}
         for i, key in enumerate(SLOT_KEYS):
             x = MARGIN_LEFT + i * 180
             card = tk.Frame(self.storage_frame, bg=self.theme["card_bg"],
                             highlightthickness=0)
-            card.place(x=x, y=52, width=168, height=200)
+            card.place(x=x, y=52, width=168, height=130)
 
             accent = SLOT_DEFS[key]["accent"]
 
@@ -612,19 +588,19 @@ class DoseApp:
 
             name_lbl = tk.Label(card, text="—", fg=self.theme["fg"],
                                 bg=self.theme["card_bg"],
-                                font=self.font_btn_lg, anchor="w")
-            name_lbl.place(x=14, y=24)
+                                font=self.font_btn, anchor="w")
+            name_lbl.place(x=14, y=18)
 
             count_lbl = tk.Label(card, text="0", fg=accent,
                                  bg=self.theme["card_bg"],
-                                 font=self.font_count)
-            count_lbl.place(x=14, y=60)
+                                 font=self.font_bold_lg)
+            count_lbl.place(x=14, y=48)
 
             status_lbl = tk.Label(card, text="NOT LOADED",
                                   fg=self.theme["muted"],
                                   bg=self.theme["card_bg"],
                                   font=self.font_label)
-            status_lbl.place(x=14, y=160)
+            status_lbl.place(x=14, y=96)
 
             card.bind("<Button-1>",
                       lambda e, k=key: self._storage_card_tap(k))
@@ -638,22 +614,120 @@ class DoseApp:
                 "count_lbl": count_lbl, "status_lbl": status_lbl,
             }
 
-        # Scan hint at bottom
+        # Detail panel below cards
+        self.detail_frame = tk.Frame(self.storage_frame,
+                                     bg=self.theme["card_bg"])
+        self.detail_frame.place(x=MARGIN_LEFT, y=200,
+                                width=SCREEN_W - 2 * MARGIN_LEFT,
+                                height=250)
+
+        self.detail_name = tk.Label(self.detail_frame, text="",
+                                    fg=self.theme["fg"],
+                                    bg=self.theme["card_bg"],
+                                    font=self.font_title, anchor="w")
+        self.detail_name.place(x=20, y=10)
+
+        self.detail_sched = tk.Label(self.detail_frame, text="",
+                                     fg=self.theme["muted"],
+                                     bg=self.theme["card_bg"],
+                                     font=self.font_small, anchor="w")
+        self.detail_sched.place(x=20, y=46)
+
+        self.detail_days = tk.Label(self.detail_frame, text="",
+                                    fg=self.theme["muted"],
+                                    bg=self.theme["card_bg"],
+                                    font=self.font_small, anchor="w")
+        self.detail_days.place(x=20, y=72)
+
+        self.detail_take = tk.Label(self.detail_frame, text="",
+                                    fg=self.theme["fg"],
+                                    bg=self.theme["card_bg"],
+                                    font=self.font_small, anchor="w")
+        self.detail_take.place(x=20, y=106)
+
+        self.detail_count = tk.Label(self.detail_frame, text="",
+                                     fg=self.theme["muted"],
+                                     bg=self.theme["card_bg"],
+                                     font=self.font_small, anchor="w")
+        self.detail_count.place(x=20, y=136)
+
+        self.detail_dispense_btn = tk.Button(
+            self.detail_frame, text="DISPENSE",
+            font=self.font_btn, bg="#4A90D9", fg="#FFFFFF",
+            activebackground="#3A7BC8", activeforeground="#FFFFFF",
+            bd=0, padx=30, pady=8,
+            command=self._detail_dispense)
+        self.detail_dispense_btn.place(x=20, y=180)
+
+        self.detail_hint = tk.Label(self.detail_frame, text="",
+                                    fg=self.theme["muted"],
+                                    bg=self.theme["card_bg"],
+                                    font=self.font_label, anchor="w")
+        self.detail_hint.place(x=200, y=188)
+
+        # Scan hint
         self.storage_scan_hint = tk.Label(self.storage_frame, text="",
                                           fg=self.theme["muted"],
                                           bg=self.theme["bg"],
-                                          font=self.font_small)
-        self.storage_scan_hint.place(x=MARGIN_LEFT, y=280)
-
-        # Schedule editor (shown below cards for selected pill)
-        self.sched_frame = tk.Frame(self.storage_frame,
-                                    bg=self.theme["bg"])
-        self.sched_frame.place(x=MARGIN_LEFT, y=310,
-                               width=SCREEN_W - 2 * MARGIN_LEFT, height=150)
+                                          font=self.font_label)
+        self.storage_scan_hint.place(x=MARGIN_LEFT, y=458)
 
     def _storage_card_tap(self, key):
+        self.selected_pill = key
+        self._update_storage_detail()
+
+    def _detail_dispense(self):
+        key = self.selected_pill
         if self._is_loaded(key) and self._get_count(key) > 0:
             self._start_dispense(key)
+
+    def _update_storage_detail(self):
+        key = self.selected_pill
+        md = self.med_data[key]
+        accent = SLOT_DEFS[key]["accent"]
+
+        if md.get("loaded"):
+            self.detail_name.configure(text=md["name"], fg=accent)
+            sched = md.get("schedule_time", "8:00 AM")
+            self.detail_sched.configure(text=f"Schedule: {sched}")
+            days = md.get("schedule_days", ALL_DAYS)
+            day_str = ", ".join(days) if days else "No days set"
+            self.detail_days.configure(text=f"Days: {day_str}")
+            take = md.get("take_with", "")
+            self.detail_take.configure(
+                text=f"Instructions: {take}" if take else "No instructions")
+            self.detail_count.configure(
+                text=f"{md['count']} pills remaining")
+            if md["count"] > 0:
+                self.detail_dispense_btn.configure(
+                    state="normal", bg=accent)
+                self.detail_hint.configure(text="")
+            else:
+                self.detail_dispense_btn.configure(
+                    state="disabled", bg=self.theme["btn_bg"])
+                self.detail_hint.configure(text="Scan QR to reload")
+        else:
+            self.detail_name.configure(
+                text=f"{key.capitalize()} — Not Loaded",
+                fg=self.theme["muted"])
+            self.detail_sched.configure(text="")
+            self.detail_days.configure(text="")
+            self.detail_take.configure(
+                text="Scan a QR code to load this slot")
+            self.detail_count.configure(text="")
+            self.detail_dispense_btn.configure(
+                state="disabled", bg=self.theme["btn_bg"])
+            self.detail_hint.configure(text="")
+
+        # Highlight selected card
+        for k in SLOT_KEYS:
+            c = self.slot_cards[k]
+            if k == key:
+                c["card"].configure(
+                    highlightbackground=SLOT_DEFS[k]["accent"],
+                    highlightthickness=2)
+            else:
+                c["card"].configure(highlightthickness=0)
 
     def _update_storage(self):
         for key in SLOT_KEYS:
@@ -682,6 +756,8 @@ class DoseApp:
                 text=f"{loaded}/4 loaded — scan more QR codes")
         else:
             self.storage_scan_hint.configure(text="All slots loaded")
+
+        self._update_storage_detail()
 
     # ══════════════════════════════════════════════════════════════════════
     #  QTY CONFIRM (overlay for first-time QR load)
@@ -928,16 +1004,18 @@ class DoseApp:
                 with open(app_copy, "wb") as f:
                     f.write(remote_data)
 
-                # Fetch DOSE.sh
-                try:
-                    resp = urlopen(RAW_URL + "/DOSE.sh", timeout=15)
-                    sh_data = resp.read()
-                    sh_path = os.path.join(APP_DIR, "DOSE.sh")
-                    with open(sh_path, "wb") as f:
-                        f.write(sh_data)
-                    os.chmod(sh_path, 0o755)
-                except Exception:
-                    pass
+                # Fetch DOSE.sh and logo
+                for fname in ["DOSE.sh", "dose_logo.png"]:
+                    try:
+                        resp = urlopen(RAW_URL + "/" + fname, timeout=15)
+                        fdata = resp.read()
+                        fpath = os.path.join(APP_DIR, fname)
+                        with open(fpath, "wb") as f:
+                            f.write(fdata)
+                        if fname.endswith(".sh"):
+                            os.chmod(fpath, 0o755)
+                    except Exception:
+                        pass
 
                 self.root.after(0, self._finish_update)
             except Exception as e:
