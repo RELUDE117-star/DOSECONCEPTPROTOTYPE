@@ -27,15 +27,56 @@ if [ ! -f "$APP_DIR/.ready" ]; then
 fi
 
 # ── Auto-enable I2C for MPR121 touch sensor ──
+I2C_NEEDS_REBOOT=false
+
+# Enable I2C in config.txt (works on Pi 4B / Pi 5 / Bookworm)
 if ! grep -q "^dtparam=i2c_arm=on" /boot/config.txt 2>/dev/null && \
    ! grep -q "^dtparam=i2c_arm=on" /boot/firmware/config.txt 2>/dev/null; then
     echo "  Enabling I2C for touch sensor..."
     sudo raspi-config nonint do_i2c 0 2>/dev/null || true
-    echo "  I2C enabled (reboot may be needed on first setup)"
+    I2C_NEEDS_REBOOT=true
 fi
-# Load i2c module now if not already loaded
-if ! lsmod | grep -q i2c_dev 2>/dev/null; then
-    sudo modprobe i2c-dev 2>/dev/null || true
+
+# Ensure i2c-dev loads on boot
+if ! grep -q "^i2c-dev" /etc/modules 2>/dev/null; then
+    echo "i2c-dev" | sudo tee -a /etc/modules >/dev/null 2>&1 || true
+fi
+
+# Load i2c module now
+sudo modprobe i2c-dev 2>/dev/null || true
+sudo modprobe i2c-bcm2835 2>/dev/null || true
+
+# Add current user to i2c group so we don't need sudo
+if ! groups | grep -q i2c 2>/dev/null; then
+    sudo usermod -aG i2c "$USER" 2>/dev/null || true
+fi
+
+# Check if /dev/i2c-1 exists — if not, a reboot is needed
+if [ ! -e /dev/i2c-1 ]; then
+    I2C_NEEDS_REBOOT=true
+fi
+
+if [ "$I2C_NEEDS_REBOOT" = "true" ]; then
+    echo ""
+    echo "  ┌──────────────────────────────────────────┐"
+    echo "  │  I2C was just enabled for touch sensor.   │"
+    echo "  │  Please REBOOT your Pi, then run again.   │"
+    echo "  └──────────────────────────────────────────┘"
+    echo ""
+    echo "  Press any key to close..."
+    read -n 1 -s
+    exit 0
+fi
+
+# Quick I2C scan — show if MPR121 is detected
+echo "  Checking touch sensor..."
+if command -v i2cdetect >/dev/null 2>&1; then
+    if i2cdetect -y 1 2>/dev/null | grep -q "5a"; then
+        echo "  MPR121 detected at 0x5A ✓"
+    else
+        echo "  MPR121 NOT detected on I2C bus 1"
+        echo "  Check wiring: VCC→Pin1, SDA→Pin3, SCL→Pin5, GND→Pin9"
+    fi
 fi
 
 # ── Copy app files ──

@@ -198,14 +198,23 @@ class DoseApp:
         self._apply_theme_colors()
 
         # ── MPR121 init ────────────────────────────────────────────────────
+        self.touch_error = ""
         if HAVE_MPR121:
+            # Try to load i2c-dev kernel module
+            try:
+                subprocess.run(["sudo", "modprobe", "i2c-dev"],
+                               capture_output=True, timeout=5)
+            except Exception:
+                pass
             try:
                 import board, busio
                 i2c = busio.I2C(board.SCL, board.SDA)
                 self.mpr = mpr121_mod.MPR121(i2c, address=0x5A)
                 self.has_touch = True
-            except Exception:
-                pass
+            except Exception as e:
+                self.touch_error = str(e)
+        else:
+            self.touch_error = "Library not installed"
 
         # ── Root frames ────────────────────────────────────────────────────
         self.main_frame = tk.Frame(self.root, bg=self.theme["bg"],
@@ -488,12 +497,14 @@ class DoseApp:
         if not CAMERA_AVAILABLE:
             hw_parts.append("Camera not connected")
         if not self.has_touch:
-            hw_parts.append("Touch sensor not connected")
+            msg = "Touch: " + (self.touch_error or "not detected")
+            hw_parts.append(msg)
         if hw_parts:
             tk.Label(self.standby_frame, text="  ·  ".join(hw_parts),
                      font=self.font_small,
                      bg=self.theme["bg"],
-                     fg="#444444").place(x=MARGIN_LEFT, y=280)
+                     fg="#444444", wraplength=700, justify="left"
+                     ).place(x=MARGIN_LEFT, y=280)
 
         # Scan hint
         self.standby_scan_hint = tk.Label(self.standby_frame, text="",
@@ -559,7 +570,7 @@ class DoseApp:
         return display, best_name, total
 
     # ══════════════════════════════════════════════════════════════════════
-    #  STORAGE MODE — pill cards with QR-loaded data
+    #  STORAGE MODE — vertical pill list + detail panel with schedule editor
     # ══════════════════════════════════════════════════════════════════════
     def _build_storage(self):
         if hasattr(self, 'storage_frame'):
@@ -569,110 +580,196 @@ class DoseApp:
                                       bg=self.theme["bg"],
                                       width=SCREEN_W, height=SCREEN_H)
 
-        tk.Label(self.storage_frame, text="STORAGE",
-                 font=self.font_label,
+        # ── Left panel: vertical pill list ──
+        left = tk.Frame(self.storage_frame, bg=self.theme["bg"],
+                        width=240, height=SCREEN_H)
+        left.place(x=0, y=0, width=240, height=SCREEN_H)
+
+        tk.Label(left, text="STORAGE", font=self.font_label,
                  bg=self.theme["bg"],
                  fg=self.theme["muted"]).place(x=MARGIN_LEFT, y=20)
 
-        # Slot cards (compact — 120px tall to fit detail below)
-        self.slot_cards = {}
+        self.slot_rows = {}
         for i, key in enumerate(SLOT_KEYS):
-            x = MARGIN_LEFT + i * 180
-            card = tk.Frame(self.storage_frame, bg=self.theme["card_bg"],
-                            highlightthickness=0)
-            card.place(x=x, y=52, width=168, height=130)
-
+            y = 56 + i * 100
             accent = SLOT_DEFS[key]["accent"]
 
-            tk.Frame(card, bg=accent, height=6).place(x=0, y=0, width=168)
+            row = tk.Frame(left, bg=self.theme["card_bg"],
+                           highlightthickness=0)
+            row.place(x=14, y=y, width=212, height=88)
 
-            name_lbl = tk.Label(card, text="—", fg=self.theme["fg"],
+            # Color bar on left edge
+            tk.Frame(row, bg=accent, width=6).place(
+                x=0, y=0, width=6, height=88)
+
+            name_lbl = tk.Label(row, text="—", fg=self.theme["fg"],
                                 bg=self.theme["card_bg"],
                                 font=self.font_btn, anchor="w")
-            name_lbl.place(x=14, y=18)
+            name_lbl.place(x=18, y=10)
 
-            count_lbl = tk.Label(card, text="0", fg=accent,
+            count_lbl = tk.Label(row, text="0", fg=accent,
                                  bg=self.theme["card_bg"],
-                                 font=self.font_bold_lg)
-            count_lbl.place(x=14, y=48)
+                                 font=self.font_body_bold, anchor="w")
+            count_lbl.place(x=18, y=38)
 
-            status_lbl = tk.Label(card, text="NOT LOADED",
+            status_lbl = tk.Label(row, text="NOT LOADED",
                                   fg=self.theme["muted"],
                                   bg=self.theme["card_bg"],
-                                  font=self.font_label)
-            status_lbl.place(x=14, y=96)
+                                  font=self.font_label, anchor="w")
+            status_lbl.place(x=18, y=62)
 
-            card.bind("<Button-1>",
-                      lambda e, k=key: self._storage_card_tap(k))
-            name_lbl.bind("<Button-1>",
-                          lambda e, k=key: self._storage_card_tap(k))
-            count_lbl.bind("<Button-1>",
-                           lambda e, k=key: self._storage_card_tap(k))
+            for w in [row, name_lbl, count_lbl, status_lbl]:
+                w.bind("<Button-1>",
+                       lambda e, k=key: self._storage_select(k))
 
-            self.slot_cards[key] = {
-                "card": card, "name_lbl": name_lbl,
+            self.slot_rows[key] = {
+                "row": row, "name_lbl": name_lbl,
                 "count_lbl": count_lbl, "status_lbl": status_lbl,
             }
 
-        # Detail panel below cards
-        self.detail_frame = tk.Frame(self.storage_frame,
-                                     bg=self.theme["card_bg"])
-        self.detail_frame.place(x=MARGIN_LEFT, y=200,
-                                width=SCREEN_W - 2 * MARGIN_LEFT,
-                                height=250)
-
-        self.detail_name = tk.Label(self.detail_frame, text="",
-                                    fg=self.theme["fg"],
-                                    bg=self.theme["card_bg"],
-                                    font=self.font_title, anchor="w")
-        self.detail_name.place(x=20, y=10)
-
-        self.detail_sched = tk.Label(self.detail_frame, text="",
-                                     fg=self.theme["muted"],
-                                     bg=self.theme["card_bg"],
-                                     font=self.font_small, anchor="w")
-        self.detail_sched.place(x=20, y=46)
-
-        self.detail_days = tk.Label(self.detail_frame, text="",
-                                    fg=self.theme["muted"],
-                                    bg=self.theme["card_bg"],
-                                    font=self.font_small, anchor="w")
-        self.detail_days.place(x=20, y=72)
-
-        self.detail_take = tk.Label(self.detail_frame, text="",
-                                    fg=self.theme["fg"],
-                                    bg=self.theme["card_bg"],
-                                    font=self.font_small, anchor="w")
-        self.detail_take.place(x=20, y=106)
-
-        self.detail_count = tk.Label(self.detail_frame, text="",
-                                     fg=self.theme["muted"],
-                                     bg=self.theme["card_bg"],
-                                     font=self.font_small, anchor="w")
-        self.detail_count.place(x=20, y=136)
-
-        self.detail_dispense_btn = tk.Button(
-            self.detail_frame, text="DISPENSE",
-            font=self.font_btn, bg="#4A90D9", fg="#FFFFFF",
-            activebackground="#3A7BC8", activeforeground="#FFFFFF",
-            bd=0, padx=30, pady=8,
-            command=self._detail_dispense)
-        self.detail_dispense_btn.place(x=20, y=180)
-
-        self.detail_hint = tk.Label(self.detail_frame, text="",
-                                    fg=self.theme["muted"],
-                                    bg=self.theme["card_bg"],
-                                    font=self.font_label, anchor="w")
-        self.detail_hint.place(x=200, y=188)
-
-        # Scan hint
-        self.storage_scan_hint = tk.Label(self.storage_frame, text="",
+        # Scan hint at bottom of left panel
+        self.storage_scan_hint = tk.Label(left, text="",
                                           fg=self.theme["muted"],
                                           bg=self.theme["bg"],
                                           font=self.font_label)
-        self.storage_scan_hint.place(x=MARGIN_LEFT, y=458)
+        self.storage_scan_hint.place(x=MARGIN_LEFT, y=460)
 
-    def _storage_card_tap(self, key):
+        # ── Right panel: detail + schedule editor ──
+        self.detail_panel = tk.Frame(self.storage_frame,
+                                     bg=self.theme["card_bg"],
+                                     width=550, height=SCREEN_H)
+        self.detail_panel.place(x=248, y=0, width=552, height=SCREEN_H)
+
+        pad = 24
+
+        self.detail_name = tk.Label(self.detail_panel, text="",
+                                    fg=self.theme["fg"],
+                                    bg=self.theme["card_bg"],
+                                    font=self.font_name, anchor="w")
+        self.detail_name.place(x=pad, y=20)
+
+        self.detail_count_lbl = tk.Label(self.detail_panel, text="",
+                                         fg=self.theme["muted"],
+                                         bg=self.theme["card_bg"],
+                                         font=self.font_body, anchor="w")
+        self.detail_count_lbl.place(x=pad, y=68)
+
+        self.detail_take_lbl = tk.Label(self.detail_panel, text="",
+                                        fg=self.theme["fg"],
+                                        bg=self.theme["card_bg"],
+                                        font=self.font_small, anchor="w",
+                                        wraplength=500)
+        self.detail_take_lbl.place(x=pad, y=100)
+
+        # ── Schedule time editor ──
+        tk.Label(self.detail_panel, text="SCHEDULE",
+                 font=self.font_label,
+                 bg=self.theme["card_bg"],
+                 fg=self.theme["muted"]).place(x=pad, y=140)
+
+        time_frame = tk.Frame(self.detail_panel,
+                              bg=self.theme["card_bg"])
+        time_frame.place(x=pad, y=164)
+
+        self._sched_hour = 8
+        self._sched_min = 0
+        self._sched_ampm = "AM"
+
+        tk.Button(time_frame, text="▲", font=self.font_small,
+                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
+                  activebackground=self.theme["btn_active"], bd=0,
+                  width=3,
+                  command=lambda: self._adj_sched("hour", 1)
+                  ).grid(row=0, column=0, padx=2)
+        self.hour_label = tk.Label(time_frame, text="8",
+                                   font=self.font_body_bold,
+                                   bg=self.theme["card_bg"],
+                                   fg=self.theme["fg"], width=3)
+        self.hour_label.grid(row=1, column=0, padx=2)
+        tk.Button(time_frame, text="▼", font=self.font_small,
+                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
+                  activebackground=self.theme["btn_active"], bd=0,
+                  width=3,
+                  command=lambda: self._adj_sched("hour", -1)
+                  ).grid(row=2, column=0, padx=2)
+
+        tk.Label(time_frame, text=":", font=self.font_body_bold,
+                 bg=self.theme["card_bg"],
+                 fg=self.theme["fg"]).grid(row=1, column=1)
+
+        tk.Button(time_frame, text="▲", font=self.font_small,
+                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
+                  activebackground=self.theme["btn_active"], bd=0,
+                  width=3,
+                  command=lambda: self._adj_sched("min", 1)
+                  ).grid(row=0, column=2, padx=2)
+        self.min_label = tk.Label(time_frame, text="00",
+                                  font=self.font_body_bold,
+                                  bg=self.theme["card_bg"],
+                                  fg=self.theme["fg"], width=3)
+        self.min_label.grid(row=1, column=2, padx=2)
+        tk.Button(time_frame, text="▼", font=self.font_small,
+                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
+                  activebackground=self.theme["btn_active"], bd=0,
+                  width=3,
+                  command=lambda: self._adj_sched("min", -1)
+                  ).grid(row=2, column=2, padx=2)
+
+        tk.Button(time_frame, text="▲", font=self.font_small,
+                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
+                  activebackground=self.theme["btn_active"], bd=0,
+                  width=3,
+                  command=lambda: self._adj_sched("ampm", 1)
+                  ).grid(row=0, column=3, padx=(10, 2))
+        self.ampm_label = tk.Label(time_frame, text="AM",
+                                   font=self.font_body_bold,
+                                   bg=self.theme["card_bg"],
+                                   fg=self.theme["fg"], width=3)
+        self.ampm_label.grid(row=1, column=3, padx=(10, 2))
+        tk.Button(time_frame, text="▼", font=self.font_small,
+                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
+                  activebackground=self.theme["btn_active"], bd=0,
+                  width=3,
+                  command=lambda: self._adj_sched("ampm", -1)
+                  ).grid(row=2, column=3, padx=(10, 2))
+
+        # ── Day-of-week selector ──
+        tk.Label(self.detail_panel, text="DAYS",
+                 font=self.font_label,
+                 bg=self.theme["card_bg"],
+                 fg=self.theme["muted"]).place(x=pad, y=260)
+
+        day_frame = tk.Frame(self.detail_panel,
+                             bg=self.theme["card_bg"])
+        day_frame.place(x=pad, y=284)
+
+        self.day_buttons = {}
+        for d in ALL_DAYS:
+            btn = tk.Button(day_frame, text=d[:2], font=self.font_label,
+                            bg=self.theme["btn_bg"],
+                            fg=self.theme["fg"],
+                            activebackground=self.theme["btn_active"],
+                            bd=0, width=3, padx=2, pady=4,
+                            command=lambda dd=d: self._toggle_day(dd))
+            btn.pack(side="left", padx=2)
+            self.day_buttons[d] = btn
+
+        # ── Dispense button ──
+        self.detail_dispense_btn = tk.Button(
+            self.detail_panel, text="DISPENSE",
+            font=self.font_btn_lg, bg="#4A90D9", fg="#FFFFFF",
+            activebackground="#3A7BC8", activeforeground="#FFFFFF",
+            bd=0, padx=40, pady=10,
+            command=self._detail_dispense)
+        self.detail_dispense_btn.place(x=pad, y=360)
+
+        self.detail_hint = tk.Label(self.detail_panel, text="",
+                                    fg=self.theme["muted"],
+                                    bg=self.theme["card_bg"],
+                                    font=self.font_small, anchor="w")
+        self.detail_hint.place(x=pad, y=420)
+
+    def _storage_select(self, key):
         self.selected_pill = key
         self._update_storage_detail()
 
@@ -681,6 +778,55 @@ class DoseApp:
         if self._is_loaded(key) and self._get_count(key) > 0:
             self._start_dispense(key)
 
+    def _adj_sched(self, field, delta):
+        if field == "hour":
+            self._sched_hour += delta
+            if self._sched_hour > 12:
+                self._sched_hour = 1
+            elif self._sched_hour < 1:
+                self._sched_hour = 12
+            self.hour_label.configure(text=str(self._sched_hour))
+        elif field == "min":
+            self._sched_min += delta * 5
+            if self._sched_min >= 60:
+                self._sched_min = 0
+            elif self._sched_min < 0:
+                self._sched_min = 55
+            self.min_label.configure(text=f"{self._sched_min:02d}")
+        elif field == "ampm":
+            self._sched_ampm = "PM" if self._sched_ampm == "AM" else "AM"
+            self.ampm_label.configure(text=self._sched_ampm)
+
+        new_time = (f"{self._sched_hour}:{self._sched_min:02d} "
+                    f"{self._sched_ampm}")
+        key = self.selected_pill
+        self.med_data[key]["schedule_time"] = new_time
+        self._save_med()
+
+    def _toggle_day(self, day):
+        key = self.selected_pill
+        md = self.med_data[key]
+        days = md.get("schedule_days", [])
+        if day in days:
+            days.remove(day)
+        else:
+            days.append(day)
+        md["schedule_days"] = days
+        self._save_med()
+        self._update_day_buttons()
+
+    def _update_day_buttons(self):
+        key = self.selected_pill
+        md = self.med_data[key]
+        accent = SLOT_DEFS[key]["accent"]
+        days = md.get("schedule_days", [])
+        for d, btn in self.day_buttons.items():
+            if d in days:
+                btn.configure(bg=accent, fg="#FFFFFF")
+            else:
+                btn.configure(bg=self.theme["btn_bg"],
+                              fg=self.theme["fg"])
+
     def _update_storage_detail(self):
         key = self.selected_pill
         md = self.med_data[key]
@@ -688,16 +834,30 @@ class DoseApp:
 
         if md.get("loaded"):
             self.detail_name.configure(text=md["name"], fg=accent)
-            sched = md.get("schedule_time", "8:00 AM")
-            self.detail_sched.configure(text=f"Schedule: {sched}")
-            days = md.get("schedule_days", ALL_DAYS)
-            day_str = ", ".join(days) if days else "No days set"
-            self.detail_days.configure(text=f"Days: {day_str}")
-            take = md.get("take_with", "")
-            self.detail_take.configure(
-                text=f"Instructions: {take}" if take else "No instructions")
-            self.detail_count.configure(
+            self.detail_count_lbl.configure(
                 text=f"{md['count']} pills remaining")
+            take = md.get("take_with", "")
+            self.detail_take_lbl.configure(
+                text=take if take else "")
+
+            # Parse schedule time into editor
+            sched = md.get("schedule_time", "8:00 AM")
+            try:
+                parts = sched.split()
+                tp = parts[0].split(":")
+                self._sched_hour = int(tp[0])
+                self._sched_min = int(tp[1])
+                self._sched_ampm = parts[1] if len(parts) > 1 else "AM"
+            except Exception:
+                self._sched_hour = 8
+                self._sched_min = 0
+                self._sched_ampm = "AM"
+            self.hour_label.configure(text=str(self._sched_hour))
+            self.min_label.configure(text=f"{self._sched_min:02d}")
+            self.ampm_label.configure(text=self._sched_ampm)
+
+            self._update_day_buttons()
+
             if md["count"] > 0:
                 self.detail_dispense_btn.configure(
                     state="normal", bg=accent)
@@ -710,52 +870,55 @@ class DoseApp:
             self.detail_name.configure(
                 text=f"{key.capitalize()} — Not Loaded",
                 fg=self.theme["muted"])
-            self.detail_sched.configure(text="")
-            self.detail_days.configure(text="")
-            self.detail_take.configure(
+            self.detail_count_lbl.configure(text="")
+            self.detail_take_lbl.configure(
                 text="Scan a QR code to load this slot")
-            self.detail_count.configure(text="")
+            self.hour_label.configure(text="8")
+            self.min_label.configure(text="00")
+            self.ampm_label.configure(text="AM")
+            self._update_day_buttons()
             self.detail_dispense_btn.configure(
                 state="disabled", bg=self.theme["btn_bg"])
             self.detail_hint.configure(text="")
 
-        # Highlight selected card
+        # Highlight selected row
         for k in SLOT_KEYS:
-            c = self.slot_cards[k]
+            r = self.slot_rows[k]
             if k == key:
-                c["card"].configure(
+                r["row"].configure(
                     highlightbackground=SLOT_DEFS[k]["accent"],
                     highlightthickness=2)
             else:
-                c["card"].configure(highlightthickness=0)
+                r["row"].configure(highlightthickness=0)
 
     def _update_storage(self):
         for key in SLOT_KEYS:
-            c = self.slot_cards[key]
+            r = self.slot_rows[key]
             md = self.med_data[key]
             accent = SLOT_DEFS[key]["accent"]
             if md.get("loaded"):
-                c["name_lbl"].configure(text=md["name"])
-                c["count_lbl"].configure(text=str(md["count"]))
+                r["name_lbl"].configure(text=md["name"])
+                r["count_lbl"].configure(
+                    text=f"{md['count']} pills")
                 if md["count"] > 0:
-                    c["status_lbl"].configure(text="READY", fg=accent)
+                    r["status_lbl"].configure(text="READY", fg=accent)
                 else:
-                    c["status_lbl"].configure(text="EMPTY", fg="#FF6B6B")
+                    r["status_lbl"].configure(text="EMPTY",
+                                              fg="#FF6B6B")
             else:
-                c["name_lbl"].configure(text="—")
-                c["count_lbl"].configure(text="0")
-                c["status_lbl"].configure(text="NOT LOADED",
+                r["name_lbl"].configure(text="—")
+                r["count_lbl"].configure(text="0 pills")
+                r["status_lbl"].configure(text="NOT LOADED",
                                           fg=self.theme["muted"])
 
         loaded = sum(1 for k in SLOT_KEYS if self._is_loaded(k))
         if loaded == 0:
-            self.storage_scan_hint.configure(
-                text="Scan a medication QR code to load a slot")
+            self.storage_scan_hint.configure(text="Scan QR to load")
         elif loaded < 4:
             self.storage_scan_hint.configure(
-                text=f"{loaded}/4 loaded — scan more QR codes")
+                text=f"{loaded}/4 loaded")
         else:
-            self.storage_scan_hint.configure(text="All slots loaded")
+            self.storage_scan_hint.configure(text="All loaded")
 
         self._update_storage_detail()
 
