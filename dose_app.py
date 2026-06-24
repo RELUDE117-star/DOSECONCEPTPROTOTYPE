@@ -52,7 +52,19 @@ try:
     mpr121_mod = adafruit_mpr121
     HAVE_MPR121 = True
 except Exception:
-    pass
+    # Auto-install the library if missing
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--break-system-packages",
+             "adafruit-circuitpython-mpr121"],
+            capture_output=True, timeout=60)
+        import board
+        import busio
+        import adafruit_mpr121
+        mpr121_mod = adafruit_mpr121
+        HAVE_MPR121 = True
+    except Exception:
+        pass
 
 # ── Constants ──────────────────────────────────────────────────────────────
 SCREEN_W = 800
@@ -570,7 +582,7 @@ class DoseApp:
         return display, best_name, total
 
     # ══════════════════════════════════════════════════════════════════════
-    #  STORAGE MODE — vertical pill list + detail panel with schedule editor
+    #  STORAGE MODE — clean vertical list + detail panel
     # ══════════════════════════════════════════════════════════════════════
     def _build_storage(self):
         if hasattr(self, 'storage_frame'):
@@ -580,194 +592,181 @@ class DoseApp:
                                       bg=self.theme["bg"],
                                       width=SCREEN_W, height=SCREEN_H)
 
-        # ── Left panel: vertical pill list ──
+        # ── Left: vertical pill list (big touch targets) ──
+        left_w = 260
         left = tk.Frame(self.storage_frame, bg=self.theme["bg"],
-                        width=240, height=SCREEN_H)
-        left.place(x=0, y=0, width=240, height=SCREEN_H)
+                        width=left_w, height=SCREEN_H)
+        left.place(x=0, y=0, width=left_w, height=SCREEN_H)
 
-        tk.Label(left, text="STORAGE", font=self.font_label,
+        tk.Label(left, text="MEDICATIONS", font=self.font_label,
                  bg=self.theme["bg"],
-                 fg=self.theme["muted"]).place(x=MARGIN_LEFT, y=20)
+                 fg=self.theme["muted"]).place(x=20, y=16)
 
         self.slot_rows = {}
         for i, key in enumerate(SLOT_KEYS):
-            y = 56 + i * 100
+            y = 48 + i * 108
             accent = SLOT_DEFS[key]["accent"]
 
             row = tk.Frame(left, bg=self.theme["card_bg"],
-                           highlightthickness=0)
-            row.place(x=14, y=y, width=212, height=88)
+                           highlightthickness=0, cursor="hand2")
+            row.place(x=12, y=y, width=236, height=96)
 
-            # Color bar on left edge
-            tk.Frame(row, bg=accent, width=6).place(
-                x=0, y=0, width=6, height=88)
+            # Thick color bar on left
+            tk.Frame(row, bg=accent, width=5).place(
+                x=0, y=0, width=5, height=96)
+
+            # Color dot
+            dot = tk.Canvas(row, width=14, height=14,
+                            bg=self.theme["card_bg"],
+                            highlightthickness=0)
+            dot.place(x=18, y=14)
+            dot.create_oval(1, 1, 13, 13, fill=accent, outline="")
 
             name_lbl = tk.Label(row, text="—", fg=self.theme["fg"],
                                 bg=self.theme["card_bg"],
-                                font=self.font_btn, anchor="w")
-            name_lbl.place(x=18, y=10)
+                                font=self.font_small_bold, anchor="w")
+            name_lbl.place(x=40, y=8)
 
-            count_lbl = tk.Label(row, text="0", fg=accent,
+            info_lbl = tk.Label(row, text="Not loaded",
+                                fg=self.theme["muted"],
+                                bg=self.theme["card_bg"],
+                                font=self.font_small, anchor="w")
+            info_lbl.place(x=40, y=32)
+
+            count_lbl = tk.Label(row, text="", fg=accent,
                                  bg=self.theme["card_bg"],
                                  font=self.font_body_bold, anchor="w")
-            count_lbl.place(x=18, y=38)
+            count_lbl.place(x=40, y=58)
 
-            status_lbl = tk.Label(row, text="NOT LOADED",
-                                  fg=self.theme["muted"],
-                                  bg=self.theme["card_bg"],
-                                  font=self.font_label, anchor="w")
-            status_lbl.place(x=18, y=62)
-
-            for w in [row, name_lbl, count_lbl, status_lbl]:
+            for w in [row, name_lbl, info_lbl, count_lbl, dot]:
                 w.bind("<Button-1>",
                        lambda e, k=key: self._storage_select(k))
 
             self.slot_rows[key] = {
                 "row": row, "name_lbl": name_lbl,
-                "count_lbl": count_lbl, "status_lbl": status_lbl,
+                "info_lbl": info_lbl, "count_lbl": count_lbl,
             }
 
-        # Scan hint at bottom of left panel
-        self.storage_scan_hint = tk.Label(left, text="",
-                                          fg=self.theme["muted"],
-                                          bg=self.theme["bg"],
-                                          font=self.font_label)
-        self.storage_scan_hint.place(x=MARGIN_LEFT, y=460)
-
-        # ── Right panel: detail + schedule editor ──
+        # ── Right: detail + schedule editor ──
+        rx = left_w + 4
+        rw = SCREEN_W - rx
         self.detail_panel = tk.Frame(self.storage_frame,
                                      bg=self.theme["card_bg"],
-                                     width=550, height=SCREEN_H)
-        self.detail_panel.place(x=248, y=0, width=552, height=SCREEN_H)
+                                     width=rw, height=SCREEN_H)
+        self.detail_panel.place(x=rx, y=0, width=rw, height=SCREEN_H)
 
-        pad = 24
+        pad = 28
 
         self.detail_name = tk.Label(self.detail_panel, text="",
                                     fg=self.theme["fg"],
                                     bg=self.theme["card_bg"],
                                     font=self.font_name, anchor="w")
-        self.detail_name.place(x=pad, y=20)
+        self.detail_name.place(x=pad, y=18)
 
         self.detail_count_lbl = tk.Label(self.detail_panel, text="",
                                          fg=self.theme["muted"],
                                          bg=self.theme["card_bg"],
                                          font=self.font_body, anchor="w")
-        self.detail_count_lbl.place(x=pad, y=68)
+        self.detail_count_lbl.place(x=pad, y=66)
 
         self.detail_take_lbl = tk.Label(self.detail_panel, text="",
                                         fg=self.theme["fg"],
                                         bg=self.theme["card_bg"],
                                         font=self.font_small, anchor="w",
-                                        wraplength=500)
-        self.detail_take_lbl.place(x=pad, y=100)
+                                        wraplength=480)
+        self.detail_take_lbl.place(x=pad, y=96)
 
-        # ── Schedule time editor ──
+        # Thin separator
+        tk.Frame(self.detail_panel, bg=self.theme["muted"],
+                 height=1).place(x=pad, y=128, width=rw - 2 * pad)
+
+        # ── Schedule time ──
         tk.Label(self.detail_panel, text="SCHEDULE",
                  font=self.font_label,
                  bg=self.theme["card_bg"],
                  fg=self.theme["muted"]).place(x=pad, y=140)
 
-        time_frame = tk.Frame(self.detail_panel,
-                              bg=self.theme["card_bg"])
-        time_frame.place(x=pad, y=164)
+        tf = tk.Frame(self.detail_panel, bg=self.theme["card_bg"])
+        tf.place(x=pad, y=162)
 
         self._sched_hour = 8
         self._sched_min = 0
         self._sched_ampm = "AM"
 
-        tk.Button(time_frame, text="▲", font=self.font_small,
-                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
-                  activebackground=self.theme["btn_active"], bd=0,
-                  width=3,
-                  command=lambda: self._adj_sched("hour", 1)
-                  ).grid(row=0, column=0, padx=2)
-        self.hour_label = tk.Label(time_frame, text="8",
+        btn_cfg = dict(font=self.font_small,
+                       bg=self.theme["btn_bg"], fg=self.theme["fg"],
+                       activebackground=self.theme["btn_active"],
+                       bd=0, width=3, pady=4)
+
+        tk.Button(tf, text="▲", command=lambda: self._adj_sched("hour", 1),
+                  **btn_cfg).grid(row=0, column=0, padx=3, pady=1)
+        self.hour_label = tk.Label(tf, text="8",
                                    font=self.font_body_bold,
                                    bg=self.theme["card_bg"],
                                    fg=self.theme["fg"], width=3)
-        self.hour_label.grid(row=1, column=0, padx=2)
-        tk.Button(time_frame, text="▼", font=self.font_small,
-                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
-                  activebackground=self.theme["btn_active"], bd=0,
-                  width=3,
-                  command=lambda: self._adj_sched("hour", -1)
-                  ).grid(row=2, column=0, padx=2)
+        self.hour_label.grid(row=1, column=0, padx=3)
+        tk.Button(tf, text="▼", command=lambda: self._adj_sched("hour", -1),
+                  **btn_cfg).grid(row=2, column=0, padx=3, pady=1)
 
-        tk.Label(time_frame, text=":", font=self.font_body_bold,
+        tk.Label(tf, text=":", font=self.font_body_bold,
                  bg=self.theme["card_bg"],
                  fg=self.theme["fg"]).grid(row=1, column=1)
 
-        tk.Button(time_frame, text="▲", font=self.font_small,
-                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
-                  activebackground=self.theme["btn_active"], bd=0,
-                  width=3,
-                  command=lambda: self._adj_sched("min", 1)
-                  ).grid(row=0, column=2, padx=2)
-        self.min_label = tk.Label(time_frame, text="00",
+        tk.Button(tf, text="▲", command=lambda: self._adj_sched("min", 1),
+                  **btn_cfg).grid(row=0, column=2, padx=3, pady=1)
+        self.min_label = tk.Label(tf, text="00",
                                   font=self.font_body_bold,
                                   bg=self.theme["card_bg"],
                                   fg=self.theme["fg"], width=3)
-        self.min_label.grid(row=1, column=2, padx=2)
-        tk.Button(time_frame, text="▼", font=self.font_small,
-                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
-                  activebackground=self.theme["btn_active"], bd=0,
-                  width=3,
-                  command=lambda: self._adj_sched("min", -1)
-                  ).grid(row=2, column=2, padx=2)
+        self.min_label.grid(row=1, column=2, padx=3)
+        tk.Button(tf, text="▼", command=lambda: self._adj_sched("min", -1),
+                  **btn_cfg).grid(row=2, column=2, padx=3, pady=1)
 
-        tk.Button(time_frame, text="▲", font=self.font_small,
-                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
-                  activebackground=self.theme["btn_active"], bd=0,
-                  width=3,
-                  command=lambda: self._adj_sched("ampm", 1)
-                  ).grid(row=0, column=3, padx=(10, 2))
-        self.ampm_label = tk.Label(time_frame, text="AM",
+        tk.Button(tf, text="▲", command=lambda: self._adj_sched("ampm", 1),
+                  **btn_cfg).grid(row=0, column=3, padx=(12, 3), pady=1)
+        self.ampm_label = tk.Label(tf, text="AM",
                                    font=self.font_body_bold,
                                    bg=self.theme["card_bg"],
                                    fg=self.theme["fg"], width=3)
-        self.ampm_label.grid(row=1, column=3, padx=(10, 2))
-        tk.Button(time_frame, text="▼", font=self.font_small,
-                  bg=self.theme["btn_bg"], fg=self.theme["fg"],
-                  activebackground=self.theme["btn_active"], bd=0,
-                  width=3,
-                  command=lambda: self._adj_sched("ampm", -1)
-                  ).grid(row=2, column=3, padx=(10, 2))
+        self.ampm_label.grid(row=1, column=3, padx=(12, 3))
+        tk.Button(tf, text="▼", command=lambda: self._adj_sched("ampm", -1),
+                  **btn_cfg).grid(row=2, column=3, padx=(12, 3), pady=1)
 
-        # ── Day-of-week selector ──
+        # ── Day toggles ──
         tk.Label(self.detail_panel, text="DAYS",
                  font=self.font_label,
                  bg=self.theme["card_bg"],
-                 fg=self.theme["muted"]).place(x=pad, y=260)
+                 fg=self.theme["muted"]).place(x=pad, y=270)
 
-        day_frame = tk.Frame(self.detail_panel,
-                             bg=self.theme["card_bg"])
-        day_frame.place(x=pad, y=284)
+        df = tk.Frame(self.detail_panel, bg=self.theme["card_bg"])
+        df.place(x=pad, y=294)
 
         self.day_buttons = {}
         for d in ALL_DAYS:
-            btn = tk.Button(day_frame, text=d[:2], font=self.font_label,
+            btn = tk.Button(df, text=d[:2],
+                            font=self.font_small_bold,
                             bg=self.theme["btn_bg"],
                             fg=self.theme["fg"],
                             activebackground=self.theme["btn_active"],
-                            bd=0, width=3, padx=2, pady=4,
+                            bd=0, width=3, pady=6,
                             command=lambda dd=d: self._toggle_day(dd))
-            btn.pack(side="left", padx=2)
+            btn.pack(side="left", padx=3)
             self.day_buttons[d] = btn
 
-        # ── Dispense button ──
+        # ── Dispense ──
         self.detail_dispense_btn = tk.Button(
             self.detail_panel, text="DISPENSE",
             font=self.font_btn_lg, bg="#4A90D9", fg="#FFFFFF",
             activebackground="#3A7BC8", activeforeground="#FFFFFF",
-            bd=0, padx=40, pady=10,
+            bd=0, padx=50, pady=14,
             command=self._detail_dispense)
-        self.detail_dispense_btn.place(x=pad, y=360)
+        self.detail_dispense_btn.place(x=pad, y=370)
 
         self.detail_hint = tk.Label(self.detail_panel, text="",
                                     fg=self.theme["muted"],
                                     bg=self.theme["card_bg"],
                                     font=self.font_small, anchor="w")
-        self.detail_hint.place(x=pad, y=420)
+        self.detail_hint.place(x=pad, y=430)
 
     def _storage_select(self, key):
         self.selected_pill = key
@@ -840,7 +839,6 @@ class DoseApp:
             self.detail_take_lbl.configure(
                 text=take if take else "")
 
-            # Parse schedule time into editor
             sched = md.get("schedule_time", "8:00 AM")
             try:
                 parts = sched.split()
@@ -849,13 +847,11 @@ class DoseApp:
                 self._sched_min = int(tp[1])
                 self._sched_ampm = parts[1] if len(parts) > 1 else "AM"
             except Exception:
-                self._sched_hour = 8
-                self._sched_min = 0
+                self._sched_hour, self._sched_min = 8, 0
                 self._sched_ampm = "AM"
             self.hour_label.configure(text=str(self._sched_hour))
             self.min_label.configure(text=f"{self._sched_min:02d}")
             self.ampm_label.configure(text=self._sched_ampm)
-
             self._update_day_buttons()
 
             if md["count"] > 0:
@@ -868,9 +864,9 @@ class DoseApp:
                 self.detail_hint.configure(text="Scan QR to reload")
         else:
             self.detail_name.configure(
-                text=f"{key.capitalize()} — Not Loaded",
+                text=f"{key.capitalize()} Slot",
                 fg=self.theme["muted"])
-            self.detail_count_lbl.configure(text="")
+            self.detail_count_lbl.configure(text="Not loaded")
             self.detail_take_lbl.configure(
                 text="Scan a QR code to load this slot")
             self.hour_label.configure(text="8")
@@ -898,27 +894,16 @@ class DoseApp:
             accent = SLOT_DEFS[key]["accent"]
             if md.get("loaded"):
                 r["name_lbl"].configure(text=md["name"])
+                r["info_lbl"].configure(
+                    text=md.get("schedule_time", ""),
+                    fg=self.theme["fg"])
                 r["count_lbl"].configure(
-                    text=f"{md['count']} pills")
-                if md["count"] > 0:
-                    r["status_lbl"].configure(text="READY", fg=accent)
-                else:
-                    r["status_lbl"].configure(text="EMPTY",
-                                              fg="#FF6B6B")
+                    text=f"{md['count']} pills", fg=accent)
             else:
-                r["name_lbl"].configure(text="—")
-                r["count_lbl"].configure(text="0 pills")
-                r["status_lbl"].configure(text="NOT LOADED",
-                                          fg=self.theme["muted"])
-
-        loaded = sum(1 for k in SLOT_KEYS if self._is_loaded(k))
-        if loaded == 0:
-            self.storage_scan_hint.configure(text="Scan QR to load")
-        elif loaded < 4:
-            self.storage_scan_hint.configure(
-                text=f"{loaded}/4 loaded")
-        else:
-            self.storage_scan_hint.configure(text="All loaded")
+                r["name_lbl"].configure(text=f"{key.capitalize()}")
+                r["info_lbl"].configure(text="Not loaded",
+                                        fg=self.theme["muted"])
+                r["count_lbl"].configure(text="", fg=accent)
 
         self._update_storage_detail()
 
