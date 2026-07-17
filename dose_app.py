@@ -1013,9 +1013,12 @@ class DoseApp:
     def _draw_settings(self, c):
         t = self.theme
 
-        card_img = _pil_rounded_rect(608, 416, 22, t["card_bg"])
+        # Card fills content area edge-to-edge vertically
+        card_y = 20
+        card_h = 440
+        card_img = _pil_rounded_rect(620, card_h, 22, t["card_bg"])
         tk_card = self._get_tk_image("settings_card", card_img)
-        c.create_image(32, 32, image=tk_card, anchor="nw")
+        c.create_image(26, card_y, image=tk_card, anchor="nw")
 
         items = [
             ("Day / Night Mode", 0, "toggle", "night_mode",
@@ -1027,25 +1030,26 @@ class DoseApp:
              self.settings.get("constant_scan", False)),
         ]
 
-        row_h = 104
+        row_h = card_h // 4
         for label, idx, kind, key, val in items:
-            y = 32 + idx * row_h
-            px = 56
+            y = card_y + idx * row_h
+            px = 52
 
             if idx < 3:
-                c.create_line(px, y + row_h, 616, y + row_h,
+                c.create_line(px, y + row_h, 622, y + row_h,
                               fill=t["divider"])
 
-            icon_img = _pil_settings_icon(40, SETTINGS_ICON_COLORS[idx])
+            # Bigger icon (48px)
+            icon_img = _pil_settings_icon(48, SETTINGS_ICON_COLORS[idx])
             tk_icon = self._get_tk_image(f"set_icon_{idx}", icon_img)
-            c.create_image(px, y + (row_h - 40) // 2, image=tk_icon, anchor="nw")
+            c.create_image(px, y + (row_h - 48) // 2, image=tk_icon, anchor="nw")
 
-            c.create_text(px + 56, y + row_h // 2 - 4, text=label,
+            c.create_text(px + 64, y + row_h // 2 - 4, text=label,
                           font=self.font_settings, fill=t["fg"], anchor="w")
 
             if kind == "toggle":
-                tw, th = 58, 30
-                tx = 570
+                tw, th = 64, 34
+                tx = 568
                 ty = y + (row_h - th) // 2
                 tog_img = _pil_toggle(tw, th, val, t)
                 tk_tog = self._get_tk_image(f"toggle_{key}", tog_img)
@@ -1056,10 +1060,10 @@ class DoseApp:
                      lambda k=key: self._toggle_setting(k)))
 
             elif kind == "button":
-                bw, bh = 104, 40
-                bx = 520
+                bw, bh = 120, 44
+                bx = 510
                 by = y + (row_h - bh) // 2
-                btn_img = _pil_rounded_rect(bw, bh, 12, ACCENT_BLUE)
+                btn_img = _pil_rounded_rect(bw, bh, 14, ACCENT_BLUE)
                 tk_btn = self._get_tk_image("update_btn", btn_img)
                 c.create_image(bx, by, image=tk_btn, anchor="nw")
                 c.create_text(bx + bw // 2, by + bh // 2, text="UPDATE",
@@ -1068,7 +1072,7 @@ class DoseApp:
 
                 status = getattr(self, '_update_status_text', '')
                 if status:
-                    c.create_text(px + 56, y + row_h // 2 + 14, text=status,
+                    c.create_text(px + 64, y + row_h // 2 + 16, text=status,
                                   font=self.font_small, fill=t["muted"],
                                   anchor="w")
 
