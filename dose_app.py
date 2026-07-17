@@ -205,6 +205,8 @@ class DoseApp:
         self.has_touch = False
         self.mpr_prev = [False] * 12
         self.qr_last_seen = {k: 0.0 for k in SLOT_KEYS}
+        self._standby_prev_keys = None
+        self._storage_prev_visible = None
 
         # ── Config + Med data ──────────────────────────────────────────────
         self._load_config()
@@ -446,10 +448,12 @@ class DoseApp:
         if mode == "standby":
             self.standby_frame.place(x=0, y=0,
                                      width=SCREEN_W, height=SCREEN_H)
+            self._standby_prev_keys = None
             self._update_standby()
         elif mode == "storage":
             self.storage_frame.place(x=0, y=0,
                                      width=SCREEN_W, height=SCREEN_H)
+            self._storage_prev_visible = None
             self._update_storage()
         elif mode == "settings":
             self.settings_frame.place(x=0, y=0,
@@ -469,6 +473,8 @@ class DoseApp:
             pass
         if self.mode == "standby":
             self._update_standby()
+        elif self.mode == "storage":
+            self._update_storage()
         self.root.after(1000, self._tick_clock)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -567,22 +573,28 @@ class DoseApp:
 
     def _update_standby(self):
         today_sched = self._get_today_schedule()
+        visible_keys = tuple(e["key"] for e in today_sched[:4])
+        layout_changed = (visible_keys != self._standby_prev_keys)
 
-        # Hide all rows first
-        for row in self.standby_sched_rows:
-            row["card"].place_forget()
+        if layout_changed:
+            self._standby_prev_keys = visible_keys
+            for row in self.standby_sched_rows:
+                row["card"].place_forget()
 
         if not today_sched:
-            self.standby_empty_label.configure(
-                text="Place medications in view to see schedule")
-            self.standby_empty_label.place(x=MARGIN_LEFT, y=200)
+            if layout_changed:
+                self.standby_empty_label.configure(
+                    text="Place medications in view to see schedule")
+                self.standby_empty_label.place(x=MARGIN_LEFT, y=200)
         else:
-            self.standby_empty_label.place_forget()
+            if layout_changed:
+                self.standby_empty_label.place_forget()
             for i, entry in enumerate(today_sched[:4]):
                 row = self.standby_sched_rows[i]
-                y = 108 + i * 82
-                row["card"].place(x=MARGIN_LEFT, y=y,
-                                  width=620, height=72)
+                if layout_changed:
+                    y = 108 + i * 82
+                    row["card"].place(x=MARGIN_LEFT, y=y,
+                                      width=620, height=72)
                 row["color_bar"].configure(bg=entry["accent"])
                 row["time_lbl"].configure(text=entry["time"])
                 row["name_lbl"].configure(text=entry["name"])
@@ -619,6 +631,7 @@ class DoseApp:
             except ValueError:
                 display = sort_key.strftime("%I:%M %p").lstrip("0")
             entries.append({
+                "key": key,
                 "time": display,
                 "name": md["name"],
                 "count": md.get("count", 0),
@@ -656,7 +669,6 @@ class DoseApp:
 
             row = tk.Frame(left, bg=self.theme["card_bg"],
                            highlightthickness=0, cursor="hand2")
-            row.place(x=12, y=y, width=236, height=96)
 
             # Thick color bar on left
             tk.Frame(row, bg=accent, width=5).place(
@@ -878,7 +890,7 @@ class DoseApp:
         md = self.med_data[key]
         accent = SLOT_DEFS[key]["accent"]
 
-        if md.get("loaded"):
+        if md.get("loaded") and self._is_qr_present(key):
             self.detail_name.configure(text=md["name"], fg=accent)
             self.detail_count_lbl.configure(
                 text=f"{md['count']} pills remaining")
@@ -935,24 +947,44 @@ class DoseApp:
                 r["row"].configure(highlightthickness=0)
 
     def _update_storage(self):
+        now_visible = tuple(k for k in SLOT_KEYS
+                            if self._is_qr_present(k) and self._is_loaded(k))
+        layout_changed = (now_visible != self._storage_prev_visible)
+        if layout_changed:
+            self._storage_prev_visible = now_visible
+
         for key in SLOT_KEYS:
             r = self.slot_rows[key]
             md = self.med_data[key]
             accent = SLOT_DEFS[key]["accent"]
-            if md.get("loaded"):
+            present = self._is_qr_present(key)
+            if md.get("loaded") and present:
                 r["name_lbl"].configure(text=md["name"])
                 r["info_lbl"].configure(
                     text=md.get("schedule_time", ""),
                     fg=self.theme["fg"])
                 r["count_lbl"].configure(
                     text=f"{md['count']} pills", fg=accent)
+                if layout_changed:
+                    r["row"].place(x=12, y=48 + SLOT_KEYS.index(key) * 108,
+                                   width=236, height=96)
             else:
-                r["name_lbl"].configure(text=f"{key.capitalize()}")
-                r["info_lbl"].configure(text="Not loaded",
-                                        fg=self.theme["muted"])
-                r["count_lbl"].configure(text="", fg=accent)
+                if layout_changed:
+                    r["row"].place_forget()
 
-        self._update_storage_detail()
+        if now_visible:
+            if self.selected_pill not in now_visible:
+                self.selected_pill = now_visible[0]
+            self._update_storage_detail()
+        elif layout_changed:
+            self.detail_name.configure(text="No pills in view",
+                                       fg=self.theme["muted"])
+            self.detail_count_lbl.configure(
+                text="Place medications in camera view")
+            self.detail_take_lbl.configure(text="")
+            self.detail_dispense_btn.configure(
+                state="disabled", bg=self.theme["btn_bg"])
+            self.detail_hint.configure(text="")
 
     # ══════════════════════════════════════════════════════════════════════
     #  QTY CONFIRM (overlay for first-time QR load)
@@ -1488,54 +1520,62 @@ class DoseApp:
             self.camera_running = False
 
     def _camera_loop(self):
+        """Scan for QR codes continuously. Handles multiple QR codes
+        in a single frame and assigns slot positions by x-coordinate:
+        rightmost QR = top slot (blue), leftmost = bottom slot (yellow)."""
         while self.camera_running:
             try:
                 frame = self.camera.capture_array()
                 img = Image.fromarray(frame[:, :, ::-1])
                 results = pyzbar_decode(img)
-                seen_this_frame = set()
-                for r in results:
-                    text = r.data.decode("utf-8", errors="ignore").strip()
-                    self.root.after(0, self._handle_qr, text)
-                    seen_this_frame.add(text)
+                if results:
+                    qr_with_pos = []
+                    for r in results:
+                        text = r.data.decode("utf-8", errors="ignore").strip()
+                        x_pos = r.rect.left if r.rect else 0
+                        qr_with_pos.append((x_pos, text))
+                    qr_with_pos.sort(key=lambda p: p[0], reverse=True)
+                    slot_assignments = []
+                    for idx, (x_pos, text) in enumerate(qr_with_pos):
+                        if idx < len(SLOT_KEYS):
+                            slot_assignments.append(
+                                (SLOT_KEYS[idx], text))
+                    self.root.after(0, self._handle_qr_batch,
+                                   slot_assignments)
                 time.sleep(0.5)
             except Exception:
                 time.sleep(1)
 
-    def _parse_qr_slot(self, raw_text):
-        """Parse QR text into (slot_key, med_name) or (None, None)."""
+    def _parse_qr_med_name(self, raw_text):
+        """Extract medication name from QR text."""
         try:
             payload = json.loads(raw_text)
-            slot = payload.get("slot", "").lower()
-            med_name = payload.get("med", slot.capitalize())
+            return payload.get("med", "Medication")
         except (json.JSONDecodeError, AttributeError):
-            slot = raw_text.strip().lower()
-            med_name = slot.capitalize()
-        if slot not in SLOT_DEFS:
-            return None, None
-        return slot, med_name
+            return raw_text.strip().capitalize() or "Medication"
 
-    def _handle_qr(self, raw_text):
-        """Called on every QR detection. Updates presence timestamp.
-        Only triggers load/dispense if the slot is new or empty."""
-        slot, med_name = self._parse_qr_slot(raw_text)
-        if not slot:
-            return
+    def _handle_qr_batch(self, slot_assignments):
+        """Process all QR codes from a single frame.
+        slot_assignments: list of (slot_key, raw_text) sorted by
+        position — rightmost QR first (= top storage slot)."""
+        now = time.time()
+        for slot, raw_text in slot_assignments:
+            med_name = self._parse_qr_med_name(raw_text)
+            self.qr_last_seen[slot] = now
 
-        self.qr_last_seen[slot] = time.time()
-
-        md = self.med_data[slot]
-
-        if self.dispense_state == 0:
-            if not md.get("loaded"):
-                md["name"] = med_name
-                md["take_with"] = ""
-                self._save_med()
-                self._show_qty_confirm(slot, med_name)
-            elif md.get("count", 0) <= 0:
-                md["name"] = med_name
-                self._save_med()
-                self._show_qty_confirm(slot, med_name)
+            md = self.med_data[slot]
+            if self.dispense_state == 0:
+                if not md.get("loaded"):
+                    md["name"] = med_name
+                    md["take_with"] = ""
+                    self._save_med()
+                    self._show_qty_confirm(slot, med_name)
+                    return
+                elif md.get("count", 0) <= 0:
+                    md["name"] = med_name
+                    self._save_med()
+                    self._show_qty_confirm(slot, med_name)
+                    return
 
     # ── WiFi icon ──────────────────────────────────────────────────────────
     def _draw_wifi(self, canvas, color):
