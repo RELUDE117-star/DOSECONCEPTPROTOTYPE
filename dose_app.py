@@ -207,6 +207,9 @@ class DoseApp:
         self.qr_last_seen = {k: 0.0 for k in SLOT_KEYS}
         self._standby_prev_keys = None
         self._storage_prev_visible = None
+        self._anim_queue = []
+        self._anim_running = False
+        self._prev_qr_present = {k: False for k in SLOT_KEYS}
 
         # ── Config + Med data ──────────────────────────────────────────────
         self._load_config()
@@ -239,6 +242,12 @@ class DoseApp:
 
         self.overlay_frame = tk.Frame(self.root, bg=self.theme["bg"],
                                       width=SCREEN_W, height=SCREEN_H)
+
+        # Animation canvas — transparent overlay for pill bottle animations
+        self.anim_canvas = tk.Canvas(self.root, width=SCREEN_W,
+                                     height=SCREEN_H,
+                                     highlightthickness=0, bd=0,
+                                     bg=self.theme["bg"])
 
         # D button canvas — 80x80 in bottom-right
         self.d_btn_size = 80
@@ -471,11 +480,28 @@ class DoseApp:
             self.clock_label.configure(text=now_str)
         except Exception:
             pass
+        self._check_presence_changes()
         if self.mode == "standby":
             self._update_standby()
         elif self.mode == "storage":
             self._update_storage()
         self.root.after(1000, self._tick_clock)
+
+    def _check_presence_changes(self):
+        """Detect when pills enter or leave camera view, trigger animation."""
+        if self.dispense_state > 0:
+            return
+        for key in SLOT_KEYS:
+            if not self._is_loaded(key):
+                self._prev_qr_present[key] = False
+                continue
+            now_present = self._is_qr_present(key)
+            was_present = self._prev_qr_present[key]
+            if now_present and not was_present:
+                self._animate_pill_bottle(key, "down")
+            elif was_present and not now_present:
+                self._animate_pill_bottle(key, "up")
+            self._prev_qr_present[key] = now_present
 
     # ══════════════════════════════════════════════════════════════════════
     #  STANDBY MODE
@@ -1282,6 +1308,120 @@ class DoseApp:
         for w in self.overlay_frame.winfo_children():
             w.destroy()
         self.overlay_frame.configure(bg=self.theme["bg"])
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  PILL BOTTLE ANIMATION — slide up (removed) / slide down (placed)
+    # ══════════════════════════════════════════════════════════════════════
+    def _animate_pill_bottle(self, slot_key, direction):
+        """Queue a pill bottle animation.
+        direction: 'up' (removed from view) or 'down' (placed in view)."""
+        self._anim_queue.append((slot_key, direction))
+        if not self._anim_running:
+            self._run_next_anim()
+
+    def _run_next_anim(self):
+        if not self._anim_queue:
+            self._anim_running = False
+            return
+        self._anim_running = True
+        slot_key, direction = self._anim_queue.pop(0)
+        self._do_bottle_anim(slot_key, direction)
+
+    def _do_bottle_anim(self, slot_key, direction):
+        accent = SLOT_DEFS[slot_key]["accent"]
+        md = self.med_data.get(slot_key, {})
+        name = md.get("name", slot_key.capitalize())
+
+        c = self.anim_canvas
+        c.delete("all")
+
+        # Pill bottle dimensions
+        bw, bh = 120, 180
+        cx = SCREEN_W // 2
+        r = 16
+
+        if direction == "up":
+            start_y = (SCREEN_H - bh) // 2
+            end_y = -bh - 20
+            label_text = f"{name} removed"
+        else:
+            start_y = SCREEN_H + 20
+            end_y = (SCREEN_H - bh) // 2
+            label_text = f"{name} placed"
+
+        x1 = cx - bw // 2
+        x2 = cx + bw // 2
+        y1 = start_y
+        y2 = start_y + bh
+
+        # Draw bottle shape
+        bottle = self._canvas_rounded_rect(c, x1, y1, x2, y2, r,
+                                            fill=accent, outline="")
+        # Cap on top
+        cap_h = 30
+        cap = c.create_rectangle(x1 + 15, y1 - 5, x2 - 15, y1 + cap_h,
+                                  fill=accent, outline="")
+        cap_top = self._canvas_rounded_rect(c, x1 + 12, y1 - 12,
+                                             x2 - 12, y1 + 8, 8,
+                                             fill=self._darken(accent),
+                                             outline="")
+        # Label on bottle
+        text_id = c.create_text(cx, start_y + bh // 2 + 10,
+                                text=name, fill="#FFFFFF",
+                                font=self.font_small_bold)
+        # Status text below/above
+        if direction == "up":
+            status_id = c.create_text(cx, start_y + bh + 30,
+                                       text=label_text,
+                                       fill=self.theme["muted"],
+                                       font=self.font_body)
+        else:
+            status_id = c.create_text(cx, start_y - 30,
+                                       text=label_text,
+                                       fill=self.theme["muted"],
+                                       font=self.font_body)
+
+        # Show canvas
+        c.place(x=0, y=0, width=SCREEN_W, height=SCREEN_H)
+        self._raise_widget(c)
+        self._raise_widget(self.d_btn_canvas)
+
+        items = [bottle, cap, cap_top, text_id, status_id]
+        total_frames = 18
+        total_dist = end_y - start_y
+        self._anim_frame(items, 0, total_frames, total_dist, c)
+
+    def _anim_frame(self, items, frame, total, total_dist, canvas):
+        if frame > total:
+            self.root.after(300, self._anim_cleanup)
+            return
+        t = frame / total
+        ease = t * t * (3 - 2 * t)
+        dy = total_dist * ease
+        prev_ease = ((frame - 1) / total) if frame > 0 else 0
+        prev_ease = prev_ease * prev_ease * (3 - 2 * prev_ease)
+        prev_dy = total_dist * prev_ease
+        delta = dy - prev_dy
+        for item in items:
+            canvas.move(item, 0, delta)
+        self.root.after(22, self._anim_frame,
+                        items, frame + 1, total, total_dist, canvas)
+
+    def _anim_cleanup(self):
+        self.anim_canvas.delete("all")
+        self.anim_canvas.place_forget()
+        self._run_next_anim()
+
+    @staticmethod
+    def _darken(hex_color):
+        """Return a slightly darker version of a hex color."""
+        try:
+            r = max(0, int(hex_color[1:3], 16) - 40)
+            g = max(0, int(hex_color[3:5], 16) - 40)
+            b = max(0, int(hex_color[5:7], 16) - 40)
+            return f"#{r:02x}{g:02x}{b:02x}"
+        except Exception:
+            return "#333333"
 
     def _start_dispense(self, pill_key):
         md = self.med_data.get(pill_key, {})
