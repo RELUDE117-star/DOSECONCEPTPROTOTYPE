@@ -112,11 +112,11 @@ LIGHT_THEME = {
 ACCENT_BLUE = "#5FA3F5"
 SETTINGS_ICON_COLORS = ["#5FA3F5", "#FF9F43", "#30D158", "#AF52DE"]
 
-KNOWN_QR_PAYLOADS = {
-    '{"med":"Sertraline","slot":"blue"}': ("Sertraline", "blue"),
-    '{"med":"Lisinopril","slot":"red"}': ("Lisinopril", "red"),
-    '{"med":"Metformin","slot":"green"}': ("Metformin", "green"),
-    '{"med":"Atorvastatin","slot":"yellow"}': ("Atorvastatin", "yellow"),
+KNOWN_SLOTS = {
+    "blue": "Sertraline",
+    "red": "Lisinopril",
+    "green": "Metformin",
+    "yellow": "Atorvastatin",
 }
 
 KEYBOARD_ROWS = [
@@ -735,30 +735,39 @@ class DoseApp:
             c.create_text(32, 200, text="Place medications in view to see schedule",
                           font=self.font_body, fill=t["muted"], anchor="nw")
         else:
-            card_gap = 12
-            card_h = 76
-            for i, entry in enumerate(sched[:4]):
-                y = 92 + i * (card_h + card_gap)
-                card_img = _pil_rounded_rect(608, card_h, 22, t["card_bg"])
+            # Cards fill from y=88 to y=456 (368px), 4 cards with gaps
+            num = min(len(sched), 4)
+            card_gap = 10
+            total_h = 370
+            card_h = (total_h - card_gap * (num - 1)) // num
+            card_w = 620
+
+            for i, entry in enumerate(sched[:num]):
+                y = 88 + i * (card_h + card_gap)
+                card_img = _pil_rounded_rect(card_w, card_h, 22, t["card_bg"])
                 tk_card = self._get_tk_image(f"home_card_{i}", card_img)
-                c.create_image(32, y, image=tk_card, anchor="nw")
+                c.create_image(26, y, image=tk_card, anchor="nw")
 
-                dot_img = _pil_rounded_rect(44, 44, 14, entry["accent"])
+                # Bigger accent dot
+                dot_size = min(52, card_h - 20)
+                dot_img = _pil_rounded_rect(dot_size, dot_size, 16, entry["accent"])
                 tk_dot = self._get_tk_image(f"home_dot_{i}", dot_img)
-                c.create_image(52, y + 16, image=tk_dot, anchor="nw")
+                c.create_image(44, y + (card_h - dot_size) // 2,
+                               image=tk_dot, anchor="nw")
 
-                c.create_text(112, y + 16, text=entry["time"],
-                              font=self.font_name, fill=t["fg"], anchor="nw")
-                c.create_text(112, y + 44, text=entry["name"],
-                              font=self.font_small, fill=t["muted"], anchor="nw")
+                text_x = 44 + dot_size + 16
+                c.create_text(text_x, y + card_h // 2 - 14, text=entry["time"],
+                              font=self.font_name, fill=t["fg"], anchor="w")
+                c.create_text(text_x, y + card_h // 2 + 12, text=entry["name"],
+                              font=self.font_small, fill=t["muted"], anchor="w")
 
                 cnt = entry.get("count", 0)
-                c.create_text(600, y + 28, text=f"{cnt} pills",
+                c.create_text(card_w - 6, y + card_h // 2, text=f"{cnt} pills",
                               font=self.font_title, fill=entry["accent"],
                               anchor="e")
 
                 self._click_zones.append(
-                    (32, y, 640, y + card_h,
+                    (26, y, 26 + card_w, y + card_h,
                      lambda k=entry["key"]: self._start_dispense_if_ok(k)))
 
         self._click_zones.append((0, 0, CONTENT_W, SCREEN_H, self._home_tap))
@@ -821,9 +830,9 @@ class DoseApp:
     def _draw_storage(self, c):
         t = self.theme
 
-        left_img = _pil_rounded_rect(208, 416, 22, t["card_bg"])
+        left_img = _pil_rounded_rect(212, 440, 22, t["card_bg"])
         tk_left = self._get_tk_image("stor_left", left_img)
-        c.create_image(32, 32, image=tk_left, anchor="nw")
+        c.create_image(26, 20, image=tk_left, anchor="nw")
 
         all_keys = SLOT_KEYS + (["demo"] if self._demo_registered else [])
         visible = [k for k in all_keys
@@ -834,22 +843,23 @@ class DoseApp:
                 continue
             md = self.med_data[key]
             accent = SLOT_COLORS.get(key, "#C084FC")
-            y = 48 + visible.index(key) * 96
+            vi = visible.index(key)
+            y = 36 + vi * 100
             is_sel = (key == self.selected_pill)
 
             if is_sel:
-                row_img = _pil_rounded_rect(188, 88, 16, t["elevated_bg"],
+                row_img = _pil_rounded_rect(192, 92, 16, t["elevated_bg"],
                                             outline=accent, outline_w=2)
             else:
-                row_img = _pil_rounded_rect(188, 88, 16, t["elevated_bg"])
+                row_img = _pil_rounded_rect(192, 92, 16, t["elevated_bg"])
             tk_row = self._get_tk_image(f"stor_row_{key}", row_img)
-            c.create_image(42, y, image=tk_row, anchor="nw")
+            c.create_image(36, y, image=tk_row, anchor="nw")
 
-            dot_img = _pil_rounded_rect(14, 14, 5, accent)
+            dot_img = _pil_rounded_rect(16, 16, 6, accent)
             tk_dot = self._get_tk_image(f"stor_dot_{key}", dot_img)
-            c.create_image(56, y + 10, image=tk_dot, anchor="nw")
+            c.create_image(50, y + 12, image=tk_dot, anchor="nw")
 
-            c.create_text(56, y + 30, text=md["name"],
+            c.create_text(50, y + 34, text=md["name"],
                           font=self.font_small_bold, fill=t["fg"], anchor="nw")
             doses = md.get("doses", [2])
             if len(doses) > 1:
@@ -857,16 +867,16 @@ class DoseApp:
             else:
                 idx = doses[0] if doses else 2
                 dose_text = f"Next dose {TIME_PRESETS[idx] if 0 <= idx < len(TIME_PRESETS) else '8:00 AM'}"
-            c.create_text(56, y + 54, text=dose_text,
+            c.create_text(50, y + 58, text=dose_text,
                           font=self.font_tiny, fill=t["muted"], anchor="nw")
 
             self._click_zones.append(
-                (42, y, 230, y + 88,
+                (36, y, 228, y + 92,
                  lambda k=key: self._storage_select(k)))
 
-        right_img = _pil_rounded_rect(384, 416, 22, t["card_bg"])
+        right_img = _pil_rounded_rect(400, 440, 22, t["card_bg"])
         tk_right = self._get_tk_image("stor_right", right_img)
-        c.create_image(256, 32, image=tk_right, anchor="nw")
+        c.create_image(248, 20, image=tk_right, anchor="nw")
 
         if visible and self.selected_pill in visible:
             self._draw_storage_detail(c, visible)
@@ -882,88 +892,96 @@ class DoseApp:
         key = self.selected_pill
         md = self.med_data[key]
         accent = SLOT_COLORS.get(key, "#C084FC")
-        px = 280
+        px = 272
 
-        c.create_text(px, 56, text=md["name"],
+        c.create_text(px, 40, text=md["name"],
                       font=self.font_name_lg, fill=accent, anchor="nw")
         cnt = md.get("count", 0)
-        c.create_text(px, 92, text=f"{cnt} pills remaining",
+        c.create_text(px, 76, text=f"{cnt} pills remaining",
                       font=self.font_body, fill=t["muted"], anchor="nw")
-        c.create_line(px, 120, 616, 120, fill=t["divider"])
+        c.create_line(px, 104, 630, 104, fill=t["divider"])
 
         doses = md.get("doses", [2])
-        c.create_text(px, 136, text=f"SCHEDULE ({len(doses)}x DAILY)",
+        c.create_text(px, 116, text=f"SCHEDULE ({len(doses)}x DAILY)",
                       font=self.font_label, fill=t["muted"], anchor="nw")
 
+        # Dose chips — wider panel means we can fit larger chips
+        num_doses = len(doses)
+        avail_w = 370
+        chip_gap = 10
+        chip_w = min(170, (avail_w - chip_gap * (num_doses - 1)) // max(1, num_doses))
+        chip_h = 70
+
         chip_x = px
+        chip_y = 140
         for i, dose_idx in enumerate(doses):
             ts = TIME_PRESETS[dose_idx] if 0 <= dose_idx < len(TIME_PRESETS) else "8:00 AM"
-            chip_w = 150
-            chip_img = _pil_rounded_rect(chip_w, 60, 14, t["elevated_bg"])
+            chip_img = _pil_rounded_rect(chip_w, chip_h, 14, t["elevated_bg"])
             tk_chip = self._get_tk_image(f"dose_chip_{i}", chip_img)
-            cy = 160
-            c.create_image(chip_x, cy, image=tk_chip, anchor="nw")
+            c.create_image(chip_x, chip_y, image=tk_chip, anchor="nw")
 
-            c.create_text(chip_x + chip_w // 2, cy + 12,
+            c.create_text(chip_x + chip_w // 2, chip_y + 16,
                           text=f"DOSE {i + 1}",
                           font=self.font_dose_label, fill=t["muted"],
                           anchor="center")
-            c.create_text(chip_x + chip_w // 2, cy + 38,
+            c.create_text(chip_x + chip_w // 2, chip_y + 44,
                           text=ts, font=self.font_dose_time,
                           fill=t["fg"], anchor="center")
 
             # Prev arrow
-            arr_y = cy + 38
-            prev_img = _pil_rounded_rect(26, 26, 9, t["card_bg"])
+            arr_y = chip_y + 44
+            prev_img = _pil_rounded_rect(28, 28, 10, t["card_bg"])
             tk_prev = self._get_tk_image(f"dose_prev_{i}", prev_img)
-            c.create_image(chip_x + 8, arr_y - 13, image=tk_prev, anchor="nw")
-            c.create_text(chip_x + 21, arr_y, text="‹",
+            c.create_image(chip_x + 6, arr_y - 14, image=tk_prev, anchor="nw")
+            c.create_text(chip_x + 20, arr_y, text="‹",
                           font=self.font_body_bold, fill=t["fg"],
                           anchor="center")
             self._click_zones.append(
-                (chip_x + 8, arr_y - 13, chip_x + 34, arr_y + 13,
+                (chip_x + 6, arr_y - 14, chip_x + 34, arr_y + 14,
                  lambda idx=i: self._adj_dose_time(idx, -1)))
 
             # Next arrow
             nx = chip_x + chip_w - 34
             tk_next = self._get_tk_image(f"dose_next_{i}", prev_img)
-            c.create_image(nx, arr_y - 13, image=tk_next, anchor="nw")
-            c.create_text(nx + 13, arr_y, text="›",
+            c.create_image(nx, arr_y - 14, image=tk_next, anchor="nw")
+            c.create_text(nx + 14, arr_y, text="›",
                           font=self.font_body_bold, fill=t["fg"],
                           anchor="center")
             self._click_zones.append(
-                (nx, arr_y - 13, nx + 26, arr_y + 13,
+                (nx, arr_y - 14, nx + 28, arr_y + 14,
                  lambda idx=i: self._adj_dose_time(idx, 1)))
 
-            chip_x += chip_w + 10
+            chip_x += chip_w + chip_gap
 
         # DAYS
-        c.create_text(px, 240, text="DAYS",
+        days_y = chip_y + chip_h + 20
+        c.create_text(px, days_y, text="DAYS",
                       font=self.font_label, fill=t["muted"], anchor="nw")
 
         sched_days = md.get("schedule_days", ALL_DAYS)
         dx = px
+        day_y = days_y + 22
         for i, dl in enumerate(DAY_LABELS):
             day_name = ALL_DAYS[i]
             is_active = day_name in sched_days
             dbg = accent if is_active else t["elevated_bg"]
             dfg = "#0A0A0C" if is_active else t["muted"]
 
-            day_img = _pil_rounded_rect(42, 32, 9, dbg)
+            day_img = _pil_rounded_rect(46, 36, 10, dbg)
             tk_day = self._get_tk_image(f"day_{key}_{i}", day_img)
-            c.create_image(dx, 264, image=tk_day, anchor="nw")
-            c.create_text(dx + 21, 280, text=dl,
+            c.create_image(dx, day_y, image=tk_day, anchor="nw")
+            c.create_text(dx + 23, day_y + 18, text=dl,
                           font=self.font_day, fill=dfg, anchor="center")
 
             self._click_zones.append(
-                (dx, 264, dx + 42, 296,
+                (dx, day_y, dx + 46, day_y + 36,
                  lambda d=day_name: self._toggle_day(d)))
-            dx += 48
+            dx += 52
 
-        # DISPENSE button
-        disp_y = 316
-        disp_w = 336
-        disp_h = 48
+        # DISPENSE button — sits near bottom of card
+        disp_y = day_y + 54
+        disp_w = 370
+        disp_h = 52
         disp_bg = accent if cnt > 0 else t["btn_bg"]
         disp_img = _pil_rounded_rect(disp_w, disp_h, 14, disp_bg)
         tk_disp = self._get_tk_image("stor_dispense", disp_img)
@@ -1100,10 +1118,10 @@ class DoseApp:
     def _draw_user(self, c):
         t = self.theme
 
-        # Main card
-        card_img = _pil_rounded_rect(608, 416, 22, t["card_bg"])
+        # Main card — fills content area
+        card_img = _pil_rounded_rect(620, 440, 22, t["card_bg"])
         tk_card = self._get_tk_image("user_card", card_img)
-        c.create_image(32, 32, image=tk_card, anchor="nw")
+        c.create_image(26, 20, image=tk_card, anchor="nw")
 
         c.create_text(56, 52, text="YOUR ADHERENCE",
                       font=self.font_label, fill=t["muted"], anchor="nw")
@@ -1234,7 +1252,7 @@ class DoseApp:
 
         slot_color = SLOT_COLORS.get(self._draft_slot, "#C084FC")
 
-        card_img = _pil_rounded_rect(608, 416, 22, t["card_bg"])
+        card_img = _pil_rounded_rect(620, 440, 22, t["card_bg"])
         tk_card = self._get_tk_image("addmed_card", card_img)
         c.create_image(32, 32, image=tk_card, anchor="nw")
 
@@ -2064,7 +2082,7 @@ class DoseApp:
         try:
             self.camera = Picamera2()
             config = self.camera.create_preview_configuration(
-                main={"size": (1280, 720), "format": "RGB888"})
+                main={"size": (1920, 1080), "format": "RGB888"})
             self.camera.configure(config)
             self.camera.start()
             try:
@@ -2081,79 +2099,109 @@ class DoseApp:
         while self.camera_running:
             try:
                 frame = self.camera.capture_array()
-                img = Image.fromarray(frame[:, :, ::-1])
-                results = pyzbar_decode(img)
+                pil_img = Image.fromarray(frame[:, :, ::-1])
+
+                # Try decoding at original resolution first
+                results = pyzbar_decode(pil_img)
+
+                # If we found fewer than expected, try with enhanced contrast
+                if len(results) < 2:
+                    try:
+                        gray = pil_img.convert("L")
+                        from PIL import ImageEnhance
+                        enhanced = ImageEnhance.Contrast(gray).enhance(2.0)
+                        results2 = pyzbar_decode(enhanced)
+                        if len(results2) > len(results):
+                            results = results2
+                    except Exception:
+                        pass
+
+                # If still struggling, try sharpened version
+                if len(results) < 2:
+                    try:
+                        from PIL import ImageFilter
+                        sharp = pil_img.filter(ImageFilter.SHARPEN)
+                        results3 = pyzbar_decode(sharp)
+                        if len(results3) > len(results):
+                            results = results3
+                    except Exception:
+                        pass
+
                 if results:
+                    # Deduplicate by data content
+                    seen_data = set()
                     qr_with_pos = []
                     for r in results:
                         text = r.data.decode("utf-8", errors="ignore").strip()
+                        if text in seen_data:
+                            continue
+                        seen_data.add(text)
                         x_pos = r.rect.left if r.rect else 0
                         qr_with_pos.append((x_pos, text))
                     qr_with_pos.sort(key=lambda p: p[0], reverse=True)
                     self.root.after(0, self._handle_qr_results, qr_with_pos)
-                time.sleep(0.5)
+
+                time.sleep(0.3)
             except Exception:
                 time.sleep(1)
 
+    def _parse_qr_payload(self, raw_text):
+        """Parse a QR code and return (slot, med_name) or None."""
+        text = raw_text.strip()
+        try:
+            payload = json.loads(text)
+            slot = payload.get("slot", "")
+            med = payload.get("med", "")
+            if slot and med:
+                return (slot, med)
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            pass
+        return None
+
     def _handle_qr_results(self, qr_with_pos):
         now = time.time()
+        triggered_addmed = False
 
         for x_pos, raw_text in qr_with_pos:
-            raw_stripped = raw_text.strip()
+            parsed = self._parse_qr_payload(raw_text)
 
-            # Check if this is one of the 4 known QRs
-            if raw_stripped in KNOWN_QR_PAYLOADS:
-                med_name, slot = KNOWN_QR_PAYLOADS[raw_stripped]
+            if parsed:
+                slot, med_name = parsed
+            else:
+                slot = "demo"
+                med_name = raw_text.strip().capitalize() or "New Medication"
+
+            # Known slot (blue/red/green/yellow) — instant recognition
+            if slot in KNOWN_SLOTS:
                 self.qr_last_seen[slot] = now
                 md = self.med_data[slot]
                 if not md.get("loaded"):
-                    md["name"] = med_name
+                    md["name"] = KNOWN_SLOTS[slot]
                     md["loaded"] = True
                     md["count"] = md.get("count", 0) or DEFAULT_QTY
                     self._save_med()
+                elif md.get("count", 0) <= 0 and self.dispense_state == 0:
+                    if not triggered_addmed:
+                        self._show_qty_confirm(slot, md["name"])
+                        return
                 continue
 
-            # Unknown QR — check if it's the demo payload
-            try:
-                payload = json.loads(raw_stripped)
-                qr_slot = payload.get("slot", "")
-                qr_med = payload.get("med", "New Medication")
-            except (json.JSONDecodeError, AttributeError):
-                qr_med = raw_stripped.strip().capitalize() or "New Medication"
-                qr_slot = "demo"
-
-            if qr_slot == "demo" or qr_slot not in SLOT_KEYS:
-                self.qr_last_seen["demo"] = now
-                if not self._demo_registered:
-                    # Show Add Med screen for new demo QR
+            # Demo / unknown slot — new medication flow
+            self.qr_last_seen["demo"] = now
+            if not self._demo_registered:
+                if not triggered_addmed and self.mode != "addmed" and self.dispense_state == 0:
                     self._draft_slot = "demo"
-                    self._draft["name"] = qr_med if qr_med != "New Medication" else ""
-                    if self.mode != "addmed" and self.dispense_state == 0:
-                        self._prev_mode = self.mode
-                        self.mode = "addmed"
-                        self._draw_frame()
-                else:
-                    md = self.med_data["demo"]
-                    if not md.get("loaded"):
-                        md["name"] = qr_med
-                        md["loaded"] = True
-                        md["count"] = DEFAULT_QTY
-                continue
-
-        # Handle known QR slot assignments by position (rightmost = blue, etc.)
-        known_seen = []
-        for x_pos, raw_text in qr_with_pos:
-            raw_stripped = raw_text.strip()
-            if raw_stripped in KNOWN_QR_PAYLOADS:
-                _, slot = KNOWN_QR_PAYLOADS[raw_stripped]
-                known_seen.append(slot)
-
-        # Re-scan known ones and handle empty slot refill
-        for slot in known_seen:
-            md = self.med_data[slot]
-            if self.dispense_state == 0 and md.get("loaded") and md.get("count", 0) <= 0:
-                self._show_qty_confirm(slot, md["name"])
-                return
+                    self._draft["name"] = med_name if med_name != "New Medication" else ""
+                    self._prev_mode = self.mode
+                    self.mode = "addmed"
+                    self._draw_frame()
+                    triggered_addmed = True
+            else:
+                md = self.med_data["demo"]
+                if not md.get("loaded"):
+                    md["name"] = med_name
+                    md["loaded"] = True
+                    md["count"] = DEFAULT_QTY
 
     # ── Quit ───────────────────────────────────────────────────────────────
     def _quit(self):
