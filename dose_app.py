@@ -383,7 +383,6 @@ class DoseApp:
 
         # ── Bindings ───────────────────────────────────────────────────────
         self.root.bind("<Escape>", lambda e: self._quit())
-        self.canvas.bind("<Button-1>", self._on_canvas_click)
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
 
@@ -1359,14 +1358,16 @@ class DoseApp:
     # ── Hold press/release on canvas ──────────────────────────────────────
     def _on_canvas_press(self, event):
         if self.mode == "hold" and self.dispense_state == 2:
-            # Check if NOT clicking cancel
             cx = CONTENT_W // 2
             cancel_x = cx - 80
             cancel_y = 388
-            if not (cancel_x <= event.x <= cancel_x + 160 and
-                    cancel_y <= event.y <= cancel_y + 52):
+            if cancel_x <= event.x <= cancel_x + 160 and cancel_y <= event.y <= cancel_y + 52:
+                self._cancel_hold()
+            else:
                 self.hold_start = time.time()
                 self._hold_update()
+            return
+        self._on_canvas_click(event)
 
     def _on_canvas_release(self, event):
         if self.mode == "hold" and self.dispense_state == 2:
