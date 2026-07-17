@@ -405,6 +405,13 @@ class DoseApp:
         # Demo slot state — resets each launch
         self._demo_registered = False
 
+        # Camera debug view
+        self._camera_view = False
+        self._camera_frame = None
+        self._camera_qr_results = []
+        self._settings_tap_count = 0
+        self._settings_tap_time = 0
+
         self._draft = {
             "name": "", "times_per_day": 1,
             "doses": [2], "qty": 30,
@@ -561,6 +568,8 @@ class DoseApp:
             self._draw_user(c)
         elif self.mode == "addmed":
             self._draw_addmed(c)
+        elif self.mode == "camview":
+            self._draw_camview(c)
         elif self.mode == "hold":
             self._draw_hold(c)
         elif self.mode == "dispensed":
@@ -1098,6 +1107,23 @@ class DoseApp:
                     (bx, by, bx + bw, by + bh,
                      self._on_update_pressed))
 
+        # Secret camera debug — tap bottom-right corner of card 5 times
+        self._click_zones.append(
+            (500, 400, 646, 460, self._secret_cam_tap))
+
+    def _secret_cam_tap(self):
+        now = time.time()
+        if now - self._settings_tap_time > 3.0:
+            self._settings_tap_count = 0
+        self._settings_tap_time = now
+        self._settings_tap_count += 1
+        if self._settings_tap_count >= 5:
+            self._settings_tap_count = 0
+            self._camera_view = True
+            self._prev_mode = self.mode
+            self.mode = "camview"
+            self._draw_frame()
+
     def _toggle_setting(self, key):
         if key == "night_mode":
             self.settings["night_mode"] = not self.settings.get("night_mode", False)
@@ -1111,6 +1137,100 @@ class DoseApp:
             self.settings["constant_scan"] = not self.settings.get("constant_scan", False)
             self._save_config()
             self._draw_frame()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  CAMERA DEBUG VIEW (secret)
+    # ══════════════════════════════════════════════════════════════════════
+    def _draw_camview(self, c):
+        t = self.theme
+
+        c.create_text(32, 16, text="CAMERA VIEW", font=self.font_label,
+                      fill=t["muted"], anchor="nw")
+
+        # Close button
+        close_img = _pil_rounded_rect(80, 32, 10, t["elevated_bg"])
+        tk_close = self._get_tk_image("cam_close", close_img)
+        c.create_image(560, 12, image=tk_close, anchor="nw")
+        c.create_text(600, 28, text="CLOSE", font=self.font_small_bold,
+                      fill=t["fg"], anchor="center")
+        self._click_zones.append(
+            (560, 12, 640, 44, self._close_camview))
+
+        frame = self._camera_frame
+        qr_results = self._camera_qr_results
+
+        if frame is None:
+            c.create_text(CONTENT_W // 2, 240,
+                          text="No camera feed" if not CAMERA_AVAILABLE else "Waiting for frame...",
+                          font=self.font_body, fill=t["muted"], anchor="center")
+            return
+
+        # Scale camera frame to fit content area
+        view_w = CONTENT_W - 40
+        view_h = SCREEN_H - 100
+        fw, fh = frame.size
+        scale = min(view_w / fw, view_h / fh)
+        disp_w = int(fw * scale)
+        disp_h = int(fh * scale)
+
+        # Draw QR bounding boxes onto the frame
+        annotated = frame.copy()
+        draw = ImageDraw.Draw(annotated)
+        for r in qr_results:
+            if r.rect:
+                rx, ry, rw, rh = r.rect.left, r.rect.top, r.rect.width, r.rect.height
+                text = r.data.decode("utf-8", errors="ignore").strip()
+
+                # Determine color based on slot
+                parsed = self._parse_qr_payload(text)
+                if parsed:
+                    slot = parsed[0]
+                    box_color = _hex_to_rgb(SLOT_COLORS.get(slot, "#C084FC"))
+                else:
+                    box_color = (192, 132, 252)
+
+                draw.rectangle([rx, ry, rx + rw, ry + rh],
+                               outline=box_color + (255,), width=4)
+
+                # Label
+                label = parsed[0].upper() if parsed else "UNKNOWN"
+                draw.rectangle([rx, ry - 28, rx + len(label) * 14 + 10, ry],
+                               fill=box_color + (200,))
+                draw.text((rx + 5, ry - 26), label, fill=(255, 255, 255, 255))
+
+        resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
+        resized = annotated.resize((disp_w, disp_h), resample)
+        tk_frame = self._get_tk_image("cam_frame", resized)
+        vx = 20 + (view_w - disp_w) // 2
+        vy = 50 + (view_h - disp_h) // 2
+        c.create_image(vx, vy, image=tk_frame, anchor="nw")
+
+        # Status bar at bottom
+        num_qr = len(qr_results)
+        status_text = f"{num_qr} QR code{'s' if num_qr != 1 else ''} detected"
+        status_color = "#30D158" if num_qr > 0 else "#FF6B6B"
+        c.create_text(32, SCREEN_H - 16, text=status_text,
+                      font=self.font_small_bold, fill=status_color, anchor="sw")
+
+        # List detected codes
+        if qr_results:
+            info_parts = []
+            for r in qr_results:
+                text = r.data.decode("utf-8", errors="ignore").strip()
+                parsed = self._parse_qr_payload(text)
+                if parsed:
+                    slot, med = parsed
+                    known = "KNOWN" if slot in KNOWN_SLOTS else "NEW"
+                    info_parts.append(f"{slot}: {med} [{known}]")
+                else:
+                    info_parts.append(f"?: {text[:30]}")
+            c.create_text(200, SCREEN_H - 16, text="  |  ".join(info_parts),
+                          font=self.font_small, fill=t["muted"], anchor="sw")
+
+    def _close_camview(self):
+        self._camera_view = False
+        self.mode = self._prev_mode
+        self._draw_frame()
 
     # ══════════════════════════════════════════════════════════════════════
     #  USER / ADHERENCE SCREEN
@@ -2086,9 +2206,18 @@ class DoseApp:
             self.camera.configure(config)
             self.camera.start()
             try:
-                self.camera.set_controls({"AfMode": 2})
+                self.camera.set_controls({
+                    "AfMode": 2,
+                    "AeEnable": True,
+                    "AwbEnable": True,
+                    "AnalogueGain": 4.0,
+                    "ExposureTime": 30000,
+                })
             except Exception:
-                pass
+                try:
+                    self.camera.set_controls({"AfMode": 2})
+                except Exception:
+                    pass
             self.camera_running = True
             threading.Thread(target=self._camera_loop, daemon=True).start()
         except Exception:
@@ -2101,10 +2230,8 @@ class DoseApp:
                 frame = self.camera.capture_array()
                 pil_img = Image.fromarray(frame[:, :, ::-1])
 
-                # Try decoding at original resolution first
                 results = pyzbar_decode(pil_img)
 
-                # If we found fewer than expected, try with enhanced contrast
                 if len(results) < 2:
                     try:
                         gray = pil_img.convert("L")
@@ -2116,7 +2243,6 @@ class DoseApp:
                     except Exception:
                         pass
 
-                # If still struggling, try sharpened version
                 if len(results) < 2:
                     try:
                         from PIL import ImageFilter
@@ -2127,8 +2253,11 @@ class DoseApp:
                     except Exception:
                         pass
 
+                # Store frame + results for camera debug view
+                self._camera_frame = pil_img
+                self._camera_qr_results = list(results) if results else []
+
                 if results:
-                    # Deduplicate by data content
                     seen_data = set()
                     qr_with_pos = []
                     for r in results:
@@ -2140,6 +2269,9 @@ class DoseApp:
                         qr_with_pos.append((x_pos, text))
                     qr_with_pos.sort(key=lambda p: p[0], reverse=True)
                     self.root.after(0, self._handle_qr_results, qr_with_pos)
+
+                if self._camera_view and self.mode == "camview":
+                    self.root.after(0, self._draw_frame)
 
                 time.sleep(0.3)
             except Exception:
