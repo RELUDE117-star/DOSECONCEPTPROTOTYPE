@@ -180,31 +180,44 @@ class DoseApp:
         self.root.resizable(False, False)
 
         # ── Fonts ──────────────────────────────────────────────────────────
-        preferred = "Inter"
-        fallback = "DejaVu Sans"
+        # Inter weight variants register as separate family names in Tkinter.
+        # We pick the best available for each design weight (800/700/600/400).
         families = tkfont.families(self.root)
-        base = preferred if preferred in families else fallback
+        def _pick(candidates):
+            for c in candidates:
+                if c in families:
+                    return c
+            return "DejaVu Sans"
 
-        self.font_clock = tkfont.Font(family=base, size=20, weight="bold")
-        self.font_date = tkfont.Font(family=base, size=13)
-        self.font_name_lg = tkfont.Font(family=base, size=28, weight="bold")
-        self.font_name = tkfont.Font(family=base, size=22, weight="bold")
-        self.font_body = tkfont.Font(family=base, size=16)
-        self.font_body_bold = tkfont.Font(family=base, size=16, weight="bold")
-        self.font_label = tkfont.Font(family=base, size=11, weight="bold")
-        self.font_small = tkfont.Font(family=base, size=13)
-        self.font_small_bold = tkfont.Font(family=base, size=13, weight="bold")
-        self.font_btn = tkfont.Font(family=base, size=16, weight="bold")
-        self.font_btn_lg = tkfont.Font(family=base, size=17, weight="bold")
-        self.font_title = tkfont.Font(family=base, size=18, weight="bold")
-        self.font_medium = tkfont.Font(family=base, size=14, weight="bold")
-        self.font_count = tkfont.Font(family=base, size=24, weight="bold")
-        self.font_hold_big = tkfont.Font(family=base, size=40, weight="bold")
-        self.font_hold_label = tkfont.Font(family=base, size=12)
-        self.font_settings = tkfont.Font(family=base, size=17, weight="bold")
-        self.font_rail = tkfont.Font(family=base, size=10, weight="bold")
-        self.font_tiny = tkfont.Font(family=base, size=9, weight="bold")
-        self.font_check = tkfont.Font(family=base, size=48, weight="bold")
+        # weight-800 (ExtraBold) — headlines, countdown, big numbers
+        f_extrabold = _pick(["Inter ExtraBold", "Inter Black", "Inter", "DejaVu Sans"])
+        # weight-700 (Bold) — card titles, buttons, nav labels
+        f_bold = _pick(["Inter", "DejaVu Sans"])
+        # weight-600 (SemiBold) — settings labels, medium emphasis
+        f_semibold = _pick(["Inter SemiBold", "Inter Medium", "Inter", "DejaVu Sans"])
+        # weight-400 (Regular) — body text, secondary info
+        f_regular = _pick(["Inter Light", "Inter", "DejaVu Sans"])
+
+        self.font_clock = tkfont.Font(family=f_extrabold, size=20, weight="bold")
+        self.font_date = tkfont.Font(family=f_regular, size=13)
+        self.font_name_lg = tkfont.Font(family=f_extrabold, size=28, weight="bold")
+        self.font_name = tkfont.Font(family=f_bold, size=22, weight="bold")
+        self.font_body = tkfont.Font(family=f_regular, size=16)
+        self.font_body_bold = tkfont.Font(family=f_bold, size=16, weight="bold")
+        self.font_label = tkfont.Font(family=f_extrabold, size=11, weight="bold")
+        self.font_small = tkfont.Font(family=f_regular, size=13)
+        self.font_small_bold = tkfont.Font(family=f_bold, size=13, weight="bold")
+        self.font_btn = tkfont.Font(family=f_extrabold, size=16, weight="bold")
+        self.font_btn_lg = tkfont.Font(family=f_extrabold, size=17, weight="bold")
+        self.font_title = tkfont.Font(family=f_bold, size=18, weight="bold")
+        self.font_medium = tkfont.Font(family=f_extrabold, size=14, weight="bold")
+        self.font_count = tkfont.Font(family=f_extrabold, size=24, weight="bold")
+        self.font_hold_big = tkfont.Font(family=f_extrabold, size=40, weight="bold")
+        self.font_hold_label = tkfont.Font(family=f_regular, size=12)
+        self.font_settings = tkfont.Font(family=f_semibold, size=17)
+        self.font_rail = tkfont.Font(family=f_bold, size=10, weight="bold")
+        self.font_tiny = tkfont.Font(family=f_extrabold, size=9, weight="bold")
+        self.font_check = tkfont.Font(family=f_extrabold, size=48, weight="bold")
 
         # ── State ──────────────────────────────────────────────────────────
         self.med_data = {}
