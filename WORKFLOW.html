@@ -1,0 +1,1295 @@
+<title>DOSE Home Station — Screen Workflow</title>
+<style>
+  @font-face {
+    font-family: 'SystemUI';
+    src: local('system-ui'), local('-apple-system'), local('Segoe UI'), local('sans-serif');
+  }
+
+  :root {
+    --ground: #0B0B0F;
+    --surface: #141418;
+    --surface-raised: #1C1C22;
+    --text: #E8E8E6;
+    --text-muted: #6E7179;
+    --text-dim: #44464B;
+    --accent-blue: #5B9BFF;
+    --accent-red: #FF6B6B;
+    --accent-green: #5BD08A;
+    --accent-yellow: #E6C34A;
+    --border: #2A2A32;
+    --flow-line: #3A3A44;
+    --arrow: #5B9BFF;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --ground: #F0F0EE;
+      --surface: #FFFFFF;
+      --surface-raised: #E8E8E6;
+      --text: #1A1A1C;
+      --text-muted: #6B6B6B;
+      --text-dim: #AAAAAA;
+      --border: #D0D0CE;
+      --flow-line: #C0C0BE;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0B0B0F;
+    --surface: #141418;
+    --surface-raised: #1C1C22;
+    --text: #E8E8E6;
+    --text-muted: #6E7179;
+    --text-dim: #44464B;
+    --border: #2A2A32;
+    --flow-line: #3A3A44;
+  }
+  :root[data-theme="light"] {
+    --ground: #F0F0EE;
+    --surface: #FFFFFF;
+    --surface-raised: #E8E8E6;
+    --text: #1A1A1C;
+    --text-muted: #6B6B6B;
+    --text-dim: #AAAAAA;
+    --border: #D0D0CE;
+    --flow-line: #C0C0BE;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--text);
+    font-family: 'Nunito', system-ui, -apple-system, sans-serif;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 60px 32px 120px;
+  }
+
+  header {
+    margin-bottom: 64px;
+  }
+  header h1 {
+    font-size: 2.4rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    color: var(--accent-blue);
+    text-wrap: balance;
+  }
+  header p {
+    margin-top: 12px;
+    font-size: 1.05rem;
+    color: var(--text-muted);
+    max-width: 52ch;
+  }
+
+  .spec-bar {
+    display: flex;
+    gap: 32px;
+    margin-top: 24px;
+    padding: 16px 0;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .spec-bar .spec {
+    display: flex;
+    flex-direction: column;
+  }
+  .spec-bar .spec-label {
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+  }
+  .spec-bar .spec-value {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-top: 2px;
+  }
+
+  /* ── Color Palette ── */
+  .palette-row {
+    display: flex;
+    gap: 12px;
+    margin-top: 24px;
+    flex-wrap: wrap;
+  }
+  .swatch {
+    width: 80px;
+    height: 56px;
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    padding-bottom: 6px;
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: #fff;
+    text-shadow: 0 1px 3px rgba(0,0,0,.5);
+  }
+
+  /* ── Sections ── */
+  .section {
+    margin-top: 72px;
+  }
+  .section-label {
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--accent-blue);
+    margin-bottom: 8px;
+  }
+  .section h2 {
+    font-size: 1.6rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+  }
+  .section > p {
+    margin-top: 10px;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    max-width: 60ch;
+  }
+
+  /* ── Screen Mockup ── */
+  .screen-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 40px;
+    margin-top: 36px;
+  }
+  @media (max-width: 800px) {
+    .screen-row { grid-template-columns: 1fr; }
+  }
+
+  .screen-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .screen-card .screen-header {
+    padding: 16px 20px 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .screen-card .screen-title {
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .screen-card .screen-id {
+    font-size: 0.6rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    background: var(--surface-raised);
+    padding: 3px 10px;
+    border-radius: 20px;
+  }
+
+  .mockup {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 800 / 480;
+    background: #070708;
+    overflow: hidden;
+    font-family: 'Nunito', system-ui, sans-serif;
+  }
+
+  .mockup .m-label {
+    position: absolute;
+    color: #7E8186;
+    font-size: 7px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .mockup .m-text {
+    position: absolute;
+    color: #F4F4F2;
+  }
+  .mockup .m-text.muted { color: #7E8186; }
+  .mockup .m-text.accent-b { color: #5B9BFF; }
+  .mockup .m-text.accent-r { color: #FF6B6B; }
+  .mockup .m-text.accent-g { color: #5BD08A; }
+  .mockup .m-text.accent-y { color: #E6C34A; }
+
+  .mockup .m-card {
+    position: absolute;
+    background: #141418;
+    border-radius: 4px;
+  }
+  .mockup .m-bar {
+    position: absolute;
+    border-radius: 2px 0 0 2px;
+  }
+  .mockup .m-btn {
+    position: absolute;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 700;
+  }
+  .mockup .m-dot {
+    position: absolute;
+    border-radius: 50%;
+  }
+  .mockup .m-logo {
+    position: absolute;
+    width: 10%;
+    height: auto;
+    aspect-ratio: 1;
+    background: #4A90D9;
+    border-radius: 30%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 800;
+    font-size: 14px;
+  }
+  .mockup .m-progress-track {
+    position: absolute;
+    background: #141418;
+    border-radius: 2px;
+  }
+  .mockup .m-progress-fill {
+    position: absolute;
+    border-radius: 2px;
+  }
+  .mockup .m-bottle {
+    position: absolute;
+    border-radius: 10px;
+  }
+  .mockup .m-bottle-cap {
+    position: absolute;
+    border-radius: 6px 6px 2px 2px;
+  }
+  .mockup .m-toggle-track {
+    position: absolute;
+    border-radius: 20px;
+  }
+  .mockup .m-toggle-knob {
+    position: absolute;
+    border-radius: 50%;
+    background: #fff;
+  }
+  .mockup .m-sep {
+    position: absolute;
+    background: #7E8186;
+    height: 1px;
+  }
+  .mockup .m-popup {
+    position: absolute;
+    background: #1A1A20;
+    border: 1px solid #7E8186;
+    border-radius: 6px;
+    padding: 4px 0;
+  }
+  .mockup .m-popup-item {
+    padding: 4px 14px;
+    color: #F4F4F2;
+    font-size: 8px;
+    font-weight: 600;
+  }
+
+  /* ── Screen notes ── */
+  .screen-notes {
+    padding: 16px 20px 20px;
+    border-top: 1px solid var(--border);
+  }
+  .screen-notes h4 {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+  .screen-notes ul {
+    list-style: none;
+    padding: 0;
+  }
+  .screen-notes li {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    padding: 3px 0;
+    padding-left: 14px;
+    position: relative;
+  }
+  .screen-notes li::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 10px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-blue);
+  }
+
+  /* ── Flow Diagram ── */
+  .flow-section {
+    margin-top: 80px;
+  }
+  .flow-diagram {
+    margin-top: 32px;
+    overflow-x: auto;
+  }
+  .flow-diagram pre.mermaid {
+    font-size: 0.85rem;
+  }
+
+  /* ── Element Spec Table ── */
+  .spec-table-wrap {
+    overflow-x: auto;
+    margin-top: 24px;
+  }
+  table.spec-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+  }
+  table.spec-table th {
+    text-align: left;
+    font-size: 0.6rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    padding: 10px 12px;
+    border-bottom: 2px solid var(--border);
+  }
+  table.spec-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
+    vertical-align: top;
+  }
+  table.spec-table td:first-child {
+    color: var(--text);
+    font-weight: 600;
+  }
+  table.spec-table code {
+    background: var(--surface-raised);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    color: var(--accent-blue);
+  }
+
+  /* ── Transition Arrow ── */
+  .transition {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 28px 0;
+    padding: 12px 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .transition .arrow {
+    font-size: 1.4rem;
+    color: var(--accent-blue);
+    flex-shrink: 0;
+  }
+  .transition .trigger {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .transition .trigger-detail {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+
+  /* ── Full-width screen ── */
+  .screen-card.full {
+    grid-column: 1 / -1;
+  }
+
+  /* ── Image placeholder ── */
+  .img-placeholder {
+    background: var(--surface-raised);
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin-top: 12px;
+  }
+</style>
+
+<div class="page">
+
+  <!-- ════ HEADER ════ -->
+  <header>
+    <h1>DOSE Home Station</h1>
+    <p>Complete screen-by-screen workflow with layout specs, transitions, and element coordinates. Use this as a design reference to create production assets.</p>
+    <div class="spec-bar">
+      <div class="spec">
+        <span class="spec-label">Display</span>
+        <span class="spec-value">800 &times; 480 px</span>
+      </div>
+      <div class="spec">
+        <span class="spec-label">Hardware</span>
+        <span class="spec-value">Elecrow 5" Touchscreen</span>
+      </div>
+      <div class="spec">
+        <span class="spec-label">Platform</span>
+        <span class="spec-value">Raspberry Pi 4B</span>
+      </div>
+      <div class="spec">
+        <span class="spec-label">Renderer</span>
+        <span class="spec-value">Tkinter (fullscreen kiosk)</span>
+      </div>
+      <div class="spec">
+        <span class="spec-label">Font</span>
+        <span class="spec-value">Nunito / DejaVu Sans</span>
+      </div>
+    </div>
+    <div class="palette-row">
+      <div class="swatch" style="background:#5B9BFF">Blue<br>#5B9BFF</div>
+      <div class="swatch" style="background:#FF6B6B">Red<br>#FF6B6B</div>
+      <div class="swatch" style="background:#5BD08A">Green<br>#5BD08A</div>
+      <div class="swatch" style="background:#E6C34A;color:#1A1A1C;text-shadow:none">Yellow<br>#E6C34A</div>
+      <div class="swatch" style="background:#070708;border:1px solid #2A2A32">BG Dark<br>#070708</div>
+      <div class="swatch" style="background:#141418;border:1px solid #2A2A32">Card<br>#141418</div>
+      <div class="swatch" style="background:#7E8186">Muted<br>#7E8186</div>
+    </div>
+  </header>
+
+  <!-- ════ FLOW OVERVIEW ════ -->
+  <div class="flow-section">
+    <div class="section-label">Navigation</div>
+    <h2>Application Flow</h2>
+    <p>Three main modes accessible via the D logo menu. Camera runs continuously — QR presence drives what's shown. Touch/tap to dispense.</p>
+
+    <div class="flow-diagram">
+      <pre class="mermaid">
+flowchart LR
+    A["🏠 Standby"] -->|"D menu"| B["📦 Storage"]
+    A -->|"D menu"| C["⚙️ Settings"]
+    B -->|"D menu"| A
+    B -->|"D menu"| C
+    C -->|"D menu"| A
+    C -->|"D menu"| B
+
+    A -->|"Tap screen\n(pill in view)"| D["🖐️ Hold to Dispense"]
+    B -->|"DISPENSE btn"| D
+    D -->|"Hold 3s"| E["✅ Dispensed"]
+    D -->|"Cancel"| A
+    E -->|"4s auto"| A
+
+    F["📷 QR Detected\n(new pill)"] -->|"First scan"| G["📋 Qty Confirm"]
+    G -->|"CONFIRM"| A
+    F -->|"QR leaves\ncamera view"| H["🧴 Bottle Up\nAnimation"]
+    I["📷 QR Enters\nview"] -->|"Seen again"| J["🧴 Bottle Down\nAnimation"]
+      </pre>
+    </div>
+  </div>
+
+  <!-- ════ SCREEN 1: STANDBY ════ -->
+  <div class="section">
+    <div class="section-label">Screen 1</div>
+    <h2>Standby Mode</h2>
+    <p>Default home screen. Shows clock and today's medication schedule — only pills whose QR code is currently visible to the camera (seen within 15 seconds).</p>
+
+    <div class="screen-row">
+      <div class="screen-card full">
+        <div class="screen-header">
+          <span class="screen-title">Standby — Pills In View</span>
+          <span class="screen-id">S-01</span>
+        </div>
+        <div class="mockup">
+          <!-- Clock -->
+          <div class="m-text" style="left:6.5%;top:4%;font-size:18px;font-weight:700">9:30 AM</div>
+          <!-- WiFi icon placeholder -->
+          <div class="m-text muted" style="right:6.5%;top:5%;font-size:10px">WiFi ⋯</div>
+          <!-- TODAY'S SCHEDULE label -->
+          <div class="m-label" style="left:6.5%;top:17%">TODAY'S SCHEDULE</div>
+
+          <!-- Card 1: Blue -->
+          <div class="m-card" style="left:6.5%;top:22%;width:77%;height:15%">
+            <div class="m-bar" style="left:0;top:0;width:1.2%;height:100%;background:#5B9BFF"></div>
+            <div class="m-text" style="left:4%;top:12%;font-size:14px;font-weight:700">8:00 AM</div>
+            <div class="m-text muted" style="left:4%;top:52%;font-size:8px">Sertraline</div>
+            <div class="m-text accent-b" style="right:4%;top:30%;font-size:11px;font-weight:700">28 pills</div>
+          </div>
+
+          <!-- Card 2: Red -->
+          <div class="m-card" style="left:6.5%;top:39%;width:77%;height:15%">
+            <div class="m-bar" style="left:0;top:0;width:1.2%;height:100%;background:#FF6B6B"></div>
+            <div class="m-text" style="left:4%;top:12%;font-size:14px;font-weight:700">12:00 PM</div>
+            <div class="m-text muted" style="left:4%;top:52%;font-size:8px">Ibuprofen</div>
+            <div class="m-text accent-r" style="right:4%;top:30%;font-size:11px;font-weight:700">14 pills</div>
+          </div>
+
+          <!-- Card 3: Green -->
+          <div class="m-card" style="left:6.5%;top:56%;width:77%;height:15%">
+            <div class="m-bar" style="left:0;top:0;width:1.2%;height:100%;background:#5BD08A"></div>
+            <div class="m-text" style="left:4%;top:12%;font-size:14px;font-weight:700">6:00 PM</div>
+            <div class="m-text muted" style="left:4%;top:52%;font-size:8px">Vitamin D</div>
+            <div class="m-text accent-g" style="right:4%;top:30%;font-size:11px;font-weight:700">30 pills</div>
+          </div>
+
+          <!-- D Logo -->
+          <div class="m-logo" style="right:1.5%;bottom:2%">D</div>
+        </div>
+        <div class="screen-notes">
+          <h4>Layout Specs</h4>
+          <ul>
+            <li>Clock: x=52, y=20, font 32px bold</li>
+            <li>Schedule label: x=52, y=80, font 11px bold uppercase, tracking 0.1em</li>
+            <li>Cards: x=52, each 620w &times; 72h, gap=10px (y starts at 108, +82 per row)</li>
+            <li>Color bar on card left: 5px wide, full height, slot accent color</li>
+            <li>Time: font 24px bold. Name: font 14px. Count: font 20px bold, right-aligned, accent color</li>
+            <li>D logo: 80 &times; 80px, bottom-right at (710, 390), loads dose_logo.png</li>
+            <li>Cards only appear for pills whose QR was seen in last 15 seconds</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="screen-row">
+      <div class="screen-card">
+        <div class="screen-header">
+          <span class="screen-title">Standby — Empty (No QR in view)</span>
+          <span class="screen-id">S-02</span>
+        </div>
+        <div class="mockup">
+          <div class="m-text" style="left:6.5%;top:4%;font-size:18px;font-weight:700">9:30 AM</div>
+          <div class="m-text muted" style="right:6.5%;top:5%;font-size:10px">WiFi ⋯</div>
+          <div class="m-label" style="left:6.5%;top:17%">TODAY'S SCHEDULE</div>
+          <div class="m-text muted" style="left:6.5%;top:42%;font-size:12px">Place medications in view to see schedule</div>
+          <div class="m-logo" style="right:1.5%;bottom:2%">D</div>
+        </div>
+        <div class="screen-notes">
+          <h4>Notes</h4>
+          <ul>
+            <li>Empty state text at x=52, y=200</li>
+            <li>Appears when no QR codes visible to camera</li>
+            <li>Hardware warnings at bottom: y=430, font 14px, color #444</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="screen-card">
+        <div class="screen-header">
+          <span class="screen-title">D Logo Popup Menu</span>
+          <span class="screen-id">S-03</span>
+        </div>
+        <div class="mockup">
+          <div class="m-text" style="left:6.5%;top:4%;font-size:18px;font-weight:700">9:30 AM</div>
+          <div class="m-label" style="left:6.5%;top:17%">TODAY'S SCHEDULE</div>
+          <div class="m-text muted" style="left:6.5%;top:42%;font-size:12px">Place medications in view to see schedule</div>
+          <!-- Popup -->
+          <div class="m-popup" style="right:4%;bottom:22%">
+            <div class="m-popup-item">Standby</div>
+            <div class="m-popup-item">Storage</div>
+            <div class="m-popup-item">Settings</div>
+          </div>
+          <div class="m-logo" style="right:1.5%;bottom:2%">D</div>
+        </div>
+        <div class="screen-notes">
+          <h4>Notes</h4>
+          <ul>
+            <li>Popup: x=620, y=290, width=160px</li>
+            <li>Items: font 14px bold, pad 10px 20px</li>
+            <li>BG: #1A1A20, border 1px #7E8186</li>
+            <li>Auto-dismiss after 45 seconds</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ TRANSITION ═══ -->
+  <div class="transition">
+    <span class="arrow">→</span>
+    <div>
+      <div class="trigger">D Menu → Storage</div>
+      <div class="trigger-detail">Tap D logo, select "Storage" from popup</div>
+    </div>
+  </div>
+
+  <!-- ════ SCREEN 2: STORAGE ════ -->
+  <div class="section">
+    <div class="section-label">Screen 2</div>
+    <h2>Storage Mode</h2>
+    <p>Split-panel view. Left: vertical list of pill slots (only shows pills with QR in camera view). Right: detail panel with schedule editor for the selected pill.</p>
+
+    <div class="screen-row">
+      <div class="screen-card full">
+        <div class="screen-header">
+          <span class="screen-title">Storage — Pills In View + Detail</span>
+          <span class="screen-id">ST-01</span>
+        </div>
+        <div class="mockup">
+          <!-- Left panel BG -->
+          <div style="position:absolute;left:0;top:0;width:32.5%;height:100%;background:#070708"></div>
+          <div class="m-label" style="left:2.5%;top:3.5%">MEDICATIONS</div>
+
+          <!-- Pill row 1: Blue (selected) -->
+          <div class="m-card" style="left:1.5%;top:10%;width:29%;height:20%;border:2px solid #5B9BFF">
+            <div class="m-bar" style="left:0;top:0;width:2%;height:100%;background:#5B9BFF"></div>
+            <div class="m-dot" style="left:8%;top:14%;width:8px;height:8px;background:#5B9BFF"></div>
+            <div class="m-text" style="left:15%;top:8%;font-size:9px;font-weight:700">Sertraline</div>
+            <div class="m-text muted" style="left:15%;top:33%;font-size:7px">8:00 AM</div>
+            <div class="m-text accent-b" style="left:15%;top:60%;font-size:10px;font-weight:700">28 pills</div>
+          </div>
+
+          <!-- Pill row 2: Red -->
+          <div class="m-card" style="left:1.5%;top:32.5%;width:29%;height:20%">
+            <div class="m-bar" style="left:0;top:0;width:2%;height:100%;background:#FF6B6B"></div>
+            <div class="m-dot" style="left:8%;top:14%;width:8px;height:8px;background:#FF6B6B"></div>
+            <div class="m-text" style="left:15%;top:8%;font-size:9px;font-weight:700">Ibuprofen</div>
+            <div class="m-text muted" style="left:15%;top:33%;font-size:7px">12:00 PM</div>
+            <div class="m-text accent-r" style="left:15%;top:60%;font-size:10px;font-weight:700">14 pills</div>
+          </div>
+
+          <!-- Right panel BG -->
+          <div style="position:absolute;left:33%;top:0;width:67%;height:100%;background:#141418"></div>
+
+          <!-- Detail: Name -->
+          <div class="m-text accent-b" style="left:36.5%;top:4%;font-size:20px;font-weight:700">Sertraline</div>
+          <div class="m-text muted" style="left:36.5%;top:14%;font-size:11px">28 pills remaining</div>
+
+          <!-- Separator -->
+          <div class="m-sep" style="left:36.5%;top:27%;width:54%"></div>
+
+          <!-- Schedule section -->
+          <div class="m-label" style="left:36.5%;top:29%">SCHEDULE</div>
+          <!-- Time editor -->
+          <div class="m-btn" style="left:36.5%;top:34%;width:6%;height:6%;background:#1E1E24;font-size:8px">▲</div>
+          <div class="m-text" style="left:37.5%;top:41%;font-size:12px;font-weight:700">8</div>
+          <div class="m-btn" style="left:36.5%;top:47%;width:6%;height:6%;background:#1E1E24;font-size:8px">▼</div>
+
+          <div class="m-text" style="left:44%;top:41%;font-size:12px;font-weight:700">:</div>
+
+          <div class="m-btn" style="left:46%;top:34%;width:6%;height:6%;background:#1E1E24;font-size:8px">▲</div>
+          <div class="m-text" style="left:47%;top:41%;font-size:12px;font-weight:700">00</div>
+          <div class="m-btn" style="left:46%;top:47%;width:6%;height:6%;background:#1E1E24;font-size:8px">▼</div>
+
+          <div class="m-btn" style="left:55%;top:34%;width:6%;height:6%;background:#1E1E24;font-size:8px">▲</div>
+          <div class="m-text" style="left:56%;top:41%;font-size:12px;font-weight:700">AM</div>
+          <div class="m-btn" style="left:55%;top:47%;width:6%;height:6%;background:#1E1E24;font-size:8px">▼</div>
+
+          <!-- Days label -->
+          <div class="m-label" style="left:36.5%;top:56%">DAYS</div>
+          <!-- Day toggles -->
+          <div class="m-btn" style="left:36.5%;top:61%;width:5.5%;height:7%;background:#5B9BFF;font-size:7px;font-weight:700">Mo</div>
+          <div class="m-btn" style="left:43%;top:61%;width:5.5%;height:7%;background:#5B9BFF;font-size:7px;font-weight:700">Tu</div>
+          <div class="m-btn" style="left:49.5%;top:61%;width:5.5%;height:7%;background:#5B9BFF;font-size:7px;font-weight:700">We</div>
+          <div class="m-btn" style="left:56%;top:61%;width:5.5%;height:7%;background:#5B9BFF;font-size:7px;font-weight:700">Th</div>
+          <div class="m-btn" style="left:62.5%;top:61%;width:5.5%;height:7%;background:#5B9BFF;font-size:7px;font-weight:700">Fr</div>
+          <div class="m-btn" style="left:69%;top:61%;width:5.5%;height:7%;background:#5B9BFF;font-size:7px;font-weight:700">Sa</div>
+          <div class="m-btn" style="left:75.5%;top:61%;width:5.5%;height:7%;background:#1E1E24;font-size:7px;font-weight:700">Su</div>
+
+          <!-- DISPENSE button -->
+          <div class="m-btn" style="left:36.5%;top:77%;width:25%;height:9%;background:#5B9BFF;font-size:11px">DISPENSE</div>
+
+          <!-- D Logo -->
+          <div class="m-logo" style="right:1.5%;bottom:2%">D</div>
+        </div>
+        <div class="screen-notes">
+          <h4>Layout Specs</h4>
+          <ul>
+            <li>Left panel: 260px wide, bg matches screen bg #070708</li>
+            <li>"MEDICATIONS" label: x=20, y=16</li>
+            <li>Pill rows: x=12, width=236, height=96, gap=12px (y=48, +108 per row)</li>
+            <li>Row contents: 5px color bar, 14px dot at (18,14), name at (40,8), schedule at (40,32), count at (40,58)</li>
+            <li>Selected row: 2px border in accent color</li>
+            <li>Right panel: starts at x=264, width=536, bg #141418</li>
+            <li>Detail name: x=28, y=18, font 36px bold, accent color</li>
+            <li>Pill count: x=28, y=66, font 20px, muted</li>
+            <li>Separator: x=28, y=128, width = panel_width - 56</li>
+            <li>Schedule time editor: ▲/▼ buttons 3-wide, font 14px, bg #1E1E24</li>
+            <li>Day toggles: font 14px bold, 3-wide, active=accent color, inactive=#1E1E24</li>
+            <li>DISPENSE button: x=28, y=370, font 18px bold, bg=accent, text white</li>
+            <li>Only rows with QR in camera view are shown</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="screen-row">
+      <div class="screen-card">
+        <div class="screen-header">
+          <span class="screen-title">Storage — No Pills In View</span>
+          <span class="screen-id">ST-02</span>
+        </div>
+        <div class="mockup">
+          <div style="position:absolute;left:0;top:0;width:32.5%;height:100%;background:#070708"></div>
+          <div class="m-label" style="left:2.5%;top:3.5%">MEDICATIONS</div>
+          <div style="position:absolute;left:33%;top:0;width:67%;height:100%;background:#141418"></div>
+          <div class="m-text muted" style="left:36.5%;top:4%;font-size:14px">No pills in view</div>
+          <div class="m-text muted" style="left:36.5%;top:14%;font-size:9px">Place medications in camera view</div>
+          <div class="m-logo" style="right:1.5%;bottom:2%">D</div>
+        </div>
+        <div class="screen-notes">
+          <h4>Notes</h4>
+          <ul>
+            <li>Left panel: empty, all rows hidden</li>
+            <li>Right panel: "No pills in view" in muted color</li>
+            <li>DISPENSE button disabled, bg #1E1E24</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="screen-card">
+        <div class="screen-header">
+          <span class="screen-title">Storage — Pill Not Loaded</span>
+          <span class="screen-id">ST-03</span>
+        </div>
+        <div class="mockup">
+          <div style="position:absolute;left:0;top:0;width:32.5%;height:100%;background:#070708"></div>
+          <div class="m-label" style="left:2.5%;top:3.5%">MEDICATIONS</div>
+          <div class="m-card" style="left:1.5%;top:10%;width:29%;height:20%;border:2px solid #5B9BFF">
+            <div class="m-bar" style="left:0;top:0;width:2%;height:100%;background:#5B9BFF"></div>
+            <div class="m-text muted" style="left:15%;top:30%;font-size:9px;font-weight:700">Blue Slot</div>
+          </div>
+          <div style="position:absolute;left:33%;top:0;width:67%;height:100%;background:#141418"></div>
+          <div class="m-text muted" style="left:36.5%;top:4%;font-size:14px">Blue Slot</div>
+          <div class="m-text muted" style="left:36.5%;top:14%;font-size:9px">Not loaded</div>
+          <div class="m-text muted" style="left:36.5%;top:21%;font-size:8px">Scan a QR code to load this slot</div>
+          <div class="m-logo" style="right:1.5%;bottom:2%">D</div>
+        </div>
+        <div class="screen-notes">
+          <h4>Notes</h4>
+          <ul>
+            <li>Unloaded slot: name shows "Blue Slot" in muted</li>
+            <li>Detail: "Not loaded", "Scan a QR code to load this slot"</li>
+            <li>Time editor defaults to 8:00 AM</li>
+            <li>DISPENSE button disabled</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ TRANSITION ═══ -->
+  <div class="transition">
+    <span class="arrow">→</span>
+    <div>
+      <div class="trigger">D Menu → Settings</div>
+      <div class="trigger-detail">Tap D logo, select "Settings" from popup</div>
+    </div>
+  </div>
+
+  <!-- ════ SCREEN 3: SETTINGS ════ -->
+  <div class="section">
+    <div class="section-label">Screen 3</div>
+    <h2>Settings Mode</h2>
+    <p>Toggle switches for app preferences. Update button checks GitHub for new versions.</p>
+
+    <div class="screen-row">
+      <div class="screen-card full">
+        <div class="screen-header">
+          <span class="screen-title">Settings</span>
+          <span class="screen-id">SE-01</span>
+        </div>
+        <div class="mockup">
+          <div class="m-label" style="left:6.5%;top:6%">SETTINGS</div>
+
+          <!-- Night Mode -->
+          <div class="m-text" style="left:6.5%;top:17%;font-size:12px">Day / Night Mode</div>
+          <div class="m-toggle-track" style="left:50%;top:17%;width:36px;height:18px;background:#1E1E24"></div>
+          <div class="m-toggle-knob" style="left:50.5%;top:17.5%;width:14px;height:14px"></div>
+
+          <!-- Alarm Sound -->
+          <div class="m-text" style="left:6.5%;top:27%;font-size:12px">Alarm Sound</div>
+          <div class="m-toggle-track" style="left:50%;top:27%;width:36px;height:18px;background:#4A90D9"></div>
+          <div class="m-toggle-knob" style="left:52.5%;top:27.5%;width:14px;height:14px"></div>
+
+          <!-- Update -->
+          <div class="m-text" style="left:6.5%;top:42%;font-size:12px">Check for Updates</div>
+          <div class="m-btn" style="left:50%;top:41%;width:12%;height:7%;background:#4A90D9;font-size:9px">UPDATE</div>
+          <div class="m-text muted" style="left:6.5%;top:52%;font-size:8px"></div>
+
+          <!-- Constant Scan -->
+          <div class="m-text" style="left:6.5%;top:65%;font-size:12px">Constant QR Scan</div>
+          <div class="m-toggle-track" style="left:50%;top:65%;width:36px;height:18px;background:#1E1E24"></div>
+          <div class="m-toggle-knob" style="left:50.5%;top:65.5%;width:14px;height:14px"></div>
+
+          <div class="m-logo" style="right:1.5%;bottom:2%">D</div>
+        </div>
+        <div class="screen-notes">
+          <h4>Layout Specs</h4>
+          <ul>
+            <li>"SETTINGS" label: x=52, y=30</li>
+            <li>Row 1 — Day/Night Mode: label at y=80, toggle at x=400</li>
+            <li>Row 2 — Alarm Sound: label at y=130, toggle at x=400</li>
+            <li>Row 3 — Check for Updates: label at y=200, UPDATE button at x=400, y=196</li>
+            <li>Update status text: x=52, y=250</li>
+            <li>Row 4 — Constant QR Scan: label at y=310, toggle at x=400</li>
+            <li>Toggle: 60w &times; 30h, on=#4A90D9 + knob right, off=#1E1E24 + knob left</li>
+            <li>UPDATE button: font 16px bold, bg #4A90D9, padding 20px/6px</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ TRANSITION ═══ -->
+  <div class="transition">
+    <span class="arrow">→</span>
+    <div>
+      <div class="trigger">QR Code Detected (New Medication)</div>
+      <div class="trigger-detail">Camera sees a QR for an unloaded slot → Qty Confirm overlay appears</div>
+    </div>
+  </div>
+
+  <!-- ════ SCREEN 4: QTY CONFIRM ════ -->
+  <div class="section">
+    <div class="section-label">Screen 4 — Overlay</div>
+    <h2>Quantity Confirm</h2>
+    <p>Appears when a new QR code is scanned for the first time, or when reloading an empty slot. User sets how many pills were loaded.</p>
+
+    <div class="screen-row">
+      <div class="screen-card full">
+        <div class="screen-header">
+          <span class="screen-title">Qty Confirm Overlay</span>
+          <span class="screen-id">QC-01</span>
+        </div>
+        <div class="mockup">
+          <div class="m-label" style="left:6.5%;top:8%">MEDICATION LOADED</div>
+          <div class="m-text accent-b" style="left:6.5%;top:15%;font-size:20px;font-weight:700">Sertraline</div>
+
+          <div class="m-label" style="left:6.5%;top:31%">HOW MANY PILLS?</div>
+          <div class="m-text accent-b" style="left:6.5%;top:37%;font-size:32px;font-weight:700">30</div>
+
+          <!-- - and + buttons -->
+          <div class="m-btn" style="left:31%;top:37%;width:8%;height:14.5%;background:#1E1E24;font-size:18px">−</div>
+          <div class="m-btn" style="left:46%;top:37%;width:8%;height:14.5%;background:#1E1E24;font-size:18px">+</div>
+
+          <!-- CONFIRM button -->
+          <div class="m-btn" style="left:6.5%;top:67%;width:18%;height:8%;background:#3478F6;font-size:11px">CONFIRM</div>
+
+          <div class="m-logo" style="right:1.5%;bottom:2%">D</div>
+        </div>
+        <div class="screen-notes">
+          <h4>Layout Specs</h4>
+          <ul>
+            <li>"MEDICATION LOADED" label: x=52, y=40</li>
+            <li>Med name: x=52, y=70, font 36px bold, accent color</li>
+            <li>"HOW MANY PILLS?" label: x=52, y=150</li>
+            <li>Count display: x=52, y=175, font 48px bold, accent color</li>
+            <li>− button: x=250, y=180, 3-wide, height=70, font 28px bold, bg #1E1E24</li>
+            <li>+ button: x=370, y=180, same style</li>
+            <li>Default quantity: 30 pills</li>
+            <li>CONFIRM button: x=52, y=320, font 18px bold, bg #3478F6, padding 40px/12px</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ TRANSITION ═══ -->
+  <div class="transition">
+    <span class="arrow">→</span>
+    <div>
+      <div class="trigger">Tap Standby Screen / DISPENSE Button in Storage</div>
+      <div class="trigger-detail">Tapping standby (with pill in view) or pressing DISPENSE goes directly to Hold screen</div>
+    </div>
+  </div>
+
+  <!-- ════ SCREEN 5: HOLD TO DISPENSE ════ -->
+  <div class="section">
+    <div class="section-label">Screen 5 — Overlay</div>
+    <h2>Hold to Dispense</h2>
+    <p>User holds finger on screen for 3 seconds. Progress bar fills with accent color. Releasing resets progress.</p>
+
+    <div class="screen-row">
+      <div class="screen-card">
+        <div class="screen-header">
+          <span class="screen-title">Hold — In Progress</span>
+          <span class="screen-id">HD-01</span>
+        </div>
+        <div class="mockup">
+          <div class="m-label" style="left:6.5%;top:12.5%">HOLD SCREEN TO DISPENSE</div>
+          <div class="m-text accent-b" style="left:6.5%;top:19%;font-size:20px;font-weight:700">Sertraline</div>
+          <div class="m-text muted" style="left:6.5%;top:30%;font-size:11px">28 pills remaining</div>
+
+          <!-- Progress bar -->
+          <div class="m-progress-track" style="left:6.5%;top:46%;width:87%;height:8.3%"></div>
+          <div class="m-progress-fill" style="left:6.5%;top:46%;width:52%;height:8.3%;background:#5B9BFF"></div>
+
+          <div class="m-text" style="left:6.5%;top:58%;font-size:11px">Hold for 1.2 seconds...</div>
+
+          <!-- Cancel button -->
+          <div class="m-btn" style="left:6.5%;top:75%;width:14%;height:7%;background:#1E1E24;font-size:9px">Cancel</div>
+
+          <div class="m-logo" style="right:1.5%;bottom:2%">D</div>
+        </div>
+        <div class="screen-notes">
+          <h4>Layout Specs</h4>
+          <ul>
+            <li>"HOLD SCREEN TO DISPENSE" label: x=52, y=60</li>
+            <li>Med name: x=52, y=90, font 36px bold, accent</li>
+            <li>Pill count: x=52, y=145, font 20px, muted</li>
+            <li>Progress track: x=52, y=220, width=696, height=40, bg #141418</li>
+            <li>Progress fill: same dims, width animates 0→696, accent color</li>
+            <li>Timer text: x=52, y=280, font 20px, updates at 50ms</li>
+            <li>Cancel button: x=52, y=360, font 16px bold, bg #1E1E24</li>
+            <li>Hold time: 3.0 seconds total</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="screen-card">
+        <div class="screen-header">
+          <span class="screen-title">Hold — Complete → Dispensed</span>
+          <span class="screen-id">HD-02</span>
+        </div>
+        <div class="mockup">
+          <div class="m-label" style="left:6.5%;top:17%">DISPENSED</div>
+          <div class="m-text accent-b" style="left:6.5%;top:25%;font-size:20px;font-weight:700">Sertraline</div>
+
+          <!-- Checkmark -->
+          <div class="m-text" style="left:45%;top:42%;font-size:48px;color:#4AD97A">✓</div>
+
+          <div class="m-text muted" style="left:6.5%;top:79%;font-size:11px">27 pills remaining</div>
+          <div class="m-logo" style="right:1.5%;bottom:2%">D</div>
+        </div>
+        <div class="screen-notes">
+          <h4>Layout Specs</h4>
+          <ul>
+            <li>"DISPENSED" label: x=52, y=80</li>
+            <li>Med name: x=52, y=120, font 36px bold, accent</li>
+            <li>Checkmark: centered x, y=200, font 72px DejaVu Sans, color #4AD97A</li>
+            <li>Remaining text: x=52, y=380 (or "Slot empty — scan QR to reload")</li>
+            <li>Auto-dismisses after 4 seconds → returns to previous mode</li>
+            <li>Plays sound: /usr/share/sounds/alsa/Front_Center.wav</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ TRANSITION ═══ -->
+  <div class="transition">
+    <span class="arrow">→</span>
+    <div>
+      <div class="trigger">QR Enters / Leaves Camera View</div>
+      <div class="trigger-detail">Pill bottle animation plays when a medication's QR code enters or exits the 15-second presence window</div>
+    </div>
+  </div>
+
+  <!-- ════ SCREEN 6: BOTTLE ANIMATION ════ -->
+  <div class="section">
+    <div class="section-label">Screen 6 — Animation</div>
+    <h2>Pill Bottle Animation</h2>
+    <p>A rounded pill bottle shape slides into or out of view when a medication is placed or removed. Smooth ease-in-out, queued if multiple change at once.</p>
+
+    <div class="screen-row">
+      <div class="screen-card">
+        <div class="screen-header">
+          <span class="screen-title">Bottle Slide Down (Placed)</span>
+          <span class="screen-id">AN-01</span>
+        </div>
+        <div class="mockup">
+          <!-- Bottle sliding down from top -->
+          <div class="m-bottle" style="left:42.5%;top:31%;width:15%;height:37.5%;background:#5B9BFF"></div>
+          <div class="m-bottle-cap" style="left:44%;top:26%;width:12%;height:7%;background:#3b7bdf"></div>
+          <div class="m-text" style="left:45.5%;top:49%;font-size:9px;font-weight:700;color:#fff">Sertraline</div>
+          <div class="m-text muted" style="left:43%;top:24%;font-size:9px;text-align:center">Sertraline placed</div>
+          <div class="m-logo" style="right:1.5%;bottom:2%">D</div>
+        </div>
+        <div class="screen-notes">
+          <h4>Animation Specs</h4>
+          <ul>
+            <li>Bottle: 120w &times; 180h px, centered horizontally, rounded corners r=16</li>
+            <li>Cap: 96w &times; 20h, centered on top, darker shade of accent (−40 per channel)</li>
+            <li>Slides from y=500 (below screen) to y=150 (center)</li>
+            <li>Easing: smoothstep t²(3−2t), 18 frames at 22ms = ~400ms</li>
+            <li>Status text: centered, 30px above bottle, shows "[Name] placed"</li>
+            <li>Med name on bottle: centered, white, font 14px bold</li>
+            <li>Holds for 300ms after animation completes, then clears</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="screen-card">
+        <div class="screen-header">
+          <span class="screen-title">Bottle Slide Up (Removed)</span>
+          <span class="screen-id">AN-02</span>
+        </div>
+        <div class="mockup">
+          <!-- Bottle sliding up toward top -->
+          <div class="m-bottle" style="left:42.5%;top:8%;width:15%;height:37.5%;background:#FF6B6B;opacity:0.7"></div>
+          <div class="m-bottle-cap" style="left:44%;top:3%;width:12%;height:7%;background:#df4b4b;opacity:0.7"></div>
+          <div class="m-text" style="left:46%;top:26%;font-size:9px;font-weight:700;color:#fff;opacity:0.7">Ibuprofen</div>
+          <div class="m-text muted" style="left:42%;top:50%;font-size:9px">Ibuprofen removed</div>
+          <div class="m-logo" style="right:1.5%;bottom:2%">D</div>
+        </div>
+        <div class="screen-notes">
+          <h4>Animation Specs</h4>
+          <ul>
+            <li>Slides from y=150 (center) to y=−200 (above screen)</li>
+            <li>Same easing and timing as "placed" animation</li>
+            <li>Status text: centered, 30px below bottle, shows "[Name] removed"</li>
+            <li>Animation queue: if multiple bottles change, they play sequentially</li>
+            <li>Does NOT play during active dispensing (dispense_state > 0)</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="img-placeholder">
+      Replace this section with your designed bottle assets.<br>
+      Export as PNG with transparency for the bottle shape, cap, and label overlay.
+    </div>
+  </div>
+
+  <!-- ════ CAMERA & QR SYSTEM ════ -->
+  <div class="section">
+    <div class="section-label">System</div>
+    <h2>Camera & QR Presence</h2>
+    <p>The camera continuously scans for QR codes. Position in the frame determines slot assignment. Presence drives what's visible across all screens.</p>
+
+    <div class="spec-table-wrap">
+      <table class="spec-table">
+        <thead>
+          <tr>
+            <th>Property</th>
+            <th>Value</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Scan interval</td>
+            <td><code>0.5s</code></td>
+            <td>Camera captures and decodes every 500ms</td>
+          </tr>
+          <tr>
+            <td>Presence timeout</td>
+            <td><code>15.0s</code></td>
+            <td>QR must be re-seen within 15s or pill disappears from view</td>
+          </tr>
+          <tr>
+            <td>Position ordering</td>
+            <td>Right → Left = Top → Bottom</td>
+            <td>Rightmost QR in frame = blue (slot 0), leftmost = yellow (slot 3)</td>
+          </tr>
+          <tr>
+            <td>QR payload</td>
+            <td><code>{"med":"Name","slot":"color"}</code></td>
+            <td>JSON string. Slot field used for identification</td>
+          </tr>
+          <tr>
+            <td>Camera resolution</td>
+            <td><code>1280 × 720</code></td>
+            <td>RGB888 format, Camera Module 3 Wide (IMX708)</td>
+          </tr>
+          <tr>
+            <td>Autofocus</td>
+            <td><code>AfMode=2</code></td>
+            <td>Continuous autofocus enabled</td>
+          </tr>
+          <tr>
+            <td>Data persistence</td>
+            <td><code>~/dose-home-station/med_data.json</code></td>
+            <td>Name, count, schedule saved permanently after first scan</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ════ QR POSITION MAPPING ════ -->
+  <div class="section">
+    <div class="section-label">System</div>
+    <h2>QR Position → Slot Mapping</h2>
+    <p>Camera sees multiple QR codes in a single frame. Their horizontal position determines which storage slot they occupy.</p>
+
+    <div class="screen-row">
+      <div class="screen-card full">
+        <div class="screen-header">
+          <span class="screen-title">Camera View → Storage Mapping</span>
+          <span class="screen-id">SYS-01</span>
+        </div>
+        <div style="position:relative;width:100%;aspect-ratio:16/7;background:#0a0a0e;overflow:hidden;font-family:system-ui,sans-serif">
+          <!-- Camera frame -->
+          <div style="position:absolute;left:3%;top:8%;width:44%;height:84%;border:2px dashed #2A2A32;border-radius:8px;display:flex;align-items:flex-start;justify-content:center;padding-top:4px">
+            <span style="font-size:7px;color:#44464B;font-weight:700;text-transform:uppercase;letter-spacing:0.1em">Camera Frame (1280×720)</span>
+          </div>
+
+          <!-- QR codes in camera, left to right -->
+          <div style="position:absolute;left:6%;top:35%;width:8%;aspect-ratio:1;border:2px solid #E6C34A;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:7px;color:#E6C34A;font-weight:700">QR<br>Yellow</div>
+          <div style="position:absolute;left:16%;top:35%;width:8%;aspect-ratio:1;border:2px solid #5BD08A;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:7px;color:#5BD08A;font-weight:700">QR<br>Green</div>
+          <div style="position:absolute;left:26%;top:35%;width:8%;aspect-ratio:1;border:2px solid #FF6B6B;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:7px;color:#FF6B6B;font-weight:700">QR<br>Red</div>
+          <div style="position:absolute;left:36%;top:35%;width:8%;aspect-ratio:1;border:2px solid #5B9BFF;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:7px;color:#5B9BFF;font-weight:700">QR<br>Blue</div>
+
+          <!-- Labels -->
+          <div style="position:absolute;left:7%;top:72%;font-size:6px;color:#44464B;text-align:center">LEFTMOST<br>= Bottom slot</div>
+          <div style="position:absolute;left:37%;top:72%;font-size:6px;color:#44464B;text-align:center">RIGHTMOST<br>= Top slot</div>
+
+          <!-- Arrow -->
+          <div style="position:absolute;left:50%;top:48%;font-size:16px;color:#5B9BFF">→</div>
+
+          <!-- Storage panel -->
+          <div style="position:absolute;right:3%;top:8%;width:42%;height:84%;border:2px dashed #2A2A32;border-radius:8px;display:flex;align-items:flex-start;justify-content:center;padding-top:4px">
+            <span style="font-size:7px;color:#44464B;font-weight:700;text-transform:uppercase;letter-spacing:0.1em">Storage List (top to bottom)</span>
+          </div>
+
+          <!-- Storage rows -->
+          <div style="position:absolute;right:6%;top:22%;width:36%;height:14%;background:#141418;border-radius:4px;border-left:3px solid #5B9BFF;display:flex;align-items:center;padding-left:10px;font-size:8px;color:#5B9BFF;font-weight:700">Blue — Slot 0 (top)</div>
+          <div style="position:absolute;right:6%;top:38%;width:36%;height:14%;background:#141418;border-radius:4px;border-left:3px solid #FF6B6B;display:flex;align-items:center;padding-left:10px;font-size:8px;color:#FF6B6B;font-weight:700">Red — Slot 1</div>
+          <div style="position:absolute;right:6%;top:54%;width:36%;height:14%;background:#141418;border-radius:4px;border-left:3px solid #5BD08A;display:flex;align-items:center;padding-left:10px;font-size:8px;color:#5BD08A;font-weight:700">Green — Slot 2</div>
+          <div style="position:absolute;right:6%;top:70%;width:36%;height:14%;background:#141418;border-radius:4px;border-left:3px solid #E6C34A;display:flex;align-items:center;padding-left:10px;font-size:8px;color:#E6C34A;font-weight:700">Yellow — Slot 3 (bottom)</div>
+        </div>
+        <div class="screen-notes">
+          <h4>Mapping Rule</h4>
+          <ul>
+            <li>pyzbar returns <code>rect.left</code> (x-pixel) for each detected QR</li>
+            <li>Sort all detected QRs by x-position, descending (rightmost first)</li>
+            <li>Assign: index 0 → SLOT_KEYS[0] (blue), index 1 → SLOT_KEYS[1] (red), etc.</li>
+            <li>Maximum 4 QR codes mapped per frame</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════ ELEMENT INVENTORY ════ -->
+  <div class="section">
+    <div class="section-label">Reference</div>
+    <h2>Element Inventory</h2>
+    <p>Every visual element you need to design, with exact pixel coordinates and styling from the codebase.</p>
+
+    <div class="spec-table-wrap">
+      <table class="spec-table">
+        <thead>
+          <tr>
+            <th>Element</th>
+            <th>Screen</th>
+            <th>Position</th>
+            <th>Size / Font</th>
+            <th>Color</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>D Logo Button</td><td>All</td><td>x=710, y=390</td><td>80 × 80 px</td><td>dose_logo.png or fallback #4A90D9</td></tr>
+          <tr><td>Clock</td><td>Standby</td><td>x=52, y=20</td><td>32px bold</td><td>#F4F4F2</td></tr>
+          <tr><td>Schedule Card</td><td>Standby</td><td>x=52, y=108+i*82</td><td>620 × 72 px</td><td>bg #141418, 5px accent bar left</td></tr>
+          <tr><td>Card Time</td><td>Standby</td><td>pad-left 20, pad-top 8</td><td>24px bold</td><td>#F4F4F2</td></tr>
+          <tr><td>Card Name</td><td>Standby</td><td>pad-left 20, pad-top 40</td><td>14px</td><td>#7E8186</td></tr>
+          <tr><td>Card Count</td><td>Standby</td><td>x=480, pad-top 20</td><td>20px bold</td><td>Slot accent</td></tr>
+          <tr><td>Pill Row</td><td>Storage</td><td>x=12, y=48+i*108</td><td>236 × 96 px</td><td>bg #141418, 5px accent bar</td></tr>
+          <tr><td>Row Dot</td><td>Storage</td><td>(18, 14) in row</td><td>14 × 14 px circle</td><td>Slot accent</td></tr>
+          <tr><td>Row Name</td><td>Storage</td><td>(40, 8) in row</td><td>14px bold</td><td>#F4F4F2</td></tr>
+          <tr><td>Row Time</td><td>Storage</td><td>(40, 32) in row</td><td>14px</td><td>#F4F4F2</td></tr>
+          <tr><td>Row Count</td><td>Storage</td><td>(40, 58) in row</td><td>20px bold</td><td>Slot accent</td></tr>
+          <tr><td>Detail Name</td><td>Storage</td><td>x=28, y=18</td><td>36px bold</td><td>Slot accent</td></tr>
+          <tr><td>Time ▲▼ Btn</td><td>Storage</td><td>Grid layout at x=28, y=162</td><td>width=3char, pad 4px</td><td>bg #1E1E24</td></tr>
+          <tr><td>Day Toggle</td><td>Storage</td><td>x=28, y=294, inline</td><td>width=3char, pad 6px</td><td>Active: accent. Off: #1E1E24</td></tr>
+          <tr><td>DISPENSE Btn</td><td>Storage</td><td>x=28, y=370</td><td>18px bold, pad 50/14</td><td>bg=accent, text white</td></tr>
+          <tr><td>Progress Bar</td><td>Hold</td><td>x=52, y=220</td><td>696 × 40 px</td><td>Track: #141418. Fill: accent</td></tr>
+          <tr><td>Checkmark</td><td>Dispensed</td><td>centered x, y=200</td><td>72px DejaVu Sans</td><td>#4AD97A</td></tr>
+          <tr><td>Pill Bottle</td><td>Animation</td><td>centered x</td><td>120 × 180 px, r=16</td><td>Slot accent</td></tr>
+          <tr><td>Bottle Cap</td><td>Animation</td><td>centered on bottle top</td><td>96 × 20 px, r=8</td><td>Accent −40 per channel</td></tr>
+          <tr><td>Toggle Switch</td><td>Settings</td><td>x=400</td><td>60 × 30 px, r=15</td><td>On: #4A90D9. Off: #1E1E24</td></tr>
+          <tr><td>Popup Menu</td><td>All (D tap)</td><td>x=620, y=290</td><td>160 × auto</td><td>bg #1A1A20, border #7E8186</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ════ DESIGN ASSET CHECKLIST ════ -->
+  <div class="section">
+    <div class="section-label">Checklist</div>
+    <h2>Assets to Design</h2>
+    <p>Every image and custom graphic needed. Replace the current programmatic drawing with these designed assets.</p>
+
+    <div class="spec-table-wrap">
+      <table class="spec-table">
+        <thead>
+          <tr>
+            <th>Asset</th>
+            <th>Format</th>
+            <th>Sizes Needed</th>
+            <th>Used In</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>dose_logo.png</td><td>PNG (RGBA)</td><td>80×80, 1024×1024 (source)</td><td>D button (all screens)</td></tr>
+          <tr><td>Standby background</td><td>PNG</td><td>800×480</td><td>Standby mode bg</td></tr>
+          <tr><td>Schedule card bg</td><td>9-slice PNG or CSS</td><td>620×72 per card</td><td>Standby schedule rows</td></tr>
+          <tr><td>Storage left panel bg</td><td>PNG</td><td>260×480</td><td>Storage left side</td></tr>
+          <tr><td>Pill row card</td><td>9-slice PNG</td><td>236×96 per row</td><td>Storage pill list</td></tr>
+          <tr><td>Detail panel bg</td><td>PNG</td><td>536×480</td><td>Storage right side</td></tr>
+          <tr><td>Pill bottle — Blue</td><td>PNG (RGBA)</td><td>120×180</td><td>Bottle animation (placed/removed)</td></tr>
+          <tr><td>Pill bottle — Red</td><td>PNG (RGBA)</td><td>120×180</td><td>Bottle animation</td></tr>
+          <tr><td>Pill bottle — Green</td><td>PNG (RGBA)</td><td>120×180</td><td>Bottle animation</td></tr>
+          <tr><td>Pill bottle — Yellow</td><td>PNG (RGBA)</td><td>120×180</td><td>Bottle animation</td></tr>
+          <tr><td>DISPENSE button</td><td>PNG or CSS</td><td>~200×44 (4 color variants)</td><td>Storage detail, Hold overlay</td></tr>
+          <tr><td>Progress bar track</td><td>PNG or CSS</td><td>696×40</td><td>Hold to Dispense</td></tr>
+          <tr><td>Progress bar fill</td><td>PNG (4 colors)</td><td>696×40 each</td><td>Hold to Dispense</td></tr>
+          <tr><td>Checkmark icon</td><td>PNG (RGBA)</td><td>~100×100</td><td>Dispensed confirmation</td></tr>
+          <tr><td>Toggle switch</td><td>PNG</td><td>60×30 (on + off states)</td><td>Settings</td></tr>
+          <tr><td>WiFi icon</td><td>PNG (RGBA)</td><td>40×32</td><td>Standby top-right</td></tr>
+          <tr><td>▲ ▼ arrows</td><td>PNG or SVG</td><td>~30×24</td><td>Schedule time editor</td></tr>
+          <tr><td>+/− buttons</td><td>PNG</td><td>~60×70</td><td>Qty confirm overlay</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ════ FONT REFERENCE ════ -->
+  <div class="section">
+    <div class="section-label">Reference</div>
+    <h2>Typography Scale</h2>
+
+    <div class="spec-table-wrap">
+      <table class="spec-table">
+        <thead>
+          <tr>
+            <th>Token</th>
+            <th>Size</th>
+            <th>Weight</th>
+            <th>Used For</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>font_count</code></td><td>48px</td><td>Bold</td><td>Qty confirm number</td></tr>
+          <tr><td><code>font_hero</code></td><td>44px</td><td>Bold</td><td>—</td></tr>
+          <tr><td><code>font_name</code></td><td>36px</td><td>Bold</td><td>Med name (detail, overlay headers)</td></tr>
+          <tr><td><code>font_clock</code></td><td>32px</td><td>Regular</td><td>Standby clock</td></tr>
+          <tr><td><code>font_bold_lg</code></td><td>28px</td><td>Bold</td><td>+/− buttons</td></tr>
+          <tr><td><code>font_title</code></td><td>24px</td><td>Bold</td><td>Schedule card time, hold med name</td></tr>
+          <tr><td><code>font_body</code></td><td>20px</td><td>Regular</td><td>Pill count, hold text, status text</td></tr>
+          <tr><td><code>font_body_bold</code></td><td>20px</td><td>Bold</td><td>Schedule editor digits, row count</td></tr>
+          <tr><td><code>font_btn_lg</code></td><td>18px</td><td>Bold</td><td>DISPENSE, CONFIRM buttons</td></tr>
+          <tr><td><code>font_medium</code></td><td>18px</td><td>Regular</td><td>—</td></tr>
+          <tr><td><code>font_btn</code></td><td>16px</td><td>Bold</td><td>UPDATE, Cancel buttons</td></tr>
+          <tr><td><code>font_small_bold</code></td><td>14px</td><td>Bold</td><td>Row names, day toggles, bottle label</td></tr>
+          <tr><td><code>font_small</code></td><td>14px</td><td>Regular</td><td>Row info, card name, detail text</td></tr>
+          <tr><td><code>font_label</code></td><td>11px</td><td>Bold</td><td>Section labels (uppercase, tracked)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
