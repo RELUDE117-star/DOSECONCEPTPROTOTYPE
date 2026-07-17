@@ -84,6 +84,7 @@ mkdir -p "$APP_DIR"
 cp "$SCRIPT_DIR/dose_app.py" "$APP_DIR/dose_app.py" 2>/dev/null || true
 cp "$SCRIPT_DIR/DOSE.sh" "$APP_DIR/DOSE.sh" 2>/dev/null || true
 cp "$SCRIPT_DIR/dose_logo.png" "$APP_DIR/dose_logo.png" 2>/dev/null || true
+cp "$SCRIPT_DIR/demo_qr.png" "$APP_DIR/demo_qr.png" 2>/dev/null || true
 chmod +x "$APP_DIR"/*.py "$APP_DIR"/*.sh 2>/dev/null || true
 touch "$APP_DIR/.ready"
 
@@ -107,6 +108,7 @@ if curl -sL "$RAW_URL/dose_app.py" -o "$TEMP_FILE" 2>/dev/null; then
             # Also update DOSE.sh and logo
             curl -sL "$RAW_URL/DOSE.sh" -o "$APP_DIR/DOSE.sh" 2>/dev/null || true
             curl -sL "$RAW_URL/dose_logo.png" -o "$APP_DIR/dose_logo.png" 2>/dev/null || true
+            curl -sL "$RAW_URL/demo_qr.png" -o "$APP_DIR/demo_qr.png" 2>/dev/null || true
             chmod +x "$APP_DIR"/*.py "$APP_DIR"/*.sh 2>/dev/null || true
             echo "  Updated!"
         else
