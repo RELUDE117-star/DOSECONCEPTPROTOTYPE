@@ -73,6 +73,7 @@ MARGIN_LEFT = 52
 HOLD_TIME = 3.0
 DISPENSED_TIME = 4.0
 DEFAULT_QTY = 30
+QR_PRESENCE_TIMEOUT = 15.0
 ALL_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 CONFIG_PATH = os.path.expanduser("~/.dose_config.json")
@@ -203,6 +204,7 @@ class DoseApp:
         self.mpr = None
         self.has_touch = False
         self.mpr_prev = [False] * 12
+        self.qr_last_seen = {k: 0.0 for k in SLOT_KEYS}
 
         # ── Config + Med data ──────────────────────────────────────────────
         self._load_config()
@@ -465,6 +467,8 @@ class DoseApp:
             self.clock_label.configure(text=now_str)
         except Exception:
             pass
+        if self.mode == "standby":
+            self._update_standby()
         self.root.after(1000, self._tick_clock)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -495,34 +499,40 @@ class DoseApp:
         tk.Label(self.standby_frame, text="TODAY'S SCHEDULE",
                  font=self.font_label,
                  bg=self.theme["bg"],
-                 fg=self.theme["muted"]).place(x=MARGIN_LEFT, y=90)
+                 fg=self.theme["muted"]).place(x=MARGIN_LEFT, y=80)
 
-        # Schedule list — up to 4 rows showing each med + time
+        # Schedule list — up to 4 card rows
         self.standby_sched_rows = []
         for i in range(4):
-            y = 118 + i * 64
-            row_frame = tk.Frame(self.standby_frame, bg=self.theme["bg"])
-            row_frame.place(x=MARGIN_LEFT, y=y, width=600, height=56)
+            y = 108 + i * 82
+            card = tk.Frame(self.standby_frame, bg=self.theme["card_bg"])
+            card.place(x=MARGIN_LEFT, y=y, width=620, height=72)
 
-            dot = tk.Canvas(row_frame, width=14, height=14,
-                            bg=self.theme["bg"], highlightthickness=0)
-            dot.place(x=0, y=21)
+            color_bar = tk.Frame(card, bg="#5B9BFF", width=5)
+            color_bar.place(x=0, y=0, width=5, height=72)
 
-            time_lbl = tk.Label(row_frame, text="",
-                                font=self.font_body_bold,
-                                bg=self.theme["bg"],
+            time_lbl = tk.Label(card, text="",
+                                font=self.font_title,
+                                bg=self.theme["card_bg"],
                                 fg=self.theme["fg"], anchor="w")
-            time_lbl.place(x=22, y=4)
+            time_lbl.place(x=20, y=8)
 
-            name_lbl = tk.Label(row_frame, text="",
+            name_lbl = tk.Label(card, text="",
                                 font=self.font_small,
-                                bg=self.theme["bg"],
+                                bg=self.theme["card_bg"],
                                 fg=self.theme["muted"], anchor="w")
-            name_lbl.place(x=22, y=32)
+            name_lbl.place(x=20, y=40)
+
+            count_lbl = tk.Label(card, text="",
+                                 font=self.font_body_bold,
+                                 bg=self.theme["card_bg"],
+                                 fg=self.theme["fg"], anchor="e")
+            count_lbl.place(x=480, y=20)
 
             self.standby_sched_rows.append({
-                "frame": row_frame, "dot": dot,
+                "card": card, "color_bar": color_bar,
                 "time_lbl": time_lbl, "name_lbl": name_lbl,
+                "count_lbl": count_lbl,
             })
 
         # Empty state / scan hint
@@ -530,7 +540,7 @@ class DoseApp:
                                             font=self.font_body,
                                             bg=self.theme["bg"],
                                             fg=self.theme["muted"])
-        self.standby_empty_label.place(x=MARGIN_LEFT, y=140)
+        self.standby_empty_label.place(x=MARGIN_LEFT, y=200)
 
         # Hardware status at bottom
         hw_parts = []
@@ -550,7 +560,8 @@ class DoseApp:
 
     def _standby_tap(self, event=None):
         for key in SLOT_KEYS:
-            if self._is_loaded(key) and self._get_count(key) > 0:
+            if (self._is_loaded(key) and self._get_count(key) > 0
+                    and self._is_qr_present(key)):
                 self._start_dispense(key)
                 return
 
@@ -559,25 +570,29 @@ class DoseApp:
 
         # Hide all rows first
         for row in self.standby_sched_rows:
-            row["frame"].place_forget()
+            row["card"].place_forget()
 
         if not today_sched:
             self.standby_empty_label.configure(
-                text="No medications scheduled today")
-            self.standby_empty_label.place(x=MARGIN_LEFT, y=140)
+                text="Place medications in view to see schedule")
+            self.standby_empty_label.place(x=MARGIN_LEFT, y=200)
         else:
             self.standby_empty_label.place_forget()
             for i, entry in enumerate(today_sched[:4]):
                 row = self.standby_sched_rows[i]
-                y = 118 + i * 64
-                row["frame"].place(x=MARGIN_LEFT, y=y,
-                                   width=600, height=56)
-                row["dot"].delete("all")
-                row["dot"].create_oval(1, 1, 13, 13,
-                                       fill=entry["accent"], outline="")
+                y = 108 + i * 82
+                row["card"].place(x=MARGIN_LEFT, y=y,
+                                  width=620, height=72)
+                row["color_bar"].configure(bg=entry["accent"])
                 row["time_lbl"].configure(text=entry["time"])
-                row["name_lbl"].configure(
-                    text=f"{entry['name']}  ·  {entry['count']} pills")
+                row["name_lbl"].configure(text=entry["name"])
+                row["count_lbl"].configure(
+                    text=f"{entry['count']} pills",
+                    fg=entry["accent"])
+
+    def _is_qr_present(self, key):
+        """True if this slot's QR was seen within the last 15 seconds."""
+        return (time.time() - self.qr_last_seen.get(key, 0)) < QR_PRESENCE_TIMEOUT
 
     def _get_today_schedule(self):
         now = datetime.now()
@@ -586,6 +601,8 @@ class DoseApp:
         for key in SLOT_KEYS:
             md = self.med_data[key]
             if not md.get("loaded"):
+                continue
+            if not self._is_qr_present(key):
                 continue
             days = md.get("schedule_days", ALL_DAYS)
             if today_name not in days:
@@ -607,7 +624,6 @@ class DoseApp:
                 "count": md.get("count", 0),
                 "accent": SLOT_DEFS[key]["accent"],
                 "sort": sort_key,
-                "past": sort_key <= now,
             })
         entries.sort(key=lambda e: e["sort"])
         return entries
@@ -1477,19 +1493,17 @@ class DoseApp:
                 frame = self.camera.capture_array()
                 img = Image.fromarray(frame[:, :, ::-1])
                 results = pyzbar_decode(img)
+                seen_this_frame = set()
                 for r in results:
                     text = r.data.decode("utf-8", errors="ignore").strip()
                     self.root.after(0, self._handle_qr, text)
-                    time.sleep(2)
-                    break
-                time.sleep(0.1)
+                    seen_this_frame.add(text)
+                time.sleep(0.5)
             except Exception:
                 time.sleep(1)
 
-    def _handle_qr(self, raw_text):
-        """Parse QR payload and route to the right slot.
-        QR must always be in camera view — it confirms the medication
-        is physically present. Info is saved permanently on first scan."""
+    def _parse_qr_slot(self, raw_text):
+        """Parse QR text into (slot_key, med_name) or (None, None)."""
         try:
             payload = json.loads(raw_text)
             slot = payload.get("slot", "").lower()
@@ -1497,9 +1511,18 @@ class DoseApp:
         except (json.JSONDecodeError, AttributeError):
             slot = raw_text.strip().lower()
             med_name = slot.capitalize()
-
         if slot not in SLOT_DEFS:
+            return None, None
+        return slot, med_name
+
+    def _handle_qr(self, raw_text):
+        """Called on every QR detection. Updates presence timestamp.
+        Only triggers load/dispense if the slot is new or empty."""
+        slot, med_name = self._parse_qr_slot(raw_text)
+        if not slot:
             return
+
+        self.qr_last_seen[slot] = time.time()
 
         md = self.med_data[slot]
 
@@ -1513,8 +1536,6 @@ class DoseApp:
                 md["name"] = med_name
                 self._save_med()
                 self._show_qty_confirm(slot, med_name)
-            else:
-                self._start_dispense(slot)
 
     # ── WiFi icon ──────────────────────────────────────────────────────────
     def _draw_wifi(self, canvas, color):
