@@ -1116,69 +1116,74 @@ class DoseApp:
         else:
             pct = 100
 
-        # Big percentage circle
-        circle_size = 140
-        circle_x = 100
-        circle_y = 86
+        # Big percentage ring — blue on-theme
+        circle_size = 190
+        circle_x = 72
+        circle_y = 76
 
-        pct_color = "#30D158" if pct >= 80 else ("#FFD60A" if pct >= 50 else "#FF6B6B")
         progress = pct / 100.0
-        ring_img = _pil_ring(circle_size, progress, pct_color,
+        ring_img = _pil_ring(circle_size, progress, ACCENT_BLUE,
                              t["elevated_bg"], t["card_bg"])
         tk_ring = self._get_tk_image("user_ring", ring_img)
         c.create_image(circle_x, circle_y, image=tk_ring, anchor="nw")
 
-        c.create_text(circle_x + circle_size // 2,
-                      circle_y + circle_size // 2 - 12,
+        ring_cx = circle_x + circle_size // 2
+        ring_cy = circle_y + circle_size // 2
+        c.create_text(ring_cx, ring_cy - 10,
                       text=f"{pct}%", font=self.font_pct,
-                      fill=pct_color, anchor="center")
-        c.create_text(circle_x + circle_size // 2,
-                      circle_y + circle_size // 2 + 22,
+                      fill=ACCENT_BLUE, anchor="center")
+        c.create_text(ring_cx, ring_cy + 24,
                       text="on time", font=self.font_pct_label,
                       fill=t["muted"], anchor="center")
 
         # Stats column to the right
-        stats_x = 290
+        stats_x = 300
         stat_items = [
             ("Total Doses", str(total_events), t["fg"]),
-            ("On Time", str(on_time), "#30D158"),
+            ("On Time", str(on_time), ACCENT_BLUE),
             ("Late", str(late_count), "#FFD60A"),
             ("Missed", str(missed_count), "#FF6B6B"),
         ]
 
         for i, (label, val, color) in enumerate(stat_items):
-            sy = 90 + i * 50
-            stat_bg = _pil_rounded_rect(300, 42, 12, t["elevated_bg"])
+            sy = 86 + i * 50
+            stat_bg = _pil_rounded_rect(290, 42, 12, t["elevated_bg"])
             tk_stat = self._get_tk_image(f"user_stat_{i}", stat_bg)
             c.create_image(stats_x, sy, image=tk_stat, anchor="nw")
 
             c.create_text(stats_x + 14, sy + 21, text=label,
                           font=self.font_small, fill=t["muted"], anchor="w")
-            c.create_text(stats_x + 286, sy + 21, text=val,
+            c.create_text(stats_x + 276, sy + 21, text=val,
                           font=self.font_body_bold, fill=color, anchor="e")
 
         # Weekly bar chart
-        c.create_text(56, 310, text="LAST 7 DAYS",
+        c.create_text(56, 302, text="LAST 7 DAYS",
                       font=self.font_label, fill=t["muted"], anchor="nw")
 
-        # Build daily data from adherence log
         day_labels_short = ["M", "T", "W", "T", "F", "S", "S"]
         daily_vals = self._get_weekly_adherence()
-        bar_colors = [("#30D158" if v >= 80 else
-                       "#FFD60A" if v >= 50 else
-                       "#FF6B6B") for v in daily_vals]
 
-        chart_img = _pil_bar_chart(540, 100, daily_vals, bar_colors,
+        chart_w = 540
+        chart_h = 100
+        chart_x = 56
+        chart_y = 324
+
+        chart_img = _pil_bar_chart(chart_w, chart_h, daily_vals, ACCENT_BLUE,
                                     t["elevated_bg"], ACCENT_BLUE)
         tk_chart = self._get_tk_image("user_chart", chart_img)
-        c.create_image(56, 332, image=tk_chart, anchor="nw")
+        c.create_image(chart_x, chart_y, image=tk_chart, anchor="nw")
 
-        # Day labels under chart
-        chart_w = 540
-        bar_gap = chart_w // 7
+        # Day labels — match exact bar center positions from _pil_bar_chart
+        n = 7
+        padding = 16
+        bar_area_w = chart_w - 2 * padding
+        gap = max(2, bar_area_w // (n * 4))
+        bar_w = max(4, (bar_area_w - gap * (n + 1)) // n)
         for i, dl in enumerate(day_labels_short):
-            lx = 56 + bar_gap // 2 + i * bar_gap
-            c.create_text(lx, 438, text=dl, font=self.font_graph_label,
+            bar_x = padding + gap + i * (bar_w + gap)
+            lx = chart_x + bar_x + bar_w // 2
+            c.create_text(lx, chart_y + chart_h + 8, text=dl,
+                          font=self.font_graph_label,
                           fill=t["muted"], anchor="center")
 
     def _get_weekly_adherence(self):
