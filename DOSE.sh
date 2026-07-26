@@ -26,6 +26,11 @@ if [ ! -f "$APP_DIR/.ready" ]; then
         || pip install pyzbar Pillow adafruit-circuitpython-mpr121 "qrcode[pil]" 2>/dev/null || true
 fi
 
+# ── Touch sensor (MPR121) — set to true to re-enable I2C setup ──
+TOUCH_SENSOR_ENABLED=false
+
+if [ "$TOUCH_SENSOR_ENABLED" = "true" ]; then
+
 # ── Auto-enable I2C for MPR121 touch sensor ──
 I2C_NEEDS_REBOOT=false
 
@@ -78,6 +83,8 @@ if command -v i2cdetect >/dev/null 2>&1; then
         echo "  Check wiring: VCC→Pin1, SDA→Pin3, SCL→Pin5, GND→Pin9"
     fi
 fi
+
+fi  # end TOUCH_SENSOR_ENABLED
 
 # ── Copy app files ──
 mkdir -p "$APP_DIR"

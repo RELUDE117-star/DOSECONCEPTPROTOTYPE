@@ -37,27 +37,30 @@ try:
 except Exception:
     pass
 
+TOUCH_SENSOR_ENABLED = False  # set True to re-enable MPR121 touch sensor
+
 HAVE_MPR121 = False
 mpr121_mod = None
-try:
-    import board
-    import busio
-    import adafruit_mpr121
-    mpr121_mod = adafruit_mpr121
-    HAVE_MPR121 = True
-except Exception:
+if TOUCH_SENSOR_ENABLED:
     try:
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--break-system-packages",
-             "adafruit-circuitpython-mpr121"],
-            capture_output=True, timeout=60)
         import board
         import busio
         import adafruit_mpr121
         mpr121_mod = adafruit_mpr121
         HAVE_MPR121 = True
     except Exception:
-        pass
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--break-system-packages",
+                 "adafruit-circuitpython-mpr121"],
+                capture_output=True, timeout=60)
+            import board
+            import busio
+            import adafruit_mpr121
+            mpr121_mod = adafruit_mpr121
+            HAVE_MPR121 = True
+        except Exception:
+            pass
 
 # ── Constants ──────────────────────────────────────────────────────────────
 SCREEN_W = 800
@@ -428,7 +431,7 @@ class DoseApp:
 
         # ── MPR121 init ────────────────────────────────────────────────────
         self.touch_error = ""
-        if HAVE_MPR121:
+        if TOUCH_SENSOR_ENABLED and HAVE_MPR121:
             try:
                 subprocess.run(["sudo", "modprobe", "i2c-dev"],
                                capture_output=True, timeout=5)
@@ -441,7 +444,7 @@ class DoseApp:
                 self.has_touch = True
             except Exception as e:
                 self.touch_error = str(e)
-        else:
+        elif TOUCH_SENSOR_ENABLED:
             self.touch_error = "Library not installed"
 
         # ── Root canvas ────────────────────────────────────────────────────
@@ -784,7 +787,7 @@ class DoseApp:
         hw = []
         if not CAMERA_AVAILABLE:
             hw.append("Camera not connected")
-        if not self.has_touch:
+        if TOUCH_SENSOR_ENABLED and not self.has_touch:
             hw.append("Touch: " + (self.touch_error or "not detected"))
         if hw:
             c.create_text(32, SCREEN_H - 20, text="  ·  ".join(hw),
