@@ -564,6 +564,8 @@ class DoseApp:
         self._due_keys = {}
         self._due_prev = set()
         self._banner_dismissed = False
+        self._alert_key = None
+        self._alert_return = "home"
         self.camera = None
         self.camera_running = False
         self.mpr = None
@@ -773,6 +775,8 @@ class DoseApp:
             self._draw_qty_confirm(c)
         elif self.mode == "timeedit":
             self._draw_time_edit(c)
+        elif self.mode == "dosealert":
+            self._draw_dose_alert(c)
 
         # Due-dose notification banner on the main screens
         if (self._due_keys and not self._banner_dismissed
@@ -792,6 +796,8 @@ class DoseApp:
         active = self.mode
         if active == "timeedit":
             active = getattr(self, "_te_return", "storage")
+        if active == "dosealert":
+            active = getattr(self, "_alert_return", "home")
         if active in ("hold", "spin", "confirmdisp", "dispensed",
                       "qtyconfirm", "addmed"):
             active = self._prev_mode
@@ -2546,10 +2552,84 @@ class DoseApp:
             self._banner_dismissed = False
         self._due_keys = due
         self._due_prev = set(due)
+
+        # Full-screen takeover: holds until the user dispenses or
+        # dismisses (banner keeps reminding after a dismiss)
+        if (newly_due and self.dispense_state == 0
+                and self.mode in ("home", "storage", "settings", "user")):
+            self._alert_key = sorted(newly_due)[0]
+            self._alert_return = self.mode
+            self.mode = "dosealert"
+            self._draw_frame()
+            return
+
+        # if the due dose was taken while the alert is up, close it
+        if self.mode == "dosealert" and self._alert_key not in due:
+            self.mode = self._alert_return
+            self._draw_frame()
+            return
+
         # settings/user don't redraw every second — refresh them when the
         # banner appears or clears
         if (newly_due or cleared) and self.mode in ("settings", "user"):
             self._draw_frame()
+
+    def _draw_dose_alert(self, c):
+        t = self.theme
+        key = self._alert_key
+        md = self.med_data.get(key, {})
+        name = md.get("name", "Medication")
+        cx = CONTENT_W // 2
+
+        card_img = _pil_rounded_rect(620, 440, 22, t["card_bg"],
+                                     outline=DOSE_BLUE, outline_w=4)
+        tk_card = self._get_tk_image("alert_card", card_img)
+        c.create_image(26, 20, image=tk_card, anchor="nw")
+
+        icon = _pil_clock_icon(72, DOSE_BLUE)
+        tk_icon = self._get_tk_image("alert_icon", icon)
+        c.create_image(cx - 36, 56, image=tk_icon, anchor="nw")
+
+        c.create_text(cx, 168, text="TIME TO TAKE YOUR MEDICATION",
+                      font=self.font_label, fill=t["muted"],
+                      anchor="center")
+        c.create_text(cx, 216,
+                      text=self._fit_text(name, self.font_pct, 560),
+                      font=self.font_pct, fill=DOSE_BLUE, anchor="center")
+        sched = self._due_keys.get(key, "")
+        extra = len(self._due_keys) - 1
+        sub = f"Scheduled for {sched}" if sched else ""
+        if extra > 0:
+            sub += f"  ·  +{extra} more due"
+        if sub:
+            c.create_text(cx, 262, text=sub, font=self.font_body,
+                          fill=t["muted"], anchor="center")
+
+        btn_w, btn_h = 320, 72
+        btn_img = _pil_rounded_rect(btn_w, btn_h, btn_h // 2, DOSE_BLUE)
+        tk_btn = self._get_tk_image("alert_btn", btn_img)
+        btn_x, btn_y = cx - btn_w // 2, 300
+        c.create_image(btn_x, btn_y, image=tk_btn, anchor="nw")
+        c.create_text(cx, btn_y + btn_h // 2, text="DISPENSE NOW",
+                      font=self.font_btn_lg, fill="#06101E",
+                      anchor="center")
+        self._click_zones.append(
+            (btn_x, btn_y, btn_x + btn_w, btn_y + btn_h,
+             self._alert_dispense))
+
+        c.create_text(cx, 412, text="Not now",
+                      font=self.font_body, fill=t["muted"],
+                      anchor="center")
+        self._click_zones.append(
+            (cx - 80, 394, cx + 80, 430, self._alert_dismiss))
+
+    def _alert_dispense(self):
+        self.mode = self._alert_return
+        self._start_dispense(self._alert_key)
+
+    def _alert_dismiss(self):
+        self.mode = self._alert_return
+        self._draw_frame()
 
     def _draw_due_banner(self, c):
         t = self.theme
