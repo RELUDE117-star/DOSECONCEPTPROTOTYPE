@@ -3133,8 +3133,14 @@ class DoseApp:
             if slot in KNOWN_SLOTS:
                 self.qr_last_seen[slot] = now
                 md = self.med_data[slot]
+                # The QR payload is the source of truth for the name —
+                # overwrites any stale saved name (e.g. old "Vitamin D"
+                # data lingering in med_data.json)
+                correct_name = med_name or KNOWN_SLOTS[slot]
+                if md.get("name") != correct_name:
+                    md["name"] = correct_name
+                    self._save_med()
                 if not md.get("loaded"):
-                    md["name"] = KNOWN_SLOTS[slot]
                     md["loaded"] = True
                     md["count"] = md.get("count", 0) or DEFAULT_QTY
                     self._save_med()
