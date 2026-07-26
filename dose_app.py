@@ -3025,6 +3025,10 @@ class DoseApp:
                     "AfMode": 2,
                     "AeEnable": True,
                     "AwbEnable": True,
+                    # Bias AE slightly dark: with the internal light the
+                    # failure mode is clipped highlights, and QR codes
+                    # decode far better underexposed than blown out
+                    "ExposureValue": -0.5,
                 })
             except Exception:
                 try:
@@ -3104,8 +3108,8 @@ class DoseApp:
                     try:
                         self.camera.set_controls({
                             "AeEnable": False,
-                            "ExposureTime": 6000,
-                            "AnalogueGain": 2.0,
+                            "ExposureTime": 3000,
+                            "AnalogueGain": 1.5,
                         })
                         bracketed = True
                         time.sleep(0.08)  # let the exposure settle
