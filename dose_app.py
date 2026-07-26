@@ -350,6 +350,35 @@ def _pil_clock_icon(size, color, scale=2):
     return img.resize((size, size), resample)
 
 
+def _pil_status_icon(size, kind, scale=2):
+    """Small per-dose status mark for home cards:
+    'taken'  — filled blue circle with a white check
+    'missed' — red-outlined circle with a red X"""
+    ss = size * scale
+    img = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    lw = max(2, 3 * scale)
+    if kind == "taken":
+        blue = _hex_to_rgba(DOSE_BLUE)
+        d.ellipse([0, 0, ss - 1, ss - 1], fill=blue)
+        w = (255, 255, 255, 255)
+        d.line([ss * 0.26, ss * 0.52, ss * 0.44, ss * 0.68], fill=w,
+               width=lw)
+        d.line([ss * 0.44, ss * 0.68, ss * 0.74, ss * 0.34], fill=w,
+               width=lw)
+    else:
+        red = _hex_to_rgba("#FF6B6B")
+        pad = lw // 2 + scale
+        d.ellipse([pad, pad, ss - 1 - pad, ss - 1 - pad], outline=red,
+                  width=lw)
+        d.line([ss * 0.34, ss * 0.34, ss * 0.66, ss * 0.66], fill=red,
+               width=lw)
+        d.line([ss * 0.66, ss * 0.34, ss * 0.34, ss * 0.66], fill=red,
+               width=lw)
+    resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
+    return img.resize((size, size), resample)
+
+
 def _pil_soft_check(size, scale=2):
     """Success mark: translucent circle + check in the signature blue."""
     ss = size * scale
@@ -990,10 +1019,29 @@ class DoseApp:
                                   fill=t["muted"], anchor="w")
 
                 cnt = entry.get("count", 0)
-                c.create_text(26 + card_w - 28, y + card_h // 2,
-                              text=f"{cnt} pills left",
+                cnt_text = f"{cnt} pills left"
+                count_right = 26 + card_w - 28
+                c.create_text(count_right, y + card_h // 2,
+                              text=cnt_text,
                               font=self.font_title, fill=DOSE_BLUE,
                               anchor="e")
+
+                # Per-dose status: blue check = taken in its window,
+                # red circled X = window passed without taking it right
+                status = self._dose_status(entry["key"], entry["time"])
+                if status:
+                    icon_size = 30
+                    icon_img = _pil_status_icon(
+                        icon_size, "taken" if status == "taken" else "missed")
+                    tk_icon = self._get_tk_image(f"dose_status_{i}",
+                                                 icon_img)
+                    try:
+                        tw = self.font_title.measure(cnt_text)
+                    except Exception:
+                        tw = 120
+                    c.create_image(count_right - tw - 14 - icon_size,
+                                   y + card_h // 2 - icon_size // 2,
+                                   image=tk_icon, anchor="nw")
 
                 self._click_zones.append(
                     (26, y, 26 + card_w, y + card_h,
@@ -2509,6 +2557,29 @@ class DoseApp:
         self.root.after(1000, self._tick_clock)
 
     # ── Dose-time notification ─────────────────────────────────────────────
+    def _dose_status(self, key, time_str):
+        """Status of one scheduled dose today: 'taken' if dispensed in
+        its window (15 min early to 60 min late), 'missed' once the
+        window has passed without a proper dispense, None if upcoming."""
+        now = datetime.now()
+        h, m = _parse_time12(time_str)
+        sched = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        for ev in self.adherence.get("events", []):
+            if ev.get("key") != key:
+                continue
+            try:
+                tdt = datetime.fromisoformat(ev["time"])
+            except Exception:
+                continue
+            if tdt.date() != now.date():
+                continue
+            delta = (tdt - sched).total_seconds() / 60
+            if -15 <= delta <= 60:
+                return "taken"
+        if (now - sched).total_seconds() / 60 > 60:
+            return "missed"
+        return None
+
     def _dose_due_map(self):
         """Doses due right now: scheduled time has arrived (up to 60 min
         ago) today and no dispense has been logged for it yet."""
