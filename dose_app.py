@@ -17,7 +17,7 @@ import threading
 import subprocess
 import tkinter as tk
 import tkinter.font as tkfont
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.request import urlopen
 from urllib.error import URLError
 
@@ -125,6 +125,58 @@ KNOWN_SLOTS = {
     "green": "Metformin",
     "yellow": "Atorvastatin",
 }
+
+# Real-world guidance for the demo medications (per common prescribing info)
+MED_INFO = {
+    "sertraline": [
+        "Antidepressant (SSRI)",
+        "Take with a full glass of water",
+        "With or without food — keep a consistent time",
+    ],
+    "lisinopril": [
+        "Blood pressure (ACE inhibitor)",
+        "With or without food, plus water",
+        "Stand up slowly — can cause dizziness",
+    ],
+    "metformin": [
+        "Type 2 diabetes",
+        "Take WITH a meal to protect your stomach",
+        "Swallow whole with a glass of water",
+    ],
+    "atorvastatin": [
+        "Cholesterol (statin)",
+        "With or without food, plus water",
+        "Avoid grapefruit juice",
+    ],
+}
+MED_INFO_DEFAULT = ["Follow the directions on your prescription label"]
+
+
+def _parse_time12(s):
+    """'8:05 PM' -> (20, 5). Falls back to 8:00 AM."""
+    try:
+        dt = datetime.strptime(s.strip(), "%I:%M %p")
+        return dt.hour, dt.minute
+    except Exception:
+        return 8, 0
+
+
+def _fmt_time12(h24, m):
+    """(20, 5) -> '8:05 PM'"""
+    ap = "AM" if h24 < 12 else "PM"
+    h = h24 % 12
+    if h == 0:
+        h = 12
+    return f"{h}:{m:02d} {ap}"
+
+
+def _day_part(hour):
+    """Rough part of day: morning / midday / evening."""
+    if 5 <= hour < 12:
+        return "morning"
+    if 12 <= hour < 17:
+        return "midday"
+    return "evening"
 
 KEYBOARD_ROWS = [
     list("QWERTYUIOP"),
@@ -264,6 +316,48 @@ def _pil_spinner(size, angle, scale=2):
     b1 = (tx + hw * math.cos(perp), ty + hw * math.sin(perp))
     b2 = (tx - hw * math.cos(perp), ty - hw * math.sin(perp))
     d.polygon([b1, b2, (tipx, tipy)], fill=lt)
+    resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
+    return img.resize((size, size), resample)
+
+
+def _pil_battery(w, h, frac, fill_color, track_color, scale=2):
+    """Battery-style meter: rounded body + tip, filled by frac (0-1)."""
+    sw, sh = w * scale, h * scale
+    img = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    tip_w = 10 * scale
+    body_w = sw - tip_w - 4 * scale
+    rad = 14 * scale
+    d.rounded_rectangle([0, 0, body_w, sh - 1], radius=rad,
+                        fill=_hex_to_rgba(track_color))
+    # Tip
+    tip_h = sh // 3
+    d.rounded_rectangle([body_w + 2 * scale, (sh - tip_h) // 2,
+                         sw - 1, (sh + tip_h) // 2],
+                        radius=4 * scale, fill=_hex_to_rgba(track_color))
+    # Fill
+    pad = 5 * scale
+    fill_w = int((body_w - 2 * pad) * max(0.0, min(frac, 1.0)))
+    if fill_w > rad:
+        d.rounded_rectangle([pad, pad, pad + fill_w, sh - 1 - pad],
+                            radius=rad - 4 * scale,
+                            fill=_hex_to_rgba(fill_color))
+    resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
+    return img.resize((w, h), resample)
+
+
+def _pil_clock_icon(size, color, scale=2):
+    """Small clock face: circle outline + hour/minute hands."""
+    ss = size * scale
+    img = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    col = _hex_to_rgba(color)
+    lw = max(2, 2 * scale)
+    pad = lw
+    d.ellipse([pad, pad, ss - 1 - pad, ss - 1 - pad], outline=col, width=lw)
+    cx = cy = ss / 2
+    d.line([cx, cy, cx, cy - ss * 0.28], fill=col, width=lw)       # minute
+    d.line([cx, cy, cx + ss * 0.20, cy + ss * 0.06], fill=col, width=lw)  # hour
     resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
     return img.resize((size, size), resample)
 
@@ -591,6 +685,19 @@ class DoseApp:
             "doses": [2], "times_per_day": 1,
             "schedule_days": list(ALL_DAYS),
         }
+        for md in self.med_data.values():
+            self._ensure_dose_times(md)
+
+    @staticmethod
+    def _ensure_dose_times(md):
+        """Migrate hour-preset indices to minute-precision time strings."""
+        if not md.get("dose_times"):
+            md["dose_times"] = [
+                TIME_PRESETS[i] if 0 <= i < len(TIME_PRESETS) else "8:00 AM"
+                for i in md.get("doses", [2])
+            ]
+        if not md.get("tracking_since"):
+            md["tracking_since"] = datetime.now().isoformat()
 
     def _save_med(self):
         save_copy = {k: v for k, v in self.med_data.items() if k != "demo"}
@@ -672,6 +779,8 @@ class DoseApp:
             self._draw_dispensed(c)
         elif self.mode == "qtyconfirm":
             self._draw_qty_confirm(c)
+        elif self.mode == "timeedit":
+            self._draw_time_edit(c)
 
     # ══════════════════════════════════════════════════════════════════════
     #  NAVIGATION RAIL — spread out, Home at bottom
@@ -685,7 +794,7 @@ class DoseApp:
 
         active = self.mode
         if active in ("hold", "spin", "confirmdisp", "dispensed",
-                      "qtyconfirm", "addmed"):
+                      "qtyconfirm", "addmed", "timeedit"):
             active = self._prev_mode
 
         # Spread buttons: User at top, Storage, Settings spaced, Home at bottom
@@ -904,9 +1013,8 @@ class DoseApp:
             days = md.get("schedule_days", ALL_DAYS)
             if today_name not in days:
                 continue
-            dose_indices = md.get("doses", [2])
-            for di, dose_idx in enumerate(dose_indices):
-                time_str = TIME_PRESETS[dose_idx] if 0 <= dose_idx < len(TIME_PRESETS) else "8:00 AM"
+            self._ensure_dose_times(md)
+            for di, time_str in enumerate(md["dose_times"]):
                 try:
                     t_obj = datetime.strptime(time_str, "%I:%M %p").replace(
                         year=now.year, month=now.month, day=now.day)
@@ -1002,60 +1110,30 @@ class DoseApp:
                       font=self.font_body, fill=t["muted"], anchor="nw")
         c.create_line(px, 104, 630, 104, fill=t["divider"])
 
-        doses = md.get("doses", [2])
-        c.create_text(px, 116, text=f"SCHEDULE ({len(doses)}x DAILY)",
+        self._ensure_dose_times(md)
+
+        # SCHEDULE header + small clock button (expands to a big editor)
+        c.create_text(px, 116, text="SCHEDULE",
                       font=self.font_label, fill=t["muted"], anchor="nw")
+        clk_size = 36
+        clk_x, clk_y = 594, 108
+        clk_bg = _pil_rounded_rect(clk_size, clk_size, 10, t["elevated_bg"])
+        tk_clk_bg = self._get_tk_image("sched_clk_bg", clk_bg)
+        c.create_image(clk_x, clk_y, image=tk_clk_bg, anchor="nw")
+        clk_icon = _pil_clock_icon(20, t["fg"])
+        tk_clk = self._get_tk_image("sched_clk", clk_icon)
+        c.create_image(clk_x + 8, clk_y + 8, image=tk_clk, anchor="nw")
+        self._click_zones.append(
+            (clk_x - 6, clk_y - 6, clk_x + clk_size + 6, clk_y + clk_size + 6,
+             self._open_time_edit))
 
-        # Dose chips — wider panel means we can fit larger chips
-        num_doses = len(doses)
-        avail_w = 370
-        chip_gap = 10
-        chip_w = min(170, (avail_w - chip_gap * (num_doses - 1)) // max(1, num_doses))
-        chip_h = 70
-
-        chip_x = px
-        chip_y = 140
-        for i, dose_idx in enumerate(doses):
-            ts = TIME_PRESETS[dose_idx] if 0 <= dose_idx < len(TIME_PRESETS) else "8:00 AM"
-            chip_img = _pil_rounded_rect(chip_w, chip_h, 14, t["elevated_bg"])
-            tk_chip = self._get_tk_image(f"dose_chip_{i}", chip_img)
-            c.create_image(chip_x, chip_y, image=tk_chip, anchor="nw")
-
-            c.create_text(chip_x + chip_w // 2, chip_y + 16,
-                          text=f"DOSE {i + 1}",
-                          font=self.font_dose_label, fill=t["muted"],
-                          anchor="center")
-            c.create_text(chip_x + chip_w // 2, chip_y + 44,
-                          text=ts, font=self.font_dose_time,
-                          fill=t["fg"], anchor="center")
-
-            # Prev arrow
-            arr_y = chip_y + 44
-            prev_img = _pil_rounded_rect(28, 28, 10, t["card_bg"])
-            tk_prev = self._get_tk_image(f"dose_prev_{i}", prev_img)
-            c.create_image(chip_x + 6, arr_y - 14, image=tk_prev, anchor="nw")
-            c.create_text(chip_x + 20, arr_y, text="‹",
-                          font=self.font_body_bold, fill=t["fg"],
-                          anchor="center")
-            self._click_zones.append(
-                (chip_x + 6, arr_y - 14, chip_x + 34, arr_y + 14,
-                 lambda idx=i: self._adj_dose_time(idx, -1)))
-
-            # Next arrow
-            nx = chip_x + chip_w - 34
-            tk_next = self._get_tk_image(f"dose_next_{i}", prev_img)
-            c.create_image(nx, arr_y - 14, image=tk_next, anchor="nw")
-            c.create_text(nx + 14, arr_y, text="›",
-                          font=self.font_body_bold, fill=t["fg"],
-                          anchor="center")
-            self._click_zones.append(
-                (nx, arr_y - 14, nx + 28, arr_y + 14,
-                 lambda idx=i: self._adj_dose_time(idx, 1)))
-
-            chip_x += chip_w + chip_gap
+        # Schedule in plain words, e.g. "Take at 7:00 PM on Sat & Sun"
+        c.create_text(px, 140, text=self._schedule_sentence(md),
+                      font=self.font_body, fill=t["fg"], anchor="nw",
+                      width=350)
 
         # DAYS
-        days_y = chip_y + chip_h + 20
+        days_y = 186
         c.create_text(px, days_y, text="DAYS",
                       font=self.font_label, fill=t["muted"], anchor="nw")
 
@@ -1079,8 +1157,21 @@ class DoseApp:
                  lambda d=day_name: self._toggle_day(d)))
             dx += 52
 
-        # DISPENSE button — sits near bottom of card
-        disp_y = day_y + 54
+        # MEDICATION INFO — real guidance for the loaded drug
+        info_y = day_y + 52
+        c.create_text(px, info_y, text="MEDICATION INFO",
+                      font=self.font_label, fill=t["muted"], anchor="nw")
+        info_lines = MED_INFO.get(md.get("name", "").strip().lower(),
+                                  MED_INFO_DEFAULT)
+        ly = info_y + 24
+        for line in info_lines[:3]:
+            c.create_text(px, ly, text="·  " + line,
+                          font=self.font_small, fill=t["fg"], anchor="nw",
+                          width=354)
+            ly += 26
+
+        # DISPENSE button — pinned to the bottom of the card
+        disp_y = 396
         disp_w = 370
         disp_h = 52
         disp_bg = accent if cnt > 0 else t["btn_bg"]
@@ -1113,18 +1204,166 @@ class DoseApp:
         self._save_med()
         self._draw_frame()
 
-    def _adj_dose_time(self, dose_idx, delta):
-        key = self.selected_pill
-        md = self.med_data[key]
-        doses = md.get("doses", [2])
-        if dose_idx < len(doses):
-            n = len(TIME_PRESETS)
-            doses[dose_idx] = (doses[dose_idx] + delta + n) % n
-            md["doses"] = doses
-            if doses:
-                md["schedule_time"] = TIME_PRESETS[doses[0]]
-            self._save_med()
+    def _schedule_sentence(self, md):
+        """Schedule in plain words: 'Take at 7:00 PM on Sat & Sun'."""
+        self._ensure_dose_times(md)
+        times = md["dose_times"]
+        if len(times) == 1:
+            time_part = times[0]
+        else:
+            time_part = " & ".join(times) if len(times) == 2 else \
+                ", ".join(times[:-1]) + " & " + times[-1]
+
+        days = md.get("schedule_days", list(ALL_DAYS))
+        if len(days) >= 7:
+            day_part = "every day"
+        elif sorted(days) == sorted(["Mon", "Tue", "Wed", "Thu", "Fri"]):
+            day_part = "on weekdays"
+        elif sorted(days) == sorted(["Sat", "Sun"]):
+            day_part = "on weekends"
+        elif not days:
+            day_part = "(no days selected)"
+        else:
+            ordered = [d for d in ALL_DAYS if d in days]
+            day_part = "on " + (" & ".join(ordered) if len(ordered) <= 2
+                                else ", ".join(ordered[:-1]) + " & " + ordered[-1])
+        return f"Take at {time_part} {day_part}"
+
+    # ── Big time editor (opened from the small clock button) ──────────────
+    def _open_time_edit(self):
+        md = self.med_data[self.selected_pill]
+        self._ensure_dose_times(md)
+        self._te_times = [list(_parse_time12(ts)) for ts in md["dose_times"]]
+        self._prev_mode = self.mode
+        self.mode = "timeedit"
+        self._draw_frame()
+
+    def _draw_time_edit(self, c):
+        t = self.theme
+        md = self.med_data[self.selected_pill]
+        accent = SLOT_COLORS.get(self.selected_pill, "#C084FC")
+
+        card_img = _pil_rounded_rect(620, 440, 22, t["card_bg"])
+        tk_card = self._get_tk_image("te_card", card_img)
+        c.create_image(26, 20, image=tk_card, anchor="nw")
+
+        c.create_text(56, 52, text="EDIT SCHEDULE",
+                      font=self.font_label, fill=t["muted"], anchor="nw")
+        c.create_text(616, 52, text=md["name"],
+                      font=self.font_title, fill=accent, anchor="ne")
+
+        n = len(self._te_times)
+        row_h = 92
+        top = 92
+        btn = 56  # touch-friendly stepper buttons
+
+        for i, (h24, mi) in enumerate(self._te_times):
+            ry = top + i * row_h
+            cy = ry + row_h // 2 - 6
+
+            # hour steppers
+            for j, (sym, dh) in enumerate((("−", -1), ("+", 1))):
+                bx = 56 + j * (btn + 8)
+                b_img = _pil_rounded_rect(btn, btn, 14, t["elevated_bg"])
+                tk_b = self._get_tk_image(f"te_h{j}_{i}", b_img)
+                c.create_image(bx, cy - btn // 2, image=tk_b, anchor="nw")
+                c.create_text(bx + btn // 2, cy, text=sym,
+                              font=self.font_count, fill=t["fg"],
+                              anchor="center")
+                self._click_zones.append(
+                    (bx, cy - btn // 2, bx + btn, cy + btn // 2,
+                     lambda idx=i, d=dh: self._te_adj(idx, "h", d)))
+            c.create_text(56 + btn + 4, cy + btn // 2 + 12, text="HOUR",
+                          font=self.font_tiny, fill=t["muted"],
+                          anchor="center")
+
+            # big time readout
+            c.create_text(336, cy, text=_fmt_time12(h24, mi),
+                          font=self.font_hold_big, fill=t["fg"],
+                          anchor="center")
+
+            # minute steppers (5-minute steps)
+            for j, (sym, dm) in enumerate((("−", -5), ("+", 5))):
+                bx = 480 + j * (btn + 8)
+                b_img = _pil_rounded_rect(btn, btn, 14, t["elevated_bg"])
+                tk_b = self._get_tk_image(f"te_m{j}_{i}", b_img)
+                c.create_image(bx, cy - btn // 2, image=tk_b, anchor="nw")
+                c.create_text(bx + btn // 2, cy, text=sym,
+                              font=self.font_count, fill=t["fg"],
+                              anchor="center")
+                self._click_zones.append(
+                    (bx, cy - btn // 2, bx + btn, cy + btn // 2,
+                     lambda idx=i, d=dm: self._te_adj(idx, "m", d)))
+            c.create_text(480 + btn + 4, cy + btn // 2 + 12, text="MIN",
+                          font=self.font_tiny, fill=t["muted"],
+                          anchor="center")
+
+            # remove row (only when more than one dose)
+            if n > 1:
+                rx = 608
+                r_img = _pil_rounded_rect(28, 28, 9, t["elevated_bg"])
+                tk_r = self._get_tk_image(f"te_x_{i}", r_img)
+                c.create_image(rx, cy - 14, image=tk_r, anchor="nw")
+                c.create_text(rx + 14, cy, text="✕",
+                              font=self.font_small_bold, fill="#FF6B6B",
+                              anchor="center")
+                self._click_zones.append(
+                    (rx - 4, cy - 18, rx + 32, cy + 18,
+                     lambda idx=i: self._te_remove(idx)))
+
+        # + ADD TIME (up to 3 doses per day)
+        y_btns = 396
+        if n < 3:
+            add_w = 180
+            add_img = _pil_rounded_rect(add_w, 52, 14, t["elevated_bg"])
+            tk_add = self._get_tk_image("te_add", add_img)
+            c.create_image(56, y_btns, image=tk_add, anchor="nw")
+            c.create_text(56 + add_w // 2, y_btns + 26, text="+ ADD TIME",
+                          font=self.font_btn, fill=t["fg"], anchor="center")
+            self._click_zones.append(
+                (56, y_btns, 56 + add_w, y_btns + 52, self._te_add))
+
+        done_w = 180
+        done_img = _pil_rounded_rect(done_w, 52, 14, DOSE_BLUE)
+        tk_done = self._get_tk_image("te_done", done_img)
+        c.create_image(616 - done_w, y_btns, image=tk_done, anchor="nw")
+        c.create_text(616 - done_w // 2, y_btns + 26, text="DONE",
+                      font=self.font_btn, fill="#06101E", anchor="center")
+        self._click_zones.append(
+            (616 - done_w, y_btns, 616, y_btns + 52, self._te_done))
+
+    def _te_adj(self, idx, field, delta):
+        if idx >= len(self._te_times):
+            return
+        h, m = self._te_times[idx]
+        if field == "h":
+            h = (h + delta) % 24
+        else:
+            m = (m + delta) % 60
+        self._te_times[idx] = [h, m]
+        self._draw_frame()
+
+    def _te_add(self):
+        if len(self._te_times) < 3:
+            last = self._te_times[-1]
+            self._te_times.append([(last[0] + 6) % 24, last[1]])
             self._draw_frame()
+
+    def _te_remove(self, idx):
+        if len(self._te_times) > 1 and idx < len(self._te_times):
+            self._te_times.pop(idx)
+            self._draw_frame()
+
+    def _te_done(self):
+        md = self.med_data[self.selected_pill]
+        times = sorted(self._te_times,
+                       key=lambda hm: hm[0] * 60 + hm[1])
+        md["dose_times"] = [_fmt_time12(h, m) for h, m in times]
+        md["times_per_day"] = len(md["dose_times"])
+        md["schedule_time"] = md["dose_times"][0]
+        self._save_med()
+        self.mode = self._prev_mode
+        self._draw_frame()
 
     # ══════════════════════════════════════════════════════════════════════
     #  SETTINGS SCREEN
@@ -1327,10 +1566,109 @@ class DoseApp:
     # ══════════════════════════════════════════════════════════════════════
     #  USER / ADHERENCE SCREEN
     # ══════════════════════════════════════════════════════════════════════
+    def _classify_dose(self, md, taken_dt):
+        """Classify a dispense against the nearest scheduled dose time.
+        Returns (status, sched_iso).  Statuses:
+          on_time    — within 15 min before to 60 min after schedule
+          late       — more than 60 min after schedule
+          early      — before the window but same part of day (okay)
+          very_early — a whole part of day ahead of schedule
+        """
+        self._ensure_dose_times(md)
+        best, best_diff = None, None
+        for ts in md["dose_times"]:
+            h, m = _parse_time12(ts)
+            sched = taken_dt.replace(hour=h, minute=m,
+                                     second=0, microsecond=0)
+            diff = (taken_dt - sched).total_seconds() / 60
+            if best is None or abs(diff) < abs(best_diff):
+                best, best_diff = sched, diff
+        if best is None:
+            return "on_time", ""
+        if -15 <= best_diff <= 60:
+            status = "on_time"
+        elif best_diff > 60:
+            status = "late"
+        elif _day_part(taken_dt.hour) == _day_part(best.hour):
+            status = "early"
+        else:
+            status = "very_early"
+        return status, best.isoformat()
+
+    def _adherence_stats(self):
+        """Counts + battery score.  Weights: on-time 1.0, early 0.8,
+        very-early 0.5, late 0.5, missed 0."""
+        events = self.adherence.get("events", [])
+        counts = {"on_time": 0, "late": 0, "early": 0, "very_early": 0}
+        weight = {"on_time": 1.0, "early": 0.8, "very_early": 0.5,
+                  "late": 0.5}
+        earned = 0.0
+        for ev in events:
+            status = ev.get("status")
+            if status not in weight:
+                # Legacy event without a status — classify it now
+                try:
+                    taken = datetime.fromisoformat(ev.get("time", ""))
+                    md = self.med_data.get(ev.get("key"))
+                    status = self._classify_dose(md, taken)[0] if md \
+                        else "on_time"
+                except Exception:
+                    status = "on_time"
+            counts[status] += 1
+            earned += weight[status]
+
+        # Missed = scheduled doses (since tracking began, last 30 days)
+        # that passed more than 12h ago with no dispense within the window
+        now = datetime.now()
+        missed = 0
+        for key, md in self.med_data.items():
+            if not md.get("loaded"):
+                continue
+            self._ensure_dose_times(md)
+            try:
+                since = datetime.fromisoformat(md["tracking_since"])
+            except Exception:
+                since = now
+            start_day = max(since.date(),
+                            (now - timedelta(days=30)).date())
+            day = start_day
+            while day <= now.date():
+                dt_day = datetime(day.year, day.month, day.day)
+                if dt_day.strftime("%a") in md.get("schedule_days", ALL_DAYS):
+                    for ts in md["dose_times"]:
+                        h, m = _parse_time12(ts)
+                        sched = dt_day.replace(hour=h, minute=m)
+                        if sched < since or (now - sched).total_seconds() < 12 * 3600:
+                            continue
+                        hit = False
+                        for ev in events:
+                            if ev.get("key") != key:
+                                continue
+                            try:
+                                tdt = datetime.fromisoformat(ev["time"])
+                            except Exception:
+                                continue
+                            if abs((tdt - sched).total_seconds()) <= 12 * 3600:
+                                hit = True
+                                break
+                        if not hit:
+                            missed += 1
+                day = day + timedelta(days=1)
+
+        denom = len(events) + missed
+        score = 100 if denom == 0 else int(round(100 * earned / denom))
+        return {
+            "total": len(events),
+            "on_time": counts["on_time"],
+            "late": counts["late"],
+            "early": counts["early"] + counts["very_early"],
+            "missed": missed,
+            "score": score,
+        }
+
     def _draw_user(self, c):
         t = self.theme
 
-        # Main card — fills content area
         card_img = _pil_rounded_rect(620, 440, 22, t["card_bg"])
         tk_card = self._get_tk_image("user_card", card_img)
         c.create_image(26, 20, image=tk_card, anchor="nw")
@@ -1338,122 +1676,43 @@ class DoseApp:
         c.create_text(56, 52, text="YOUR ADHERENCE",
                       font=self.font_label, fill=t["muted"], anchor="nw")
 
-        # Calculate adherence percentage
-        log = self.adherence
-        total_events = len(log.get("events", []))
-        missed_count = len(log.get("missed", []))
-        late_count = len(log.get("late", []))
-        on_time = max(0, total_events - missed_count - late_count)
+        stats = self._adherence_stats()
 
-        if total_events > 0:
-            pct = int((on_time / total_events) * 100)
-        else:
-            pct = 100
-
-        # Big percentage ring — blue on-theme
-        circle_size = 190
-        circle_x = 72
-        circle_y = 76
-
-        progress = pct / 100.0
-        ring_img = _pil_ring(circle_size, progress, ACCENT_BLUE,
-                             t["elevated_bg"], t["card_bg"])
-        tk_ring = self._get_tk_image("user_ring", ring_img)
-        c.create_image(circle_x, circle_y, image=tk_ring, anchor="nw")
-
-        ring_cx = circle_x + circle_size // 2
-        ring_cy = circle_y + circle_size // 2
-        c.create_text(ring_cx, ring_cy - 10,
-                      text=f"{pct}%", font=self.font_pct,
-                      fill=ACCENT_BLUE, anchor="center")
-        c.create_text(ring_cx, ring_cy + 24,
-                      text="on time", font=self.font_pct_label,
-                      fill=t["muted"], anchor="center")
-
-        # Stats column to the right
-        stats_x = 300
-        stat_items = [
-            ("Total Doses", str(total_events), t["fg"]),
-            ("On Time", str(on_time), ACCENT_BLUE),
-            ("Late", str(late_count), "#FFD60A"),
-            ("Missed", str(missed_count), "#FF6B6B"),
+        # Five count columns
+        cols = [
+            ("TOTAL", stats["total"], t["fg"]),
+            ("ON TIME", stats["on_time"], "#30D158"),
+            ("LATE", stats["late"], "#FFD60A"),
+            ("EARLY", stats["early"], "#FF9F43"),
+            ("MISSED", stats["missed"], "#FF6B6B"),
         ]
+        tile_w, tile_h, gap = 104, 168, 10
+        tx, ty = 56, 84
+        for i, (label, val, color) in enumerate(cols):
+            x = tx + i * (tile_w + gap)
+            tile_img = _pil_rounded_rect(tile_w, tile_h, 16, t["elevated_bg"])
+            tk_tile = self._get_tk_image(f"user_tile_{i}", tile_img)
+            c.create_image(x, ty, image=tk_tile, anchor="nw")
+            c.create_text(x + tile_w // 2, ty + 72, text=str(val),
+                          font=self.font_hold_big, fill=color,
+                          anchor="center")
+            c.create_text(x + tile_w // 2, ty + 132, text=label,
+                          font=self.font_label, fill=t["muted"],
+                          anchor="center")
 
-        for i, (label, val, color) in enumerate(stat_items):
-            sy = 86 + i * 50
-            stat_bg = _pil_rounded_rect(290, 42, 12, t["elevated_bg"])
-            tk_stat = self._get_tk_image(f"user_stat_{i}", stat_bg)
-            c.create_image(stats_x, sy, image=tk_stat, anchor="nw")
-
-            c.create_text(stats_x + 14, sy + 21, text=label,
-                          font=self.font_small, fill=t["muted"], anchor="w")
-            c.create_text(stats_x + 276, sy + 21, text=val,
-                          font=self.font_body_bold, fill=color, anchor="e")
-
-        # Weekly bar chart
-        c.create_text(56, 302, text="LAST 7 DAYS",
+        # Battery-style adherence score
+        score = stats["score"]
+        c.create_text(56, 288, text="ADHERENCE SCORE",
                       font=self.font_label, fill=t["muted"], anchor="nw")
-
-        day_labels_short = ["M", "T", "W", "T", "F", "S", "S"]
-        daily_vals = self._get_weekly_adherence()
-
-        chart_w = 540
-        chart_h = 100
-        chart_x = 56
-        chart_y = 324
-
-        chart_img = _pil_bar_chart(chart_w, chart_h, daily_vals, ACCENT_BLUE,
-                                    t["elevated_bg"], ACCENT_BLUE)
-        tk_chart = self._get_tk_image("user_chart", chart_img)
-        c.create_image(chart_x, chart_y, image=tk_chart, anchor="nw")
-
-        # Day labels — match exact bar center positions from _pil_bar_chart
-        n = 7
-        padding = 16
-        bar_area_w = chart_w - 2 * padding
-        gap = max(2, bar_area_w // (n * 4))
-        bar_w = max(4, (bar_area_w - gap * (n + 1)) // n)
-        for i, dl in enumerate(day_labels_short):
-            bar_x = padding + gap + i * (bar_w + gap)
-            lx = chart_x + bar_x + bar_w // 2
-            c.create_text(lx, chart_y + chart_h + 8, text=dl,
-                          font=self.font_graph_label,
-                          fill=t["muted"], anchor="center")
-
-    def _get_weekly_adherence(self):
-        """Return 7 values (0-100) for Mon-Sun adherence."""
-        log = self.adherence
-        events = log.get("events", [])
-        missed = log.get("missed", [])
-        late = log.get("late", [])
-
-        now = datetime.now()
-        daily = [0] * 7
-        daily_total = [0] * 7
-
-        for ev in events:
-            try:
-                dt = datetime.fromisoformat(ev.get("time", ""))
-                diff = (now - dt).days
-                if 0 <= diff < 7:
-                    dow = dt.weekday()
-                    daily_total[dow] += 1
-                    missed_this = any(
-                        m.get("time") == ev.get("time") and m.get("key") == ev.get("key")
-                        for m in missed
-                    )
-                    if not missed_this:
-                        daily[dow] += 1
-            except Exception:
-                continue
-
-        result = []
-        for i in range(7):
-            if daily_total[i] > 0:
-                result.append(int(100 * daily[i] / daily_total[i]))
-            else:
-                result.append(0)
-        return result
+        batt_x, batt_y, batt_w, batt_h = 56, 314, 410, 96
+        score_color = ("#30D158" if score >= 80
+                       else "#FFD60A" if score >= 50 else "#FF6B6B")
+        batt_img = _pil_battery(batt_w, batt_h, score / 100.0, score_color,
+                                t["elevated_bg"])
+        tk_batt = self._get_tk_image("user_batt", batt_img)
+        c.create_image(batt_x, batt_y, image=tk_batt, anchor="nw")
+        c.create_text(616, batt_y + batt_h // 2, text=f"{score}%",
+                      font=self.font_pct, fill=score_color, anchor="e")
 
     # ══════════════════════════════════════════════════════════════════════
     #  ADD MEDICATION SCREEN (triggered by new/demo QR)
@@ -1785,7 +2044,11 @@ class DoseApp:
         md["loaded"] = True
         md["doses"] = self._draft["doses"][:]
         md["times_per_day"] = self._draft["times_per_day"]
-        md["schedule_time"] = TIME_PRESETS[self._draft["doses"][0]] if self._draft["doses"] else "8:00 AM"
+        md["dose_times"] = [
+            TIME_PRESETS[i] if 0 <= i < len(TIME_PRESETS) else "8:00 AM"
+            for i in self._draft["doses"]] or ["8:00 AM"]
+        md["schedule_time"] = md["dose_times"][0]
+        md["tracking_since"] = datetime.now().isoformat()
         day_map = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu",
                    4: "Fri", 5: "Sat", 6: "Sun"}
         md["schedule_days"] = [day_map[i] for i in range(7)
@@ -2023,24 +2286,14 @@ class DoseApp:
             md["count"] -= 1
         self._save_med()
 
-        # Log adherence event
+        # Log adherence event, classified against the nearest scheduled dose
         now = datetime.now()
+        status, sched_iso = self._classify_dose(md, now)
         self.adherence.setdefault("events", []).append({
             "key": key, "name": md["name"],
             "time": now.isoformat(),
+            "sched": sched_iso, "status": status,
         })
-        sched_time_str = md.get("schedule_time", "8:00 AM")
-        try:
-            sched_dt = datetime.strptime(sched_time_str, "%I:%M %p").replace(
-                year=now.year, month=now.month, day=now.day)
-            diff_min = abs((now - sched_dt).total_seconds()) / 60
-            if diff_min > 60:
-                self.adherence.setdefault("late", []).append({
-                    "key": key, "name": md["name"],
-                    "time": now.isoformat(),
-                })
-        except Exception:
-            pass
         _save_adherence_log(self.adherence)
 
         self.dispense_state = 4
