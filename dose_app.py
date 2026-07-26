@@ -68,6 +68,7 @@ SCREEN_H = 480
 RAIL_W = 128
 CONTENT_W = SCREEN_W - RAIL_W  # 672
 HOLD_TIME = 3.0
+SPIN_TIME = 4.0
 DISPENSED_TIME = 4.0
 DEFAULT_QTY = 30
 QR_PRESENCE_TIMEOUT = 15.0
@@ -197,6 +198,25 @@ def _pil_ring(size, progress, accent, bg_color, inner_color, scale=2):
     inner_pad = ring_w
     d.ellipse([inner_pad, inner_pad, ss - 1 - inner_pad, ss - 1 - inner_pad],
               fill=ic)
+    resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
+    return img.resize((size, size), resample)
+
+
+def _pil_spinner(size, angle, accent, bg_color, inner_color, scale=2):
+    """Rotating arc ring for the SPIN TO DISPENSE animation."""
+    ss = size * scale
+    img = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    ring_w = 14 * scale
+    d.ellipse([0, 0, ss - 1, ss - 1], fill=_hex_to_rgba(bg_color))
+    ac = _hex_to_rgba(accent)
+    # Main sweeping arc + fading trail
+    d.pieslice([0, 0, ss - 1, ss - 1], angle, angle + 110, fill=ac)
+    trail = (ac[0], ac[1], ac[2], 90)
+    d.pieslice([0, 0, ss - 1, ss - 1], angle - 50, angle, fill=trail)
+    inner_pad = ring_w
+    d.ellipse([inner_pad, inner_pad, ss - 1 - inner_pad, ss - 1 - inner_pad],
+              fill=_hex_to_rgba(inner_color))
     resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
     return img.resize((size, size), resample)
 
@@ -389,6 +409,8 @@ class DoseApp:
         self.dispense_pill = None
         self.hold_start = 0
         self.hold_after_id = None
+        self.spin_start = 0
+        self.spin_after_id = None
         self.camera = None
         self.camera_running = False
         self.mpr = None
@@ -575,6 +597,10 @@ class DoseApp:
             self._draw_camview(c)
         elif self.mode == "hold":
             self._draw_hold(c)
+        elif self.mode == "spin":
+            self._draw_spin(c)
+        elif self.mode == "confirmdisp":
+            self._draw_confirm_dispense(c)
         elif self.mode == "dispensed":
             self._draw_dispensed(c)
         elif self.mode == "qtyconfirm":
@@ -591,7 +617,8 @@ class DoseApp:
         c.create_line(rx, 0, rx, SCREEN_H, fill=t["divider"])
 
         active = self.mode
-        if active in ("hold", "dispensed", "qtyconfirm", "addmed"):
+        if active in ("hold", "spin", "confirmdisp", "dispensed",
+                      "qtyconfirm", "addmed"):
             active = self._prev_mode
 
         # Spread buttons: User at top, Storage, Settings spaced, Home at bottom
@@ -760,14 +787,14 @@ class DoseApp:
                 tk_card = self._get_tk_image(f"home_card_{i}", card_img)
                 c.create_image(26, y, image=tk_card, anchor="nw")
 
-                # Bigger accent dot
-                dot_size = min(52, card_h - 20)
-                dot_img = _pil_rounded_rect(dot_size, dot_size, 16, entry["accent"])
-                tk_dot = self._get_tk_image(f"home_dot_{i}", dot_img)
-                c.create_image(44, y + (card_h - dot_size) // 2,
-                               image=tk_dot, anchor="nw")
+                # Slim accent bar on the left edge of the card
+                bar_h = card_h - 28
+                bar_img = _pil_rounded_rect(6, bar_h, 3, entry["accent"])
+                tk_bar = self._get_tk_image(f"home_bar_{i}", bar_img)
+                c.create_image(44, y + (card_h - bar_h) // 2,
+                               image=tk_bar, anchor="nw")
 
-                text_x = 44 + dot_size + 16
+                text_x = 44 + 6 + 20
                 c.create_text(text_x, y + card_h // 2 - 14, text=entry["time"],
                               font=self.font_name, fill=t["fg"], anchor="w")
                 c.create_text(text_x, y + card_h // 2 + 12, text=entry["name"],
@@ -1729,7 +1756,7 @@ class DoseApp:
         accent = SLOT_COLORS.get(self.dispense_pill, "#C084FC")
         cx = CONTENT_W // 2
 
-        c.create_text(cx, 70, text="HOLD SCREEN TO DISPENSE",
+        c.create_text(cx, 70, text="HOLD TO CONFIRM DISPENSE",
                       font=self.font_label, fill=t["muted"], anchor="center")
         c.create_text(cx, 96, text=md["name"],
                       font=self.font_name_lg, fill=accent, anchor="center")
@@ -1773,9 +1800,13 @@ class DoseApp:
         self.dispense_state = 0
         self.dispense_pill = None
         self.hold_start = 0
+        self.spin_start = 0
         if self.hold_after_id:
             self.root.after_cancel(self.hold_after_id)
             self.hold_after_id = None
+        if self.spin_after_id:
+            self.root.after_cancel(self.spin_after_id)
+            self.spin_after_id = None
         self.mode = self._prev_mode
         self._draw_frame()
 
@@ -1783,9 +1814,13 @@ class DoseApp:
         self.dispense_state = 0
         self.dispense_pill = None
         self.hold_start = 0
+        self.spin_start = 0
         if self.hold_after_id:
             self.root.after_cancel(self.hold_after_id)
             self.hold_after_id = None
+        if self.spin_after_id:
+            self.root.after_cancel(self.spin_after_id)
+            self.spin_after_id = None
         self.mode = self._prev_mode
         self._draw_frame()
 
@@ -1821,10 +1856,107 @@ class DoseApp:
 
         if elapsed >= HOLD_TIME:
             self.hold_start = 0
-            self._confirm_dispense()
+            self._start_spin()
             return
 
         self.hold_after_id = self.root.after(50, self._hold_update)
+
+    # ── SPIN TO DISPENSE stage — user manually spins the spindle ──────────
+    def _start_spin(self):
+        self.mode = "spin"
+        self.spin_start = time.time()
+        self._draw_frame()
+        self._spin_update()
+
+    def _spin_update(self):
+        if self.mode != "spin":
+            return
+        elapsed = time.time() - self.spin_start
+        self._draw_frame()
+        if elapsed >= SPIN_TIME:
+            self.spin_after_id = None
+            self.mode = "confirmdisp"
+            self._draw_frame()
+            return
+        self.spin_after_id = self.root.after(50, self._spin_update)
+
+    def _draw_spin(self, c):
+        t = self.theme
+        md = self.med_data[self.dispense_pill]
+        accent = SLOT_COLORS.get(self.dispense_pill, "#C084FC")
+        cx = CONTENT_W // 2
+
+        c.create_text(cx, 70, text="SPIN TO DISPENSE",
+                      font=self.font_label, fill=t["muted"], anchor="center")
+        c.create_text(cx, 96, text=md["name"],
+                      font=self.font_name_lg, fill=accent, anchor="center")
+        c.create_text(cx, 132, text="Turn the spindle until your dose drops",
+                      font=self.font_body, fill=t["muted"], anchor="center")
+
+        elapsed = time.time() - self.spin_start
+        angle = (elapsed * 240) % 360  # smooth continuous rotation
+
+        ring_size = 200
+        spin_img = _pil_spinner(ring_size, angle, accent,
+                                t["elevated_bg"], t["card_bg"])
+        tk_spin = self._get_tk_image("spin_ring", spin_img)
+        ring_x = cx - ring_size // 2
+        ring_y = 168
+        c.create_image(ring_x, ring_y, image=tk_spin, anchor="nw")
+
+        c.create_text(cx, ring_y + ring_size // 2,
+                      text="SPIN", font=self.font_hold_big,
+                      fill=t["fg"], anchor="center")
+
+        cancel_w, cancel_h = 160, 52
+        cancel_img = _pil_rounded_rect(cancel_w, cancel_h, 16, t["elevated_bg"])
+        tk_cancel = self._get_tk_image("spin_cancel", cancel_img)
+        cancel_x = cx - cancel_w // 2
+        cancel_y = 388
+        c.create_image(cancel_x, cancel_y, image=tk_cancel, anchor="nw")
+        c.create_text(cx, cancel_y + cancel_h // 2, text="Cancel",
+                      font=self.font_body_bold, fill=t["fg"], anchor="center")
+        self._click_zones.append(
+            (cancel_x, cancel_y, cancel_x + cancel_w, cancel_y + cancel_h,
+             self._cancel_hold))
+
+    # ── Final confirmation after the spindle has been spun ────────────────
+    def _draw_confirm_dispense(self, c):
+        t = self.theme
+        md = self.med_data[self.dispense_pill]
+        accent = SLOT_COLORS.get(self.dispense_pill, "#C084FC")
+        cx = CONTENT_W // 2
+
+        c.create_text(cx, 90, text="DOSE READY",
+                      font=self.font_label, fill=t["muted"], anchor="center")
+        c.create_text(cx, 118, text=md["name"],
+                      font=self.font_name_lg, fill=accent, anchor="center")
+        c.create_text(cx, 156, text="Did your dose drop? Confirm to log it.",
+                      font=self.font_body, fill=t["muted"], anchor="center")
+
+        btn_w, btn_h = 380, 72
+        btn_img = _pil_rounded_rect(btn_w, btn_h, 20, accent)
+        tk_btn = self._get_tk_image("confirm_btn", btn_img)
+        btn_x = cx - btn_w // 2
+        btn_y = 220
+        c.create_image(btn_x, btn_y, image=tk_btn, anchor="nw")
+        c.create_text(cx, btn_y + btn_h // 2, text="CONFIRM DISPENSE",
+                      font=self.font_name, fill="#FFFFFF", anchor="center")
+        self._click_zones.append(
+            (btn_x, btn_y, btn_x + btn_w, btn_y + btn_h,
+             self._confirm_dispense))
+
+        cancel_w, cancel_h = 160, 52
+        cancel_img = _pil_rounded_rect(cancel_w, cancel_h, 16, t["elevated_bg"])
+        tk_cancel = self._get_tk_image("confirm_cancel", cancel_img)
+        cancel_x = cx - cancel_w // 2
+        cancel_y = 388
+        c.create_image(cancel_x, cancel_y, image=tk_cancel, anchor="nw")
+        c.create_text(cx, cancel_y + cancel_h // 2, text="Cancel",
+                      font=self.font_body_bold, fill=t["fg"], anchor="center")
+        self._click_zones.append(
+            (cancel_x, cancel_y, cancel_x + cancel_w, cancel_y + cancel_h,
+             self._cancel_hold))
 
     def _confirm_dispense(self):
         key = self.dispense_pill
