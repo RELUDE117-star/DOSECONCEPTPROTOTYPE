@@ -566,6 +566,8 @@ class DoseApp:
         self.font_update_btn = tkfont.Font(family=f_xb, size=13, weight="bold")
         self.font_pct = tkfont.Font(family=f_xb, size=48, weight="bold")
         self.font_time_big = tkfont.Font(family=f_xb, size=60, weight="bold")
+        self.font_time_huge = tkfont.Font(family=f_xb, size=66, weight="bold")
+        self.font_day_lg = tkfont.Font(family=f_b, size=15, weight="bold")
         self.font_pct_label = tkfont.Font(family=f_r, size=14)
         self.font_graph_label = tkfont.Font(family=f_r, size=10)
         self.font_kbd = tkfont.Font(family=f_b, size=14, weight="bold")
@@ -1329,38 +1331,65 @@ class DoseApp:
         tk_card = self._get_tk_image("te_card", card_img)
         c.create_image(26, 20, image=tk_card, anchor="nw")
 
-        c.create_text(56, 52, text="EDIT SCHEDULE",
-                      font=self.font_label, fill=t["muted"], anchor="nw")
-        c.create_text(616, 52,
-                      text=self._fit_text(title_name, self.font_title, 300),
-                      font=self.font_title, fill=accent, anchor="ne")
-
         n = len(self._te_times)
         if self._te_sel >= n:
             self._te_sel = n - 1
         sel = self._te_sel
 
-        # Time tabs — edit one time at a time; tap a tab to switch
-        tab_w, tab_h, tab_gap = 128, 44, 8
-        tx, ty = 56, 78
+        # ── Top bar: label left, medication name centered, DONE right ──
+        c.create_text(56, 58, text="SCHEDULE",
+                      font=self.font_label, fill=t["muted"], anchor="w")
+        c.create_text(336, 58,
+                      text=self._fit_text(title_name, self.font_title, 250),
+                      font=self.font_title, fill=accent, anchor="center")
+        done_w, done_h = 110, 44
+        done_x, done_y = 616 - done_w, 36
+        done_img = _pil_rounded_rect(done_w, done_h, done_h // 2, DOSE_BLUE)
+        tk_done = self._get_tk_image("te_done", done_img)
+        c.create_image(done_x, done_y, image=tk_done, anchor="nw")
+        c.create_text(done_x + done_w // 2, done_y + done_h // 2,
+                      text="DONE", font=self.font_btn, fill="#06101E",
+                      anchor="center")
+        self._click_zones.append(
+            (done_x, done_y, done_x + done_w, done_y + done_h,
+             self._te_done))
+
+        # ── Time chips with iOS-style red X badges on top-right ──
+        tab_w, tab_h, tab_gap = 158, 56, 16
+        total = n * tab_w + (n - 1) * tab_gap + (tab_h + tab_gap if n < 3
+                                                 else 0)
+        tx = max(56, (26 + 646 - total) // 2)
+        ty = 102
+        badge = 26
         for i, (h24, mi) in enumerate(self._te_times):
             active = (i == sel)
             tbg = DOSE_BLUE if active else t["elevated_bg"]
-            tfg = "#06101E" if active else t["muted"]
-            tab_img = _pil_rounded_rect(tab_w, tab_h, 12, tbg)
+            tfg = "#06101E" if active else t["fg"]
+            tab_img = _pil_rounded_rect(tab_w, tab_h, 16, tbg)
             tk_tab = self._get_tk_image(f"te_tab_{i}", tab_img)
             c.create_image(tx, ty, image=tk_tab, anchor="nw")
             c.create_text(tx + tab_w // 2, ty + tab_h // 2,
                           text=_fmt_time12(h24, mi),
-                          font=self.font_body_bold, fill=tfg,
+                          font=self.font_title, fill=tfg,
                           anchor="center")
             self._click_zones.append(
                 (tx, ty, tx + tab_w, ty + tab_h,
                  lambda idx=i: self._te_select(idx)))
+
+            if n > 1:
+                # red circled X badge, overlapping the top-right corner
+                bx = tx + tab_w - badge // 2 - 6
+                by = ty - badge // 2 + 6
+                b_img = _pil_status_icon(badge, "missed")
+                tk_b = self._get_tk_image(f"te_badge_{i}", b_img)
+                c.create_image(bx, by, image=tk_b, anchor="nw")
+                self._click_zones.append(
+                    (bx - 6, by - 6, bx + badge + 6, by + badge + 6,
+                     lambda idx=i: self._te_remove(idx)))
             tx += tab_w + tab_gap
 
         if n < 3:
-            add_img = _pil_rounded_rect(tab_h, tab_h, 12, t["elevated_bg"])
+            add_img = _pil_rounded_rect(tab_h, tab_h, 16, t["elevated_bg"])
             tk_add = self._get_tk_image("te_tab_add", add_img)
             c.create_image(tx, ty, image=tk_add, anchor="nw")
             c.create_text(tx + tab_h // 2, ty + tab_h // 2, text="+",
@@ -1369,91 +1398,68 @@ class DoseApp:
             self._click_zones.append(
                 (tx, ty, tx + tab_h, ty + tab_h, self._te_add))
 
-        # The selected time — big and beautiful
+        # ── Selected time, huge, with a big AM/PM toggle ──
         h24, mi = self._te_times[sel]
         h12 = h24 % 12
         if h12 == 0:
             h12 = 12
-        c.create_text(296, 186, text=f"{h12}:{mi:02d}",
-                      font=self.font_time_big, fill=t["fg"],
+        c.create_text(290, 212, text=f"{h12}:{mi:02d}",
+                      font=self.font_time_huge, fill=t["fg"],
                       anchor="center")
-
-        # AM/PM toggle chip beside the time
         ap = "AM" if h24 < 12 else "PM"
-        ap_w, ap_h = 74, 52
-        ap_x, ap_y = 442, 160
-        ap_img = _pil_rounded_rect(ap_w, ap_h, 14, t["elevated_bg"],
+        ap_w, ap_h = 88, 58
+        ap_x, ap_y = 452, 184
+        ap_img = _pil_rounded_rect(ap_w, ap_h, 16, t["elevated_bg"],
                                    outline=DOSE_BLUE, outline_w=2)
         tk_ap = self._get_tk_image("te_ap", ap_img)
         c.create_image(ap_x, ap_y, image=tk_ap, anchor="nw")
         c.create_text(ap_x + ap_w // 2, ap_y + ap_h // 2, text=ap,
-                      font=self.font_btn, fill=DOSE_BLUE, anchor="center")
+                      font=self.font_btn_lg, fill=DOSE_BLUE,
+                      anchor="center")
         self._click_zones.append(
             (ap_x, ap_y, ap_x + ap_w, ap_y + ap_h,
              lambda: self._te_adj(self._te_sel, "h", 12)))
 
-        # Steppers — hour pair on the left, minute pair on the right
-        btn = 64
-        sy = 240
-        for label, x0, field, step in (("HOUR", 140, "h", 1),
-                                       ("MIN", 396, "m", 5)):
+        # ── Big steppers: hour pair left, minute pair right ──
+        btn = 76
+        sy = 262
+        for label, x0, field, step in (("HOUR", 100, "h", 1),
+                                       ("MINUTES", 412, "m", 5)):
             for j, (sym, sign) in enumerate((("−", -1), ("+", 1))):
                 bx = x0 + j * (btn + 8)
-                b_img = _pil_rounded_rect(btn, btn, 16, t["elevated_bg"])
+                b_img = _pil_rounded_rect(btn, btn, 18, t["elevated_bg"])
                 tk_b = self._get_tk_image(f"te_{field}{j}", b_img)
                 c.create_image(bx, sy, image=tk_b, anchor="nw")
                 c.create_text(bx + btn // 2, sy + btn // 2, text=sym,
-                              font=self.font_count, fill=t["fg"],
+                              font=self.font_hold_big, fill=t["fg"],
                               anchor="center")
                 self._click_zones.append(
                     (bx, sy, bx + btn, sy + btn,
                      lambda f=field, s=sign * step:
                      self._te_adj(self._te_sel, f, s)))
-            c.create_text(x0 + btn + 4, sy + btn + 14, text=label,
-                          font=self.font_tiny, fill=t["muted"],
+            c.create_text(x0 + btn + 4, sy + btn + 16, text=label,
+                          font=self.font_label, fill=t["muted"],
                           anchor="center")
 
-        # Day chips — which days this schedule runs on
+        # ── Bigger day chips ──
         flags = self._te_day_flags()
-        chip_w, chip_h, chip_gap = 46, 36, 6
+        chip_w, chip_h, chip_gap = 58, 44, 8
         total_w = 7 * chip_w + 6 * chip_gap
         dx = (26 + 646 - total_w) // 2
-        day_y = 336
+        day_y = 388
         for i, dl in enumerate(DAY_LABELS):
             dbg = accent if flags[i] else t["elevated_bg"]
             dfg = "#0A0A0C" if flags[i] else t["muted"]
-            day_img = _pil_rounded_rect(chip_w, chip_h, 10, dbg)
+            day_img = _pil_rounded_rect(chip_w, chip_h, 12, dbg)
             tk_day = self._get_tk_image(f"te_day_{i}", day_img)
             c.create_image(dx, day_y, image=tk_day, anchor="nw")
             c.create_text(dx + chip_w // 2, day_y + chip_h // 2, text=dl,
-                          font=self.font_day, fill=dfg, anchor="center")
+                          font=self.font_day_lg, fill=dfg, anchor="center")
             self._click_zones.append(
                 (dx, day_y, dx + chip_w, day_y + chip_h,
                  lambda idx=i: self._te_toggle_day(idx)))
             dx += chip_w + chip_gap
 
-        # Bottom row: remove current time (left) + DONE (right)
-        y_btns = 392
-        if n > 1:
-            rem_w = 180
-            rem_img = _pil_rounded_rect(rem_w, 52, 14, t["elevated_bg"])
-            tk_rem = self._get_tk_image("te_remove", rem_img)
-            c.create_image(56, y_btns, image=tk_rem, anchor="nw")
-            c.create_text(56 + rem_w // 2, y_btns + 26, text="REMOVE TIME",
-                          font=self.font_btn, fill="#FF6B6B",
-                          anchor="center")
-            self._click_zones.append(
-                (56, y_btns, 56 + rem_w, y_btns + 52,
-                 lambda: self._te_remove(self._te_sel)))
-
-        done_w = 180
-        done_img = _pil_rounded_rect(done_w, 52, 14, DOSE_BLUE)
-        tk_done = self._get_tk_image("te_done", done_img)
-        c.create_image(616 - done_w, y_btns, image=tk_done, anchor="nw")
-        c.create_text(616 - done_w // 2, y_btns + 26, text="DONE",
-                      font=self.font_btn, fill="#06101E", anchor="center")
-        self._click_zones.append(
-            (616 - done_w, y_btns, 616, y_btns + 52, self._te_done))
 
     def _te_select(self, idx):
         if 0 <= idx < len(self._te_times):
@@ -2772,6 +2778,12 @@ class DoseApp:
         if not self._anim_queue:
             self._anim_running = False
             return
+        # Bottle animations only play over home/storage — never on top of
+        # the editor, keyboard, dispense flow, or alerts
+        if self.mode not in ("home", "storage"):
+            self._anim_queue.clear()
+            self._anim_running = False
+            return
         self._anim_running = True
         slot_key, direction = self._anim_queue.pop(0)
         self._do_bottle_anim(slot_key, direction)
@@ -2879,6 +2891,14 @@ class DoseApp:
         if remote_hash == local_hash:
             if not silent:
                 self.root.after(0, self._update_result, "Up to date")
+            return
+        if silent:
+            # Never auto-overwrite on launch: GitHub's raw CDN can serve a
+            # stale file for ~5 min, which would "update" BACKWARDS and
+            # revert newer local code. Just announce it — applying stays
+            # one tap away on the UPDATE button.
+            self.root.after(0, self._update_result,
+                            "Update available — press UPDATE")
             return
         self.root.after(0, self._apply_update, remote_data)
 
