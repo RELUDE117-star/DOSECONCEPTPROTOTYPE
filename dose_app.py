@@ -3102,7 +3102,7 @@ class DoseApp:
         # that toggled AE) made exposure swing, decodes flicker, and
         # bottles look like they were being removed and replaced.
         locked = False
-        settle_until = time.time() + 2.0
+        settle_until = time.time() + 3.5
         while self.camera_running:
             try:
                 if not locked and time.time() >= settle_until:
