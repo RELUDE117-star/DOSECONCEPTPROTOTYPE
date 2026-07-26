@@ -597,6 +597,8 @@ class DoseApp:
         self._banner_dismissed = False
         self._alert_key = None
         self._alert_return = "home"
+        self._addmed_cancel_time = 0.0
+        self._qty_cancel_time = 0.0
         self.camera = None
         self.camera_running = False
         self.mpr = None
@@ -953,6 +955,8 @@ class DoseApp:
         if self.dispense_state > 0:
             return
         self._hide_keyboard(save=True)
+        if self.mode == "timeedit":
+            self._te_commit()  # rail nav keeps schedule edits, like keyboard
         self._prev_mode = self.mode
         self.mode = mode_key
         self._draw_frame()
@@ -1490,7 +1494,7 @@ class DoseApp:
             self._te_sel = max(0, min(self._te_sel, len(self._te_times) - 1))
             self._draw_frame()
 
-    def _te_done(self):
+    def _te_commit(self):
         times = sorted(self._te_times,
                        key=lambda hm: hm[0] * 60 + hm[1])
         time_strs = [_fmt_time12(h, m) for h, m in times]
@@ -1503,6 +1507,9 @@ class DoseApp:
             md["times_per_day"] = len(time_strs)
             md["schedule_time"] = time_strs[0]
             self._save_med()
+
+    def _te_done(self):
+        self._te_commit()
         self.mode = self._te_return
         self._draw_frame()
 
@@ -1968,7 +1975,7 @@ class DoseApp:
                       font=self.font_body, fill=t["muted"], anchor="center")
         self._click_zones.append(
             (pad + 200, cancel_y - 18, pad + 360, cancel_y + 18,
-             lambda: self._nav("home")))
+             self._cancel_add_med))
 
     # ── On-screen keyboard ─────────────────────────────────────────────────
     def _kbd_img(self, key, pil_img):
@@ -2161,6 +2168,11 @@ class DoseApp:
                 TIME_PRESETS[i] if 0 <= i < len(TIME_PRESETS) else "8:00 AM"
                 for i in self._draft.get("doses", [2])] or ["8:00 AM"]
         return self._draft["dose_times"]
+
+    def _cancel_add_med(self):
+        # 30s cooldown so the still-visible QR doesn't reopen the popup
+        self._addmed_cancel_time = time.time()
+        self._nav("home")
 
     def _submit_add_med(self):
         self._hide_keyboard(save=True)
@@ -2529,8 +2541,20 @@ class DoseApp:
         self._click_zones.append(
             (80, 340, 576, 392, self._qty_commit))
 
+        # close X, iOS-style, top-right of the card
+        x_img = _pil_status_icon(30, "missed")
+        tk_x = self._get_tk_image("qty_close", x_img)
+        c.create_image(56 + 560 - 44, 84, image=tk_x, anchor="nw")
+        self._click_zones.append(
+            (56 + 560 - 52, 76, 56 + 560 - 6, 122, self._qty_cancel))
+
     def _qty_adjust(self, delta):
         self._qty_value = max(1, self._qty_value + delta)
+        self._draw_frame()
+
+    def _qty_cancel(self):
+        self._qty_cancel_time = time.time()
+        self.mode = self._prev_mode
         self._draw_frame()
 
     def _qty_commit(self):
@@ -3115,7 +3139,8 @@ class DoseApp:
                     md["count"] = md.get("count", 0) or DEFAULT_QTY
                     self._save_med()
                 elif (md.get("count", 0) <= 0 and self.dispense_state == 0
-                        and self.mode in ("home", "storage")):
+                        and self.mode in ("home", "storage")
+                        and time.time() - self._qty_cancel_time > 30):
                     if not triggered_addmed:
                         self._show_qty_confirm(slot, md["name"])
                         return
@@ -3125,7 +3150,8 @@ class DoseApp:
             self.qr_last_seen["demo"] = now
             if not self._demo_registered:
                 if (not triggered_addmed and self.dispense_state == 0
-                        and self.mode in ("home", "storage")):
+                        and self.mode in ("home", "storage")
+                        and time.time() - self._addmed_cancel_time > 30):
                     self._draft_slot = "demo"
                     self._draft["name"] = med_name if med_name != "New Medication" else ""
                     self._prev_mode = self.mode
