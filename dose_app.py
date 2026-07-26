@@ -1074,12 +1074,14 @@ class DoseApp:
 
             c.create_text(50, y + 34, text=md["name"],
                           font=self.font_small_bold, fill=t["fg"], anchor="nw")
-            doses = md.get("doses", [2])
-            if len(doses) > 1:
-                dose_text = f"{len(doses)}x daily"
+            self._ensure_dose_times(md)
+            times = md["dose_times"]
+            if len(times) == 1:
+                dose_text = f"Next dose {times[0]}"
+            elif len(times) == 2:
+                dose_text = " · ".join(times)
             else:
-                idx = doses[0] if doses else 2
-                dose_text = f"Next dose {TIME_PRESETS[idx] if 0 <= idx < len(TIME_PRESETS) else '8:00 AM'}"
+                dose_text = f"{len(times)}x daily"
             c.create_text(50, y + 58, text=dose_text,
                           font=self.font_tiny, fill=t["muted"], anchor="nw")
 
