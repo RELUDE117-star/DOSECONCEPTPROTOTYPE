@@ -84,7 +84,7 @@ HOLD_TIME = 3.0
 SPIN_TIME = 4.0
 DISPENSED_TIME = 4.0
 DEFAULT_QTY = 30
-QR_PRESENCE_TIMEOUT = 15.0
+QR_PRESENCE_TIMEOUT = 2.5   # removal shows within ~2.5s of pickup
 ALL_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 DAY_LABELS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
 
@@ -3018,12 +3018,13 @@ class DoseApp:
             self.camera.configure(config)
             self.camera.start()
             try:
+                # True auto-exposure. Setting ExposureTime/AnalogueGain
+                # silently disables AE in picamera2 — the old fixed 30ms
+                # exposure blew glossy stickers into pure white glare.
                 self.camera.set_controls({
                     "AfMode": 2,
                     "AeEnable": True,
                     "AwbEnable": True,
-                    "AnalogueGain": 4.0,
-                    "ExposureTime": 30000,
                 })
             except Exception:
                 try:
@@ -3036,43 +3037,92 @@ class DoseApp:
             self.camera = None
             self.camera_running = False
 
+    def _decode_passes(self, pil_img):
+        """Run progressively harder decode passes tuned for glossy /
+        glary stickers, merging unique codes across all of them."""
+        from PIL import ImageEnhance, ImageFilter, ImageOps
+        found = {}
+
+        def absorb(results):
+            for r in results:
+                text = r.data.decode("utf-8", errors="ignore").strip()
+                if text and text not in found and self._is_our_qr(text):
+                    found[text] = r
+
+        try:
+            absorb(_scan_qr(pil_img))
+        except Exception:
+            pass
+        gray = pil_img.convert("L")
+
+        # Adaptive (local) threshold — the key pass for specular glare:
+        # each pixel is compared to its local neighborhood, so QR modules
+        # survive even inside a washed-out highlight
+        if len(found) < 4:
+            try:
+                import numpy as np
+                g = np.asarray(gray, dtype=np.int16)
+                bg = np.asarray(gray.filter(ImageFilter.GaussianBlur(15)),
+                                dtype=np.int16)
+                binary = ((g > bg - 6) * 255).astype("uint8")
+                absorb(_scan_qr(Image.fromarray(binary)))
+            except Exception:
+                pass
+
+        # Autocontrast with clipping — re-stretches frames the glare
+        # has washed out
+        if len(found) < 4:
+            try:
+                absorb(_scan_qr(ImageOps.autocontrast(gray, cutoff=3)))
+            except Exception:
+                pass
+
+        if len(found) < 4:
+            try:
+                absorb(_scan_qr(ImageEnhance.Contrast(gray).enhance(2.0)))
+            except Exception:
+                pass
+
+        if len(found) < 4:
+            try:
+                absorb(_scan_qr(pil_img.filter(ImageFilter.SHARPEN)))
+            except Exception:
+                pass
+
+        return list(found.values())
+
     def _camera_loop(self):
+        cycle = 0
+        bracketed = False
         while self.camera_running:
             try:
+                # Exposure bracketing: every 3rd frame is captured short
+                # and dark, which punches straight through glare that
+                # saturates the auto-exposed frames
+                cycle += 1
+                if cycle % 3 == 0:
+                    try:
+                        self.camera.set_controls({
+                            "AeEnable": False,
+                            "ExposureTime": 6000,
+                            "AnalogueGain": 2.0,
+                        })
+                        bracketed = True
+                        time.sleep(0.08)  # let the exposure settle
+                    except Exception:
+                        bracketed = False
+                elif bracketed:
+                    try:
+                        self.camera.set_controls({"AeEnable": True})
+                        bracketed = False
+                        time.sleep(0.08)
+                    except Exception:
+                        pass
+
                 frame = self.camera.capture_array()
                 pil_img = Image.fromarray(frame[:, :, ::-1])
 
-                results = _scan_qr(pil_img)
-
-                if len(results) < 2:
-                    try:
-                        gray = pil_img.convert("L")
-                        from PIL import ImageEnhance
-                        enhanced = ImageEnhance.Contrast(gray).enhance(2.0)
-                        results2 = _scan_qr(enhanced)
-                        if len(results2) > len(results):
-                            results = results2
-                    except Exception:
-                        pass
-
-                if len(results) < 2:
-                    try:
-                        from PIL import ImageFilter
-                        sharp = pil_img.filter(ImageFilter.SHARPEN)
-                        results3 = _scan_qr(sharp)
-                        if len(results3) > len(results):
-                            results = results3
-                    except Exception:
-                        pass
-
-                # Keep ONLY codes we created (valid DOSE JSON payload);
-                # anything else that happens to decode is discarded
-                if results:
-                    results = [
-                        r for r in results
-                        if self._is_our_qr(
-                            r.data.decode("utf-8", errors="ignore"))
-                    ]
+                results = self._decode_passes(pil_img)
 
                 # Store frame + results for camera debug view
                 self._camera_frame = pil_img
@@ -3094,7 +3144,7 @@ class DoseApp:
                 if self._camera_view and self.mode == "camview":
                     self.root.after(0, self._draw_frame)
 
-                time.sleep(0.3)
+                time.sleep(0.2)
             except Exception:
                 time.sleep(1)
 
