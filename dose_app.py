@@ -32,10 +32,23 @@ CAMERA_AVAILABLE = False
 try:
     from picamera2 import Picamera2
     from pyzbar.pyzbar import decode as pyzbar_decode
+    try:
+        from pyzbar.pyzbar import ZBarSymbol
+        _QR_ONLY = [ZBarSymbol.QRCODE]
+    except Exception:
+        _QR_ONLY = None
     if PIL_AVAILABLE:
         CAMERA_AVAILABLE = True
 except Exception:
     pass
+
+
+def _scan_qr(img):
+    """Decode ONLY QR codes — never other barcode types, which is what
+    caused random objects to register as 'codes'."""
+    if _QR_ONLY is not None:
+        return pyzbar_decode(img, symbols=_QR_ONLY)
+    return pyzbar_decode(img)
 
 TOUCH_SENSOR_ENABLED = False  # set True to re-enable MPR121 touch sensor
 
@@ -1865,6 +1878,11 @@ class DoseApp:
              lambda: self._nav("home")))
 
     # ── On-screen keyboard ─────────────────────────────────────────────────
+    def _kbd_img(self, key, pil_img):
+        tk_img = ImageTk.PhotoImage(pil_img)
+        self._kbd_imgs[key] = tk_img
+        return tk_img
+
     def _show_keyboard(self):
         if hasattr(self, '_kbd_overlay') and self._kbd_overlay:
             return
@@ -1879,6 +1897,10 @@ class DoseApp:
 
         t = self.theme
         kbd_h = 280
+        # Keyboard images live in their own store — the main _img_cache is
+        # cleared by every _draw_frame, which was garbage-collecting the
+        # keyboard's images and turning the overlay black
+        self._kbd_imgs = {}
         self._kbd_overlay = tk.Canvas(self.root, width=CONTENT_W,
                                        height=kbd_h,
                                        highlightthickness=0,
@@ -1890,7 +1912,7 @@ class DoseApp:
 
         # Text display
         disp_img = _pil_rounded_rect(CONTENT_W - 32, 44, 12, t["elevated_bg"])
-        tk_disp = self._get_tk_image("kbd_disp", disp_img)
+        tk_disp = self._kbd_img("kbd_disp", disp_img)
         oc.create_image(16, 8, image=tk_disp, anchor="nw")
         display_text = self._kbd_text or "Type medication name..."
         display_color = t["fg"] if self._kbd_text else t["muted"]
@@ -1899,7 +1921,7 @@ class DoseApp:
 
         # Done button
         done_img = _pil_rounded_rect(80, 36, 10, ACCENT_BLUE)
-        tk_done = self._get_tk_image("kbd_done", done_img)
+        tk_done = self._kbd_img("kbd_done", done_img)
         oc.create_image(CONTENT_W - 96, 12, image=tk_done, anchor="nw")
         oc.create_text(CONTENT_W - 56, 30, text="Done",
                        font=self.font_small_bold, fill="#FFFFFF", anchor="center")
@@ -1916,7 +1938,7 @@ class DoseApp:
                 sw = CONTENT_W - 140
                 sx = 70
                 key_img = _pil_rounded_rect(sw, key_h, 10, t["elevated_bg"])
-                tk_key = self._get_tk_image("kbd_space", key_img)
+                tk_key = self._kbd_img("kbd_space", key_img)
                 oc.create_image(sx, row_y, image=tk_key, anchor="nw")
                 oc.create_text(sx + sw // 2, row_y + key_h // 2,
                                text="SPACE", font=self.font_kbd,
@@ -1933,7 +1955,7 @@ class DoseApp:
                 kw = key_w + 10 if is_special else key_w
                 bg = t["btn_bg"] if is_special else t["elevated_bg"]
                 key_img = _pil_rounded_rect(kw, key_h, 10, bg)
-                tk_key = self._get_tk_image(f"kbd_{row_idx}_{ki}", key_img)
+                tk_key = self._kbd_img(f"kbd_{row_idx}_{ki}", key_img)
                 oc.create_image(kx, row_y, image=tk_key, anchor="nw")
 
                 display = key_label
@@ -2680,14 +2702,14 @@ class DoseApp:
                 frame = self.camera.capture_array()
                 pil_img = Image.fromarray(frame[:, :, ::-1])
 
-                results = pyzbar_decode(pil_img)
+                results = _scan_qr(pil_img)
 
                 if len(results) < 2:
                     try:
                         gray = pil_img.convert("L")
                         from PIL import ImageEnhance
                         enhanced = ImageEnhance.Contrast(gray).enhance(2.0)
-                        results2 = pyzbar_decode(enhanced)
+                        results2 = _scan_qr(enhanced)
                         if len(results2) > len(results):
                             results = results2
                     except Exception:
@@ -2697,11 +2719,20 @@ class DoseApp:
                     try:
                         from PIL import ImageFilter
                         sharp = pil_img.filter(ImageFilter.SHARPEN)
-                        results3 = pyzbar_decode(sharp)
+                        results3 = _scan_qr(sharp)
                         if len(results3) > len(results):
                             results = results3
                     except Exception:
                         pass
+
+                # Keep ONLY codes we created (valid DOSE JSON payload);
+                # anything else that happens to decode is discarded
+                if results:
+                    results = [
+                        r for r in results
+                        if self._is_our_qr(
+                            r.data.decode("utf-8", errors="ignore"))
+                    ]
 
                 # Store frame + results for camera debug view
                 self._camera_frame = pil_img
@@ -2740,18 +2771,23 @@ class DoseApp:
             pass
         return None
 
+    def _is_our_qr(self, raw_text):
+        """True only for QR codes we generated: DOSE JSON with one of
+        our slots (blue/red/green/yellow/demo)."""
+        parsed = self._parse_qr_payload(raw_text)
+        return bool(parsed) and parsed[0] in (list(KNOWN_SLOTS) + ["demo"])
+
     def _handle_qr_results(self, qr_with_pos):
         now = time.time()
         triggered_addmed = False
 
         for x_pos, raw_text in qr_with_pos:
             parsed = self._parse_qr_payload(raw_text)
-
-            if parsed:
-                slot, med_name = parsed
-            else:
-                slot = "demo"
-                med_name = raw_text.strip().capitalize() or "New Medication"
+            if not parsed:
+                continue  # not one of our codes — ignore entirely
+            slot, med_name = parsed
+            if slot not in KNOWN_SLOTS and slot != "demo":
+                continue  # unknown slot — not a code we created
 
             # Known slot (blue/red/green/yellow) — instant recognition
             if slot in KNOWN_SLOTS:
