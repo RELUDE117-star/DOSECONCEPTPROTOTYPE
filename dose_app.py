@@ -206,8 +206,7 @@ def _pil_ring(size, progress, accent, bg_color, inner_color, scale=2):
 
 
 def _pil_stroke_ring(size, progress, scale=2):
-    """Website-style hold ring: faint white track + blue arc, round caps."""
-    import math
+    """Website-style hold ring: faint white track + clean blue arc."""
     ss = size * scale
     img = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -216,17 +215,8 @@ def _pil_stroke_ring(size, progress, scale=2):
     box = [pad, pad, ss - 1 - pad, ss - 1 - pad]
     d.arc(box, 0, 360, fill=(255, 255, 255, 31), width=lw)
     if progress > 0:
-        ac = _hex_to_rgba(DOSE_BLUE)
-        start, end = -90, -90 + progress * 360
-        d.arc(box, start, end, fill=ac, width=lw)
-        # round caps
-        r = (ss - 2 * pad) / 2
-        ccx = ccy = ss / 2
-        for ang in (start, end):
-            a = math.radians(ang)
-            ex, ey = ccx + r * math.cos(a), ccy + r * math.sin(a)
-            d.ellipse([ex - lw / 2, ey - lw / 2, ex + lw / 2, ey + lw / 2],
-                      fill=ac)
+        d.arc(box, -90, -90 + progress * 360,
+              fill=_hex_to_rgba(DOSE_BLUE), width=lw)
     resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
     return img.resize((size, size), resample)
 
@@ -279,11 +269,11 @@ def _pil_spinner(size, angle, scale=2):
 
 
 def _pil_soft_check(size, scale=2):
-    """Website-style success mark: translucent green circle + green check."""
+    """Success mark: translucent circle + check in the signature blue."""
     ss = size * scale
     img = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    g = _hex_to_rgba(DOSE_GREEN)
+    g = _hex_to_rgba(DOSE_BLUE)
     d.ellipse([0, 0, ss - 1, ss - 1], fill=(g[0], g[1], g[2], 38))
     lw = max(3, 5 * scale)
     x1, y1 = int(ss * 0.30), int(ss * 0.52)
@@ -485,6 +475,9 @@ class DoseApp:
         self.hold_after_id = None
         self.spin_start = 0
         self.spin_after_id = None
+        self._hold_ring_id = None
+        self._hold_secs_id = None
+        self._spin_ring_id = None
         self.camera = None
         self.camera_running = False
         self.mpr = None
@@ -1832,14 +1825,14 @@ class DoseApp:
         tk_ring = self._get_tk_image("hold_ring", ring_img)
         ring_x = cx - ring_size // 2
         ring_y = 90
-        c.create_image(ring_x, ring_y, image=tk_ring, anchor="nw")
+        self._hold_ring_id = c.create_image(ring_x, ring_y, image=tk_ring,
+                                            anchor="nw")
 
-        secs = max(1, int(HOLD_TIME - elapsed) + 1) if self.hold_start > 0 \
+        secs = max(1, math.ceil(HOLD_TIME - elapsed)) if self.hold_start > 0 \
             else int(HOLD_TIME)
-        c.create_text(cx, ring_y + ring_size // 2,
-                      text=f"{secs}s",
-                      font=self.font_hold_big, fill=DOSE_BLUE_LT,
-                      anchor="center")
+        self._hold_secs_id = c.create_text(
+            cx, ring_y + ring_size // 2, text=f"{secs}s",
+            font=self.font_hold_big, fill=DOSE_BLUE_LT, anchor="center")
 
         c.create_text(cx, 332, text="Hold to Confirm You Want to Dispense",
                       font=self.font_name, fill=t["fg"], anchor="center")
@@ -1914,14 +1907,22 @@ class DoseApp:
         if self.mode != "hold" or self.dispense_state != 2 or self.hold_start == 0:
             return
         elapsed = time.time() - self.hold_start
-        self._draw_frame()
 
         if elapsed >= HOLD_TIME:
             self.hold_start = 0
             self._start_spin()
             return
 
-        self.hold_after_id = self.root.after(50, self._hold_update)
+        # Partial update: only swap the ring image + countdown text
+        # (full-screen redraws every frame cause visible stutter)
+        progress = min(elapsed / HOLD_TIME, 1.0)
+        ring_img = _pil_stroke_ring(200, progress)
+        tk_ring = self._get_tk_image("hold_ring", ring_img)
+        self.canvas.itemconfig(self._hold_ring_id, image=tk_ring)
+        secs = max(1, math.ceil(HOLD_TIME - elapsed))
+        self.canvas.itemconfig(self._hold_secs_id, text=f"{secs}s")
+
+        self.hold_after_id = self.root.after(25, self._hold_update)
 
     # ── SPIN TO DISPENSE stage — user manually spins the spindle ──────────
     def _start_spin(self):
@@ -1934,13 +1935,17 @@ class DoseApp:
         if self.mode != "spin":
             return
         elapsed = time.time() - self.spin_start
-        self._draw_frame()
         if elapsed >= SPIN_TIME:
             self.spin_after_id = None
             self.mode = "confirmdisp"
             self._draw_frame()
             return
-        self.spin_after_id = self.root.after(50, self._spin_update)
+        # Partial update: rotate only the dial image for a smooth animation
+        angle = (elapsed * 200) % 360
+        spin_img = _pil_spinner(200, angle)
+        tk_spin = self._get_tk_image("spin_ring", spin_img)
+        self.canvas.itemconfig(self._spin_ring_id, image=tk_spin)
+        self.spin_after_id = self.root.after(25, self._spin_update)
 
     def _draw_spin(self, c):
         t = self.theme
@@ -1955,7 +1960,8 @@ class DoseApp:
         tk_spin = self._get_tk_image("spin_ring", spin_img)
         ring_x = cx - ring_size // 2
         ring_y = 90
-        c.create_image(ring_x, ring_y, image=tk_spin, anchor="nw")
+        self._spin_ring_id = c.create_image(ring_x, ring_y, image=tk_spin,
+                                            anchor="nw")
 
         c.create_text(cx, 332, text="Spin the Spindle",
                       font=self.font_name, fill=t["fg"], anchor="center")
@@ -1980,8 +1986,10 @@ class DoseApp:
         md = self.med_data[self.dispense_pill]
         cx = CONTENT_W // 2
 
-        c.create_text(cx, 150, text=f"Dispense 1 pill · {md['name']}?",
+        c.create_text(cx, 118, text="Dispense 1 pill?",
                       font=self.font_name_lg, fill=t["fg"], anchor="center")
+        c.create_text(cx, 156, text=md["name"],
+                      font=self.font_name, fill=DOSE_BLUE, anchor="center")
 
         # Pill-shaped blue button, dark navy text — same as dose.html
         btn_w, btn_h = 300, 84
