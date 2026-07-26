@@ -3096,32 +3096,30 @@ class DoseApp:
         return list(found.values())
 
     def _camera_loop(self):
-        cycle = 0
-        bracketed = False
+        # One-time calibration: the unit is internally lit, so the right
+        # exposure never changes. Let auto-exposure converge briefly,
+        # then LOCK it — constant AE hunting (and the old bracketing
+        # that toggled AE) made exposure swing, decodes flicker, and
+        # bottles look like they were being removed and replaced.
+        locked = False
+        settle_until = time.time() + 2.0
         while self.camera_running:
             try:
-                # Exposure bracketing: every 3rd frame is captured short
-                # and dark, which punches straight through glare that
-                # saturates the auto-exposed frames
-                cycle += 1
-                if cycle % 3 == 0:
+                if not locked and time.time() >= settle_until:
                     try:
+                        meta = self.camera.capture_metadata()
+                        exp = int(meta.get("ExposureTime", 8000))
+                        gain = float(meta.get("AnalogueGain", 2.0))
                         self.camera.set_controls({
                             "AeEnable": False,
-                            "ExposureTime": 3000,
-                            "AnalogueGain": 1.5,
+                            # 20% darker than AE's pick: protects the
+                            # glossy stickers from clipped highlights
+                            "ExposureTime": max(500, int(exp * 0.8)),
+                            "AnalogueGain": gain,
                         })
-                        bracketed = True
-                        time.sleep(0.08)  # let the exposure settle
-                    except Exception:
-                        bracketed = False
-                elif bracketed:
-                    try:
-                        self.camera.set_controls({"AeEnable": True})
-                        bracketed = False
-                        time.sleep(0.08)
                     except Exception:
                         pass
+                    locked = True
 
                 frame = self.camera.capture_array()
                 pil_img = Image.fromarray(frame[:, :, ::-1])
