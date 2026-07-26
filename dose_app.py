@@ -563,6 +563,7 @@ class DoseApp:
         self._spin_ring_id = None
         self._due_keys = {}
         self._due_prev = set()
+        self._banner_dismissed = False
         self.camera = None
         self.camera_running = False
         self.mpr = None
@@ -773,6 +774,11 @@ class DoseApp:
         elif self.mode == "timeedit":
             self._draw_time_edit(c)
 
+        # Due-dose notification banner on the main screens
+        if (self._due_keys and not self._banner_dismissed
+                and self.mode in ("home", "storage", "settings", "user")):
+            self._draw_due_banner(c)
+
     # ══════════════════════════════════════════════════════════════════════
     #  NAVIGATION RAIL — spread out, Home at bottom
     # ══════════════════════════════════════════════════════════════════════
@@ -909,6 +915,7 @@ class DoseApp:
     def _nav(self, mode_key):
         if self.dispense_state > 0:
             return
+        self._hide_keyboard(save=True)
         self._prev_mode = self.mode
         self.mode = mode_key
         self._draw_frame()
@@ -962,7 +969,9 @@ class DoseApp:
 
                 # Website-style card: name on top, time below, count right
                 text_x = 26 + 30
-                c.create_text(text_x, y + card_h // 2 - 13, text=entry["name"],
+                c.create_text(text_x, y + card_h // 2 - 13,
+                              text=self._fit_text(entry["name"],
+                                                  self.font_name, 420),
                               font=self.font_name, fill=t["fg"], anchor="w")
                 if due:
                     c.create_text(text_x, y + card_h // 2 + 14,
@@ -1072,7 +1081,9 @@ class DoseApp:
             tk_dot = self._get_tk_image(f"stor_dot_{key}", dot_img)
             c.create_image(50, y + 12, image=tk_dot, anchor="nw")
 
-            c.create_text(50, y + 34, text=md["name"],
+            c.create_text(50, y + 34,
+                          text=self._fit_text(md["name"],
+                                              self.font_small_bold, 168),
                           font=self.font_small_bold, fill=t["fg"], anchor="nw")
             self._ensure_dose_times(md)
             times = md["dose_times"]
@@ -1109,7 +1120,9 @@ class DoseApp:
         accent = SLOT_COLORS.get(key, "#C084FC")
         px = 272
 
-        c.create_text(px, 40, text=md["name"],
+        c.create_text(px, 40,
+                      text=self._fit_text(md["name"],
+                                          self.font_name_lg, 330),
                       font=self.font_name_lg, fill=accent, anchor="nw")
         cnt = md.get("count", 0)
         c.create_text(px, 76, text=f"{cnt} pills remaining",
@@ -1138,43 +1151,19 @@ class DoseApp:
                       font=self.font_body, fill=t["fg"], anchor="nw",
                       width=350)
 
-        # DAYS
-        days_y = 186
-        c.create_text(px, days_y, text="DAYS",
-                      font=self.font_label, fill=t["muted"], anchor="nw")
-
-        sched_days = md.get("schedule_days", ALL_DAYS)
-        dx = px
-        day_y = days_y + 22
-        for i, dl in enumerate(DAY_LABELS):
-            day_name = ALL_DAYS[i]
-            is_active = day_name in sched_days
-            dbg = accent if is_active else t["elevated_bg"]
-            dfg = "#0A0A0C" if is_active else t["muted"]
-
-            day_img = _pil_rounded_rect(46, 36, 10, dbg)
-            tk_day = self._get_tk_image(f"day_{key}_{i}", day_img)
-            c.create_image(dx, day_y, image=tk_day, anchor="nw")
-            c.create_text(dx + 23, day_y + 18, text=dl,
-                          font=self.font_day, fill=dfg, anchor="center")
-
-            self._click_zones.append(
-                (dx, day_y, dx + 46, day_y + 36,
-                 lambda d=day_name: self._toggle_day(d)))
-            dx += 52
 
         # MEDICATION INFO — real guidance for the loaded drug
-        info_y = day_y + 52
+        info_y = 196
         c.create_text(px, info_y, text="MEDICATION INFO",
                       font=self.font_label, fill=t["muted"], anchor="nw")
         info_lines = MED_INFO.get(md.get("name", "").strip().lower(),
                                   MED_INFO_DEFAULT)
-        ly = info_y + 24
+        ly = info_y + 28
         for line in info_lines[:3]:
             c.create_text(px, ly, text="·  " + line,
-                          font=self.font_small, fill=t["fg"], anchor="nw",
+                          font=self.font_body, fill=t["fg"], anchor="nw",
                           width=354)
-            ly += 26
+            ly += 34
 
         # DISPENSE button — pinned to the bottom of the card
         disp_y = 396
@@ -1248,6 +1237,7 @@ class DoseApp:
             md = self.med_data[self.selected_pill]
             self._ensure_dose_times(md)
             times = md["dose_times"]
+        self._hide_keyboard(save=True)
         self._te_times = [list(_parse_time12(ts)) for ts in times]
         self._te_sel = 0
         self._te_return = self.mode
@@ -1287,7 +1277,8 @@ class DoseApp:
 
         c.create_text(56, 52, text="EDIT SCHEDULE",
                       font=self.font_label, fill=t["muted"], anchor="nw")
-        c.create_text(616, 52, text=title_name,
+        c.create_text(616, 52,
+                      text=self._fit_text(title_name, self.font_title, 300),
                       font=self.font_title, fill=accent, anchor="ne")
 
         n = len(self._te_times)
@@ -1837,7 +1828,8 @@ class DoseApp:
 
         name_text = draft["name"] or "Tap to type medication name"
         name_color = t["fg"] if draft["name"] else t["muted"]
-        c.create_text(pad + 14, 92, text=name_text,
+        c.create_text(pad + 14, 92,
+                      text=self._fit_text(name_text, self.font_title, 470),
                       font=self.font_title, fill=name_color, anchor="w")
 
         dot_img = _pil_rounded_rect(28, 28, 8, slot_color)
@@ -1899,27 +1891,9 @@ class DoseApp:
             (pad + 290, qy, pad + 560, qy + 80,
              lambda: self._open_time_edit("draft")))
 
-        # DAYS
-        c.create_text(pad, 224, text="DAYS",
-                      font=self.font_tiny, fill=t["muted"], anchor="nw")
-
-        dx = pad
-        for i, dl in enumerate(DAY_LABELS):
-            active = draft["days"][i]
-            dbg = slot_color if active else t["elevated_bg"]
-            dfg = "#0A0A0C" if active else t["muted"]
-            day_img = _pil_rounded_rect(70, 36, 10, dbg)
-            tk_day = self._get_tk_image(f"addmed_day_{i}", day_img)
-            c.create_image(dx, 244, image=tk_day, anchor="nw")
-            c.create_text(dx + 35, 262, text=dl,
-                          font=self.font_day, fill=dfg, anchor="center")
-            self._click_zones.append(
-                (dx, 244, dx + 70, 280,
-                 lambda idx=i: self._toggle_draft_day(idx)))
-            dx += 76
 
         # ADD MEDICATION button
-        btn_y = 312
+        btn_y = 258
         btn_img = _pil_rounded_rect(560, 52, 16, ACCENT_BLUE)
         tk_btn = self._get_tk_image("addmed_submit", btn_img)
         c.create_image(pad, btn_y, image=tk_btn, anchor="nw")
@@ -1943,31 +1917,39 @@ class DoseApp:
         return tk_img
 
     def _show_keyboard(self):
-        if hasattr(self, '_kbd_overlay') and self._kbd_overlay:
+        if getattr(self, '_kbd_overlay', None):
             return
         self._kbd_text = self._draft["name"]
         self._kbd_shift = True
-        self._draw_keyboard()
-
-    def _draw_keyboard(self):
-        if hasattr(self, '_kbd_overlay') and self._kbd_overlay:
-            self._kbd_overlay.destroy()
-            self._kbd_overlay = None
-
         t = self.theme
         kbd_h = 280
-        # Keyboard images live in their own store — the main _img_cache is
-        # cleared by every _draw_frame, which was garbage-collecting the
-        # keyboard's images and turning the overlay black
+        # The overlay canvas is created ONCE and redrawn in place — the old
+        # destroy/recreate cycle flashed black between frames on the Pi
         self._kbd_imgs = {}
         self._kbd_overlay = tk.Canvas(self.root, width=CONTENT_W,
-                                       height=kbd_h,
-                                       highlightthickness=0,
-                                       bg=t["bg"])
+                                      height=kbd_h,
+                                      highlightthickness=0,
+                                      bg=t["bg"])
         self._kbd_overlay.place(x=0, y=SCREEN_H - kbd_h,
                                 width=CONTENT_W, height=kbd_h)
         self._raise_widget(self._kbd_overlay)
+        self._kbd_overlay.bind("<Button-1>", self._on_kbd_click)
+        self._draw_keyboard()
+
+    def _hide_keyboard(self, save=False):
+        if getattr(self, '_kbd_overlay', None):
+            if save:
+                self._draft["name"] = self._kbd_text
+            self._kbd_overlay.destroy()
+            self._kbd_overlay = None
+            self._kbd_imgs = {}
+
+    def _draw_keyboard(self):
         oc = self._kbd_overlay
+        if not oc:
+            return
+        t = self.theme
+        oc.delete("all")
 
         # Text display
         disp_img = _pil_rounded_rect(CONTENT_W - 32, 44, 12, t["elevated_bg"])
@@ -1975,6 +1957,8 @@ class DoseApp:
         oc.create_image(16, 8, image=tk_disp, anchor="nw")
         display_text = self._kbd_text or "Type medication name..."
         display_color = t["fg"] if self._kbd_text else t["muted"]
+        display_text = self._fit_text(display_text, self.font_title,
+                                      CONTENT_W - 160)
         oc.create_text(30, 30, text=display_text,
                        font=self.font_title, fill=display_color, anchor="w")
 
@@ -2027,18 +2011,13 @@ class DoseApp:
 
                 kx += kw + key_gap
 
-        # Bind clicks on keyboard overlay
-        oc.bind("<Button-1>", self._on_kbd_click)
-
     def _on_kbd_click(self, event):
         x, y = event.x, event.y
         t = self.theme
 
         # Check Done button
         if CONTENT_W - 96 <= x <= CONTENT_W - 16 and 12 <= y <= 48:
-            self._draft["name"] = self._kbd_text
-            self._kbd_overlay.destroy()
-            self._kbd_overlay = None
+            self._hide_keyboard(save=True)
             self._draw_frame()
             return
 
@@ -2124,6 +2103,7 @@ class DoseApp:
         return self._draft["dose_times"]
 
     def _submit_add_med(self):
+        self._hide_keyboard(save=True)
         name = self._draft["name"].strip() or "New Medication"
         slot = getattr(self, '_draft_slot', 'demo')
         md = self.med_data[slot]
@@ -2186,7 +2166,9 @@ class DoseApp:
 
         c.create_text(cx, 332, text="Hold to Confirm You Want to Dispense",
                       font=self.font_name, fill=t["fg"], anchor="center")
-        c.create_text(cx, 362, text=f"1 pill · {md['name']}",
+        c.create_text(cx, 362,
+                      text=self._fit_text(f"1 pill · {md['name']}",
+                                          self.font_body, 560),
                       font=self.font_body, fill=t["muted"], anchor="center")
 
         cancel_w, cancel_h = 160, 52
@@ -2315,7 +2297,9 @@ class DoseApp:
 
         c.create_text(cx, 332, text="Spin the Spindle",
                       font=self.font_name, fill=t["fg"], anchor="center")
-        c.create_text(cx, 362, text=f"1 pill · {md['name']}",
+        c.create_text(cx, 362,
+                      text=self._fit_text(f"1 pill · {md['name']}",
+                                          self.font_body, 560),
                       font=self.font_body, fill=t["muted"], anchor="center")
 
         cancel_w, cancel_h = 160, 52
@@ -2338,7 +2322,8 @@ class DoseApp:
 
         c.create_text(cx, 118, text="Dispense 1 pill?",
                       font=self.font_name_lg, fill=t["fg"], anchor="center")
-        c.create_text(cx, 156, text=md["name"],
+        c.create_text(cx, 156,
+                      text=self._fit_text(md["name"], self.font_name, 560),
                       font=self.font_name, fill=DOSE_BLUE, anchor="center")
 
         # Pill-shaped blue button, dark navy text — same as dose.html
@@ -2399,7 +2384,9 @@ class DoseApp:
         tk_check = self._get_tk_image("dispensed_check", check_img)
         c.create_image(cx - check_size // 2, 96, image=tk_check, anchor="nw")
 
-        c.create_text(cx, 282, text=f"Dispensed · {md['name']}",
+        c.create_text(cx, 282,
+                      text=self._fit_text(f"Dispensed · {md['name']}",
+                                          self.font_name, 560),
                       font=self.font_name, fill=t["fg"], anchor="center")
         try:
             logged = datetime.now().strftime("%-I:%M %p")
@@ -2553,10 +2540,59 @@ class DoseApp:
     def _check_due_doses(self):
         due = self._dose_due_map()
         newly_due = set(due) - self._due_prev
+        cleared = self._due_prev - set(due)
         if newly_due:
             self._play_sound()  # chime the moment a dose becomes due
+            self._banner_dismissed = False
         self._due_keys = due
         self._due_prev = set(due)
+        # settings/user don't redraw every second — refresh them when the
+        # banner appears or clears
+        if (newly_due or cleared) and self.mode in ("settings", "user"):
+            self._draw_frame()
+
+    def _draw_due_banner(self, c):
+        t = self.theme
+        names = [self.med_data[k]["name"] for k in self._due_keys
+                 if k in self.med_data]
+        if not names:
+            return
+        if len(names) == 1:
+            msg = f"Time to take {names[0]}"
+        else:
+            msg = f"Time to take {len(names)} medications"
+        bw, bh = 620, 56
+        bx, by = 26, 20
+        bar_img = _pil_rounded_rect(bw, bh, 16, DOSE_BLUE)
+        tk_bar = self._get_tk_image("due_banner", bar_img)
+        c.create_image(bx, by, image=tk_bar, anchor="nw")
+        icon = _pil_clock_icon(24, "#06101E")
+        tk_icon = self._get_tk_image("due_banner_icon", icon)
+        c.create_image(bx + 18, by + bh // 2 - 12, image=tk_icon,
+                       anchor="nw")
+        c.create_text(bx + 56, by + bh // 2,
+                      text=self._fit_text(msg, self.font_body_bold, 500),
+                      font=self.font_body_bold, fill="#06101E", anchor="w")
+        c.create_text(bx + bw - 26, by + bh // 2, text="✕",
+                      font=self.font_body_bold, fill="#06101E",
+                      anchor="center")
+        self._click_zones.append((bx, by, bx + bw, by + bh,
+                                  self._dismiss_banner))
+
+    def _dismiss_banner(self):
+        self._banner_dismissed = True
+        self._draw_frame()
+
+    def _fit_text(self, text, font, max_w):
+        """Truncate text with an ellipsis so it never clips its container."""
+        try:
+            if font.measure(text) <= max_w:
+                return text
+            while text and font.measure(text + "…") > max_w:
+                text = text[:-1]
+            return text + "…"
+        except Exception:
+            return text
 
     def _check_presence_changes(self):
         if self.dispense_state > 0:
@@ -2907,7 +2943,8 @@ class DoseApp:
                     md["loaded"] = True
                     md["count"] = md.get("count", 0) or DEFAULT_QTY
                     self._save_med()
-                elif md.get("count", 0) <= 0 and self.dispense_state == 0:
+                elif (md.get("count", 0) <= 0 and self.dispense_state == 0
+                        and self.mode in ("home", "storage")):
                     if not triggered_addmed:
                         self._show_qty_confirm(slot, md["name"])
                         return
@@ -2916,7 +2953,8 @@ class DoseApp:
             # Demo / unknown slot — new medication flow
             self.qr_last_seen["demo"] = now
             if not self._demo_registered:
-                if not triggered_addmed and self.mode != "addmed" and self.dispense_state == 0:
+                if (not triggered_addmed and self.dispense_state == 0
+                        and self.mode in ("home", "storage")):
                     self._draft_slot = "demo"
                     self._draft["name"] = med_name if med_name != "New Medication" else ""
                     self._prev_mode = self.mode
