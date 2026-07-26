@@ -333,31 +333,6 @@ def _pil_spinner(size, angle, scale=2):
     return img.resize((size, size), resample)
 
 
-def _pil_battery(w, h, frac, fill_color, track_color, scale=2):
-    """Battery-style meter: rounded body + tip, filled by frac (0-1)."""
-    sw, sh = w * scale, h * scale
-    img = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    tip_w = 10 * scale
-    body_w = sw - tip_w - 4 * scale
-    rad = 14 * scale
-    d.rounded_rectangle([0, 0, body_w, sh - 1], radius=rad,
-                        fill=_hex_to_rgba(track_color))
-    # Tip
-    tip_h = sh // 3
-    d.rounded_rectangle([body_w + 2 * scale, (sh - tip_h) // 2,
-                         sw - 1, (sh + tip_h) // 2],
-                        radius=4 * scale, fill=_hex_to_rgba(track_color))
-    # Fill
-    pad = 5 * scale
-    fill_w = int((body_w - 2 * pad) * max(0.0, min(frac, 1.0)))
-    if fill_w > rad:
-        d.rounded_rectangle([pad, pad, pad + fill_w, sh - 1 - pad],
-                            radius=rad - 4 * scale,
-                            fill=_hex_to_rgba(fill_color))
-    resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
-    return img.resize((w, h), resample)
-
 
 def _pil_clock_icon(size, color, scale=2):
     """Small clock face: circle outline + hour/minute hands."""
@@ -561,6 +536,7 @@ class DoseApp:
         self.font_dose_time = tkfont.Font(family=f_xb, size=16, weight="bold")
         self.font_update_btn = tkfont.Font(family=f_xb, size=13, weight="bold")
         self.font_pct = tkfont.Font(family=f_xb, size=48, weight="bold")
+        self.font_time_big = tkfont.Font(family=f_xb, size=60, weight="bold")
         self.font_pct_label = tkfont.Font(family=f_r, size=14)
         self.font_graph_label = tkfont.Font(family=f_r, size=10)
         self.font_kbd = tkfont.Font(family=f_b, size=14, weight="bold")
@@ -585,6 +561,8 @@ class DoseApp:
         self._hold_ring_id = None
         self._hold_secs_id = None
         self._spin_ring_id = None
+        self._due_keys = {}
+        self._due_prev = set()
         self.camera = None
         self.camera_running = False
         self.mpr = None
@@ -613,7 +591,7 @@ class DoseApp:
 
         self._draft = {
             "name": "", "times_per_day": 1,
-            "doses": [2], "qty": 30,
+            "doses": [2], "dose_times": ["8:00 AM"], "qty": 30,
             "days": [1, 1, 1, 1, 1, 1, 1],
         }
 
@@ -806,8 +784,10 @@ class DoseApp:
         c.create_line(rx, 0, rx, SCREEN_H, fill=t["divider"])
 
         active = self.mode
+        if active == "timeedit":
+            active = getattr(self, "_te_return", "storage")
         if active in ("hold", "spin", "confirmdisp", "dispensed",
-                      "qtyconfirm", "addmed", "timeedit"):
+                      "qtyconfirm", "addmed"):
             active = self._prev_mode
 
         # Spread buttons: User at top, Storage, Settings spaced, Home at bottom
@@ -972,7 +952,11 @@ class DoseApp:
 
             for i, entry in enumerate(sched[:num]):
                 y = 88 + i * (card_h + card_gap)
-                card_img = _pil_rounded_rect(card_w, card_h, 22, t["card_bg"])
+                due = entry["key"] in self._due_keys
+                card_img = _pil_rounded_rect(
+                    card_w, card_h, 22, t["card_bg"],
+                    outline=DOSE_BLUE if due else None,
+                    outline_w=3 if due else 0)
                 tk_card = self._get_tk_image(f"home_card_{i}", card_img)
                 c.create_image(26, y, image=tk_card, anchor="nw")
 
@@ -980,8 +964,15 @@ class DoseApp:
                 text_x = 26 + 30
                 c.create_text(text_x, y + card_h // 2 - 13, text=entry["name"],
                               font=self.font_name, fill=t["fg"], anchor="w")
-                c.create_text(text_x, y + card_h // 2 + 14, text=entry["time"],
-                              font=self.font_small, fill=t["muted"], anchor="w")
+                if due:
+                    c.create_text(text_x, y + card_h // 2 + 14,
+                                  text=f"Time to take · {entry['time']}",
+                                  font=self.font_small_bold, fill=DOSE_BLUE,
+                                  anchor="w")
+                else:
+                    c.create_text(text_x, y + card_h // 2 + 14,
+                                  text=entry["time"], font=self.font_small,
+                                  fill=t["muted"], anchor="w")
 
                 cnt = entry.get("count", 0)
                 c.create_text(26 + card_w - 28, y + card_h // 2,
@@ -1243,18 +1234,50 @@ class DoseApp:
         return f"Take at {time_part} {day_part}"
 
     # ── Big time editor (opened from the small clock button) ──────────────
-    def _open_time_edit(self):
-        md = self.med_data[self.selected_pill]
-        self._ensure_dose_times(md)
-        self._te_times = [list(_parse_time12(ts)) for ts in md["dose_times"]]
-        self._prev_mode = self.mode
+    def _open_time_edit(self, target="med"):
+        self._te_target = target
+        if target == "draft":
+            if not self._draft.get("dose_times"):
+                self._draft["dose_times"] = [
+                    TIME_PRESETS[i] if 0 <= i < len(TIME_PRESETS)
+                    else "8:00 AM" for i in self._draft.get("doses", [2])]
+            times = self._draft["dose_times"]
+        else:
+            md = self.med_data[self.selected_pill]
+            self._ensure_dose_times(md)
+            times = md["dose_times"]
+        self._te_times = [list(_parse_time12(ts)) for ts in times]
+        self._te_sel = 0
+        self._te_return = self.mode
         self.mode = "timeedit"
+        self._draw_frame()
+
+    def _te_day_flags(self):
+        """Active flag per ALL_DAYS for the current edit target."""
+        if self._te_target == "draft":
+            return [bool(v) for v in self._draft["days"]]
+        days = self.med_data[self.selected_pill].get(
+            "schedule_days", list(ALL_DAYS))
+        return [d in days for d in ALL_DAYS]
+
+    def _te_toggle_day(self, i):
+        if self._te_target == "draft":
+            self._draft["days"][i] = 0 if self._draft["days"][i] else 1
+        else:
+            self._toggle_day(ALL_DAYS[i])
+            return  # _toggle_day already saves + redraws
         self._draw_frame()
 
     def _draw_time_edit(self, c):
         t = self.theme
-        md = self.med_data[self.selected_pill]
-        accent = SLOT_COLORS.get(self.selected_pill, "#C084FC")
+        if self._te_target == "draft":
+            title_name = self._draft["name"] or "New Medication"
+            accent = SLOT_COLORS.get(
+                getattr(self, "_draft_slot", "demo"), "#C084FC")
+        else:
+            md = self.med_data[self.selected_pill]
+            title_name = md["name"]
+            accent = SLOT_COLORS.get(self.selected_pill, "#C084FC")
 
         card_img = _pil_rounded_rect(620, 440, 22, t["card_bg"])
         tk_card = self._get_tk_image("te_card", card_img)
@@ -1262,79 +1285,119 @@ class DoseApp:
 
         c.create_text(56, 52, text="EDIT SCHEDULE",
                       font=self.font_label, fill=t["muted"], anchor="nw")
-        c.create_text(616, 52, text=md["name"],
+        c.create_text(616, 52, text=title_name,
                       font=self.font_title, fill=accent, anchor="ne")
 
         n = len(self._te_times)
-        row_h = 92
-        top = 92
-        btn = 56  # touch-friendly stepper buttons
+        if self._te_sel >= n:
+            self._te_sel = n - 1
+        sel = self._te_sel
 
+        # Time tabs — edit one time at a time; tap a tab to switch
+        tab_w, tab_h, tab_gap = 128, 44, 8
+        tx, ty = 56, 78
         for i, (h24, mi) in enumerate(self._te_times):
-            ry = top + i * row_h
-            cy = ry + row_h // 2 - 6
-
-            # hour steppers
-            for j, (sym, dh) in enumerate((("−", -1), ("+", 1))):
-                bx = 56 + j * (btn + 8)
-                b_img = _pil_rounded_rect(btn, btn, 14, t["elevated_bg"])
-                tk_b = self._get_tk_image(f"te_h{j}_{i}", b_img)
-                c.create_image(bx, cy - btn // 2, image=tk_b, anchor="nw")
-                c.create_text(bx + btn // 2, cy, text=sym,
-                              font=self.font_count, fill=t["fg"],
-                              anchor="center")
-                self._click_zones.append(
-                    (bx, cy - btn // 2, bx + btn, cy + btn // 2,
-                     lambda idx=i, d=dh: self._te_adj(idx, "h", d)))
-            c.create_text(56 + btn + 4, cy + btn // 2 + 12, text="HOUR",
-                          font=self.font_tiny, fill=t["muted"],
+            active = (i == sel)
+            tbg = DOSE_BLUE if active else t["elevated_bg"]
+            tfg = "#06101E" if active else t["muted"]
+            tab_img = _pil_rounded_rect(tab_w, tab_h, 12, tbg)
+            tk_tab = self._get_tk_image(f"te_tab_{i}", tab_img)
+            c.create_image(tx, ty, image=tk_tab, anchor="nw")
+            c.create_text(tx + tab_w // 2, ty + tab_h // 2,
+                          text=_fmt_time12(h24, mi),
+                          font=self.font_body_bold, fill=tfg,
                           anchor="center")
-
-            # big time readout
-            c.create_text(336, cy, text=_fmt_time12(h24, mi),
-                          font=self.font_hold_big, fill=t["fg"],
-                          anchor="center")
-
-            # minute steppers (5-minute steps)
-            for j, (sym, dm) in enumerate((("−", -5), ("+", 5))):
-                bx = 480 + j * (btn + 8)
-                b_img = _pil_rounded_rect(btn, btn, 14, t["elevated_bg"])
-                tk_b = self._get_tk_image(f"te_m{j}_{i}", b_img)
-                c.create_image(bx, cy - btn // 2, image=tk_b, anchor="nw")
-                c.create_text(bx + btn // 2, cy, text=sym,
-                              font=self.font_count, fill=t["fg"],
-                              anchor="center")
-                self._click_zones.append(
-                    (bx, cy - btn // 2, bx + btn, cy + btn // 2,
-                     lambda idx=i, d=dm: self._te_adj(idx, "m", d)))
-            c.create_text(480 + btn + 4, cy + btn // 2 + 12, text="MIN",
-                          font=self.font_tiny, fill=t["muted"],
-                          anchor="center")
-
-            # remove row (only when more than one dose)
-            if n > 1:
-                rx = 608
-                r_img = _pil_rounded_rect(28, 28, 9, t["elevated_bg"])
-                tk_r = self._get_tk_image(f"te_x_{i}", r_img)
-                c.create_image(rx, cy - 14, image=tk_r, anchor="nw")
-                c.create_text(rx + 14, cy, text="✕",
-                              font=self.font_small_bold, fill="#FF6B6B",
-                              anchor="center")
-                self._click_zones.append(
-                    (rx - 4, cy - 18, rx + 32, cy + 18,
-                     lambda idx=i: self._te_remove(idx)))
-
-        # + ADD TIME (up to 3 doses per day)
-        y_btns = 396
-        if n < 3:
-            add_w = 180
-            add_img = _pil_rounded_rect(add_w, 52, 14, t["elevated_bg"])
-            tk_add = self._get_tk_image("te_add", add_img)
-            c.create_image(56, y_btns, image=tk_add, anchor="nw")
-            c.create_text(56 + add_w // 2, y_btns + 26, text="+ ADD TIME",
-                          font=self.font_btn, fill=t["fg"], anchor="center")
             self._click_zones.append(
-                (56, y_btns, 56 + add_w, y_btns + 52, self._te_add))
+                (tx, ty, tx + tab_w, ty + tab_h,
+                 lambda idx=i: self._te_select(idx)))
+            tx += tab_w + tab_gap
+
+        if n < 3:
+            add_img = _pil_rounded_rect(tab_h, tab_h, 12, t["elevated_bg"])
+            tk_add = self._get_tk_image("te_tab_add", add_img)
+            c.create_image(tx, ty, image=tk_add, anchor="nw")
+            c.create_text(tx + tab_h // 2, ty + tab_h // 2, text="+",
+                          font=self.font_count, fill=DOSE_BLUE,
+                          anchor="center")
+            self._click_zones.append(
+                (tx, ty, tx + tab_h, ty + tab_h, self._te_add))
+
+        # The selected time — big and beautiful
+        h24, mi = self._te_times[sel]
+        h12 = h24 % 12
+        if h12 == 0:
+            h12 = 12
+        c.create_text(296, 186, text=f"{h12}:{mi:02d}",
+                      font=self.font_time_big, fill=t["fg"],
+                      anchor="center")
+
+        # AM/PM toggle chip beside the time
+        ap = "AM" if h24 < 12 else "PM"
+        ap_w, ap_h = 74, 52
+        ap_x, ap_y = 442, 160
+        ap_img = _pil_rounded_rect(ap_w, ap_h, 14, t["elevated_bg"],
+                                   outline=DOSE_BLUE, outline_w=2)
+        tk_ap = self._get_tk_image("te_ap", ap_img)
+        c.create_image(ap_x, ap_y, image=tk_ap, anchor="nw")
+        c.create_text(ap_x + ap_w // 2, ap_y + ap_h // 2, text=ap,
+                      font=self.font_btn, fill=DOSE_BLUE, anchor="center")
+        self._click_zones.append(
+            (ap_x, ap_y, ap_x + ap_w, ap_y + ap_h,
+             lambda: self._te_adj(self._te_sel, "h", 12)))
+
+        # Steppers — hour pair on the left, minute pair on the right
+        btn = 64
+        sy = 240
+        for label, x0, field, step in (("HOUR", 140, "h", 1),
+                                       ("MIN", 396, "m", 5)):
+            for j, (sym, sign) in enumerate((("−", -1), ("+", 1))):
+                bx = x0 + j * (btn + 8)
+                b_img = _pil_rounded_rect(btn, btn, 16, t["elevated_bg"])
+                tk_b = self._get_tk_image(f"te_{field}{j}", b_img)
+                c.create_image(bx, sy, image=tk_b, anchor="nw")
+                c.create_text(bx + btn // 2, sy + btn // 2, text=sym,
+                              font=self.font_count, fill=t["fg"],
+                              anchor="center")
+                self._click_zones.append(
+                    (bx, sy, bx + btn, sy + btn,
+                     lambda f=field, s=sign * step:
+                     self._te_adj(self._te_sel, f, s)))
+            c.create_text(x0 + btn + 4, sy + btn + 14, text=label,
+                          font=self.font_tiny, fill=t["muted"],
+                          anchor="center")
+
+        # Day chips — which days this schedule runs on
+        flags = self._te_day_flags()
+        chip_w, chip_h, chip_gap = 46, 36, 6
+        total_w = 7 * chip_w + 6 * chip_gap
+        dx = (26 + 646 - total_w) // 2
+        day_y = 336
+        for i, dl in enumerate(DAY_LABELS):
+            dbg = accent if flags[i] else t["elevated_bg"]
+            dfg = "#0A0A0C" if flags[i] else t["muted"]
+            day_img = _pil_rounded_rect(chip_w, chip_h, 10, dbg)
+            tk_day = self._get_tk_image(f"te_day_{i}", day_img)
+            c.create_image(dx, day_y, image=tk_day, anchor="nw")
+            c.create_text(dx + chip_w // 2, day_y + chip_h // 2, text=dl,
+                          font=self.font_day, fill=dfg, anchor="center")
+            self._click_zones.append(
+                (dx, day_y, dx + chip_w, day_y + chip_h,
+                 lambda idx=i: self._te_toggle_day(idx)))
+            dx += chip_w + chip_gap
+
+        # Bottom row: remove current time (left) + DONE (right)
+        y_btns = 392
+        if n > 1:
+            rem_w = 180
+            rem_img = _pil_rounded_rect(rem_w, 52, 14, t["elevated_bg"])
+            tk_rem = self._get_tk_image("te_remove", rem_img)
+            c.create_image(56, y_btns, image=tk_rem, anchor="nw")
+            c.create_text(56 + rem_w // 2, y_btns + 26, text="REMOVE TIME",
+                          font=self.font_btn, fill="#FF6B6B",
+                          anchor="center")
+            self._click_zones.append(
+                (56, y_btns, 56 + rem_w, y_btns + 52,
+                 lambda: self._te_remove(self._te_sel)))
 
         done_w = 180
         done_img = _pil_rounded_rect(done_w, 52, 14, DOSE_BLUE)
@@ -1344,6 +1407,11 @@ class DoseApp:
                       font=self.font_btn, fill="#06101E", anchor="center")
         self._click_zones.append(
             (616 - done_w, y_btns, 616, y_btns + 52, self._te_done))
+
+    def _te_select(self, idx):
+        if 0 <= idx < len(self._te_times):
+            self._te_sel = idx
+            self._draw_frame()
 
     def _te_adj(self, idx, field, delta):
         if idx >= len(self._te_times):
@@ -1360,22 +1428,29 @@ class DoseApp:
         if len(self._te_times) < 3:
             last = self._te_times[-1]
             self._te_times.append([(last[0] + 6) % 24, last[1]])
+            self._te_sel = len(self._te_times) - 1
             self._draw_frame()
 
     def _te_remove(self, idx):
         if len(self._te_times) > 1 and idx < len(self._te_times):
             self._te_times.pop(idx)
+            self._te_sel = max(0, min(self._te_sel, len(self._te_times) - 1))
             self._draw_frame()
 
     def _te_done(self):
-        md = self.med_data[self.selected_pill]
         times = sorted(self._te_times,
                        key=lambda hm: hm[0] * 60 + hm[1])
-        md["dose_times"] = [_fmt_time12(h, m) for h, m in times]
-        md["times_per_day"] = len(md["dose_times"])
-        md["schedule_time"] = md["dose_times"][0]
-        self._save_med()
-        self.mode = self._prev_mode
+        time_strs = [_fmt_time12(h, m) for h, m in times]
+        if self._te_target == "draft":
+            self._draft["dose_times"] = time_strs
+            self._draft["times_per_day"] = len(time_strs)
+        else:
+            md = self.med_data[self.selected_pill]
+            md["dose_times"] = time_strs
+            md["times_per_day"] = len(time_strs)
+            md["schedule_time"] = time_strs[0]
+            self._save_med()
+        self.mode = self._te_return
         self._draw_frame()
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1713,19 +1788,27 @@ class DoseApp:
                           font=self.font_label, fill=t["muted"],
                           anchor="center")
 
-        # Battery-style adherence score
+        # Adherence score — big percentage + slim progress bar
         score = stats["score"]
         c.create_text(56, 288, text="ADHERENCE SCORE",
                       font=self.font_label, fill=t["muted"], anchor="nw")
-        batt_x, batt_y, batt_w, batt_h = 56, 314, 410, 96
         score_color = ("#30D158" if score >= 80
                        else "#FFD60A" if score >= 50 else "#FF6B6B")
-        batt_img = _pil_battery(batt_w, batt_h, score / 100.0, score_color,
-                                t["elevated_bg"])
-        tk_batt = self._get_tk_image("user_batt", batt_img)
-        c.create_image(batt_x, batt_y, image=tk_batt, anchor="nw")
-        c.create_text(616, batt_y + batt_h // 2, text=f"{score}%",
-                      font=self.font_pct, fill=score_color, anchor="e")
+        c.create_text(56, 366, text=f"{score}%",
+                      font=self.font_pct, fill=score_color, anchor="w")
+
+        bar_x, bar_w, bar_h = 240, 376, 14
+        bar_y = 366 - bar_h // 2
+        track_img = _pil_rounded_rect(bar_w, bar_h, bar_h // 2,
+                                      t["elevated_bg"])
+        tk_track = self._get_tk_image("user_score_track", track_img)
+        c.create_image(bar_x, bar_y, image=tk_track, anchor="nw")
+        fill_w = int(bar_w * score / 100)
+        if fill_w >= bar_h:
+            fill_img = _pil_rounded_rect(fill_w, bar_h, bar_h // 2,
+                                         score_color)
+            tk_fill = self._get_tk_image("user_score_fill", fill_img)
+            c.create_image(bar_x, bar_y, image=tk_fill, anchor="nw")
 
     # ══════════════════════════════════════════════════════════════════════
     #  ADD MEDICATION SCREEN (triggered by new/demo QR)
@@ -1790,58 +1873,32 @@ class DoseApp:
         self._click_zones.append(
             (pad + 200, qy + 28, pad + 240, qy + 68, self._inc_draft_qty))
 
-        # TIMES PER DAY section
-        tpd_img = _pil_rounded_rect(270, 80, 16, t["elevated_bg"])
-        tk_tpd = self._get_tk_image("addmed_tpd", tpd_img)
-        c.create_image(pad + 290, qy, image=tk_tpd, anchor="nw")
+        # SCHEDULE tile — words + clock button that opens the big editor
+        sch_img = _pil_rounded_rect(270, 80, 16, t["elevated_bg"])
+        tk_sch = self._get_tk_image("addmed_sched", sch_img)
+        c.create_image(pad + 290, qy, image=tk_sch, anchor="nw")
 
-        c.create_text(pad + 425, qy + 12, text="TIMES PER DAY",
+        c.create_text(pad + 425, qy + 12, text="SCHEDULE",
                       font=self.font_tiny, fill=t["muted"], anchor="center")
-        c.create_text(pad + 425, qy + 48, text=str(draft["times_per_day"]),
-                      font=self.font_count, fill=t["fg"], anchor="center")
+        dts = self._draft_dose_times()
+        times_txt = " & ".join(dts) if len(dts) <= 2 else \
+            ", ".join(dts[:-1]) + " & " + dts[-1]
+        c.create_text(pad + 415, qy + 48, text=times_txt,
+                      font=self.font_medium, fill=t["fg"], anchor="center",
+                      width=190)
 
-        c.create_image(pad + 320, qy + 28, image=tk_mb, anchor="nw")
-        c.create_text(pad + 340, qy + 48, text="−",
-                      font=self.font_body_bold, fill=t["fg"], anchor="center")
+        clk_bg = _pil_rounded_rect(40, 40, 12, t["card_bg"])
+        tk_clkb = self._get_tk_image("addmed_clk_bg", clk_bg)
+        c.create_image(pad + 500, qy + 28, image=tk_clkb, anchor="nw")
+        clk_icon = _pil_clock_icon(22, t["fg"])
+        tk_clki = self._get_tk_image("addmed_clk", clk_icon)
+        c.create_image(pad + 509, qy + 37, image=tk_clki, anchor="nw")
         self._click_zones.append(
-            (pad + 320, qy + 28, pad + 360, qy + 68, self._dec_draft_doses))
-
-        c.create_image(pad + 490, qy + 28, image=tk_pb, anchor="nw")
-        c.create_text(pad + 510, qy + 48, text="+",
-                      font=self.font_body_bold, fill=t["fg"], anchor="center")
-        self._click_zones.append(
-            (pad + 490, qy + 28, pad + 530, qy + 68, self._inc_draft_doses))
-
-        # DOSE TIMES
-        c.create_text(pad, 216, text="DOSE TIMES",
-                      font=self.font_tiny, fill=t["muted"], anchor="nw")
-
-        chip_x = pad
-        for i, dose_idx in enumerate(draft["doses"]):
-            ts = TIME_PRESETS[dose_idx] if 0 <= dose_idx < len(TIME_PRESETS) else "8:00 AM"
-            cw = min(130, 560 // max(1, len(draft["doses"])))
-            chip_img = _pil_rounded_rect(cw, 48, 12, t["elevated_bg"])
-            tk_chip = self._get_tk_image(f"addmed_dose_{i}", chip_img)
-            c.create_image(chip_x, 234, image=tk_chip, anchor="nw")
-
-            c.create_text(chip_x + cw // 2, 244, text=f"DOSE {i + 1}",
-                          font=self.font_dose_label, fill=t["muted"],
-                          anchor="center")
-            c.create_text(chip_x + cw // 2, 264, text=ts,
-                          font=self.font_dose_time, fill=t["fg"],
-                          anchor="center")
-
-            self._click_zones.append(
-                (chip_x, 254, chip_x + cw // 2, 282,
-                 lambda idx=i: self._adj_draft_dose(idx, -1)))
-            self._click_zones.append(
-                (chip_x + cw // 2, 254, chip_x + cw, 282,
-                 lambda idx=i: self._adj_draft_dose(idx, 1)))
-
-            chip_x += cw + 8
+            (pad + 290, qy, pad + 560, qy + 80,
+             lambda: self._open_time_edit("draft")))
 
         # DAYS
-        c.create_text(pad, 294, text="DAYS",
+        c.create_text(pad, 224, text="DAYS",
                       font=self.font_tiny, fill=t["muted"], anchor="nw")
 
         dx = pad
@@ -1851,30 +1908,30 @@ class DoseApp:
             dfg = "#0A0A0C" if active else t["muted"]
             day_img = _pil_rounded_rect(70, 36, 10, dbg)
             tk_day = self._get_tk_image(f"addmed_day_{i}", day_img)
-            c.create_image(dx, 312, image=tk_day, anchor="nw")
-            c.create_text(dx + 35, 330, text=dl,
+            c.create_image(dx, 244, image=tk_day, anchor="nw")
+            c.create_text(dx + 35, 262, text=dl,
                           font=self.font_day, fill=dfg, anchor="center")
             self._click_zones.append(
-                (dx, 312, dx + 70, 348,
+                (dx, 244, dx + 70, 280,
                  lambda idx=i: self._toggle_draft_day(idx)))
             dx += 76
 
         # ADD MEDICATION button
-        btn_y = 362
-        btn_img = _pil_rounded_rect(560, 48, 16, ACCENT_BLUE)
+        btn_y = 312
+        btn_img = _pil_rounded_rect(560, 52, 16, ACCENT_BLUE)
         tk_btn = self._get_tk_image("addmed_submit", btn_img)
         c.create_image(pad, btn_y, image=tk_btn, anchor="nw")
-        c.create_text(pad + 280, btn_y + 24, text="ADD MEDICATION",
+        c.create_text(pad + 280, btn_y + 26, text="ADD MEDICATION",
                       font=self.font_btn_lg, fill="#FFFFFF", anchor="center")
         self._click_zones.append(
-            (pad, btn_y, pad + 560, btn_y + 48, self._submit_add_med))
+            (pad, btn_y, pad + 560, btn_y + 52, self._submit_add_med))
 
-        # Cancel button
-        cancel_y = btn_y + 2
-        c.create_text(pad + 280, btn_y + 58, text="Cancel",
-                      font=self.font_small, fill=t["muted"], anchor="center")
+        # Cancel — kept well below the ADD button so it can't be mis-tapped
+        cancel_y = btn_y + 92
+        c.create_text(pad + 280, cancel_y, text="Cancel",
+                      font=self.font_body, fill=t["muted"], anchor="center")
         self._click_zones.append(
-            (pad + 200, btn_y + 48, pad + 360, btn_y + 72,
+            (pad + 200, cancel_y - 18, pad + 360, cancel_y + 18,
              lambda: self._nav("home")))
 
     # ── On-screen keyboard ─────────────────────────────────────────────────
@@ -2057,6 +2114,13 @@ class DoseApp:
         self._draft["days"][idx] = 0 if self._draft["days"][idx] else 1
         self._draw_frame()
 
+    def _draft_dose_times(self):
+        if not self._draft.get("dose_times"):
+            self._draft["dose_times"] = [
+                TIME_PRESETS[i] if 0 <= i < len(TIME_PRESETS) else "8:00 AM"
+                for i in self._draft.get("doses", [2])] or ["8:00 AM"]
+        return self._draft["dose_times"]
+
     def _submit_add_med(self):
         name = self._draft["name"].strip() or "New Medication"
         slot = getattr(self, '_draft_slot', 'demo')
@@ -2066,9 +2130,7 @@ class DoseApp:
         md["loaded"] = True
         md["doses"] = self._draft["doses"][:]
         md["times_per_day"] = self._draft["times_per_day"]
-        md["dose_times"] = [
-            TIME_PRESETS[i] if 0 <= i < len(TIME_PRESETS) else "8:00 AM"
-            for i in self._draft["doses"]] or ["8:00 AM"]
+        md["dose_times"] = list(self._draft_dose_times())
         md["schedule_time"] = md["dose_times"][0]
         md["tracking_since"] = datetime.now().isoformat()
         day_map = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu",
@@ -2079,6 +2141,7 @@ class DoseApp:
             self._demo_registered = True
         self._save_med()
         self._draft = {"name": "", "times_per_day": 1, "doses": [2],
+                       "dose_times": ["8:00 AM"],
                        "qty": 30, "days": [1, 1, 1, 1, 1, 1, 1]}
         self.selected_pill = slot
         self._nav("home")
@@ -2445,9 +2508,53 @@ class DoseApp:
     # ══════════════════════════════════════════════════════════════════════
     def _tick_clock(self):
         self._check_presence_changes()
+        self._check_due_doses()
         if self.mode in ("home", "storage"):
             self._draw_frame()
         self.root.after(1000, self._tick_clock)
+
+    # ── Dose-time notification ─────────────────────────────────────────────
+    def _dose_due_map(self):
+        """Doses due right now: scheduled time has arrived (up to 60 min
+        ago) today and no dispense has been logged for it yet."""
+        now = datetime.now()
+        events = self.adherence.get("events", [])
+        due = {}
+        for key, md in self.med_data.items():
+            if not md.get("loaded") or md.get("count", 0) <= 0:
+                continue
+            if now.strftime("%a") not in md.get("schedule_days", ALL_DAYS):
+                continue
+            self._ensure_dose_times(md)
+            for ts in md["dose_times"]:
+                h, m = _parse_time12(ts)
+                sched = now.replace(hour=h, minute=m,
+                                    second=0, microsecond=0)
+                mins = (now - sched).total_seconds() / 60
+                if not (0 <= mins <= 60):
+                    continue
+                taken = False
+                for ev in events:
+                    if ev.get("key") != key:
+                        continue
+                    try:
+                        tdt = datetime.fromisoformat(ev["time"])
+                    except Exception:
+                        continue
+                    if -15 * 60 <= (tdt - sched).total_seconds() <= 3600:
+                        taken = True
+                        break
+                if not taken:
+                    due[key] = ts
+        return due
+
+    def _check_due_doses(self):
+        due = self._dose_due_map()
+        newly_due = set(due) - self._due_prev
+        if newly_due:
+            self._play_sound()  # chime the moment a dose becomes due
+        self._due_keys = due
+        self._due_prev = set(due)
 
     def _check_presence_changes(self):
         if self.dispense_state > 0:
