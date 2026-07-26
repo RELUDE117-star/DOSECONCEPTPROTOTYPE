@@ -184,34 +184,66 @@ ator_qr.save(f"{OUT}/sticker_atorvastatin_qr.png", dpi=(DPI, DPI))
 new_front.save(f"{OUT}/sticker_newmed_front.png", dpi=(DPI, DPI))
 new_qr.save(f"{OUT}/sticker_newmed_qr.png", dpi=(DPI, DPI))
 
-# ── Print sheet: all 4 to scale on one page with labels ──
-PAD = int(8 * MM)
-sheet_w = PAD * 3 + FW + max(QW, int(72 * MM))
-sheet_h = PAD * 3 + FH * 2 + int(10 * MM) * 2
-sheet = Image.new("RGB", (sheet_w, sheet_h), "#FFFFFF")
+# ── Print sheet: US Letter 8.5 x 11 in at 300 DPI — print at 100% ──
+LETTER_W, LETTER_H = int(8.5 * DPI), int(11 * DPI)   # 2550 x 3300 px
+sheet = Image.new("RGB", (LETTER_W, LETTER_H), "#FFFFFF")
 d = ImageDraw.Draw(sheet)
-cap = font(FR, int(3 * MM))
+cap = font(FR, int(3.2 * MM))
+title_f = font(FB, int(5 * MM))
+
+d.text((int(0.75 * DPI), int(0.55 * DPI)),
+       "DOSE PORTABLE — STICKER SHEET", font=title_f, fill="#0E1626")
+d.text((int(0.75 * DPI), int(0.55 * DPI) + int(6.5 * MM)),
+       "Print on US Letter (8.5 x 11 in) at 100% scale / no fit-to-page. "
+       "Sized for the Dose Storage (60.5 x 150 x 33 mm).",
+       font=cap, fill="#555555")
+
+
+def crop_marks(x, y, w, h):
+    """Light cut guides just outside each sticker corner."""
+    L = int(3 * MM)
+    g = "#AAAAAA"
+    for cx, cy, dx, dy in ((x, y, 1, 1), (x + w, y, -1, 1),
+                           (x, y + h, 1, -1), (x + w, y + h, -1, -1)):
+        d.line([cx - dx * L, cy, cx, cy], fill=g)
+        d.line([cx, cy - dy * L, cx, cy], fill=g)
+
 
 def place(img, x, y, caption):
     sheet.paste(img, (x, y))
-    d.rectangle([x - 2, y - 2, x + img.width + 2, y + img.height + 2],
-                outline="#CCCCCC")
-    d.text((x, y + img.height + int(1.5 * MM)), caption, font=cap,
+    d.rectangle([x - 1, y - 1, x + img.width + 1, y + img.height + 1],
+                outline="#BBBBBB")
+    crop_marks(x, y, img.width, img.height)
+    d.text((x, y + img.height + int(2 * MM)), caption, font=cap,
            fill="#555555")
 
-place(ator_front, PAD, PAD,
+
+MARGIN = int(0.75 * DPI)
+top = int(1.15 * DPI)
+row_gap = int(14 * MM)
+col2 = MARGIN + FW + int(18 * MM)
+
+place(ator_front, MARGIN, top,
       "ATORVASTATIN — FRONT (pharmacist-filled) · 50 x 58 mm")
-place(ator_qr, PAD * 2 + FW, PAD,
+place(ator_qr, col2, top,
       "ATORVASTATIN — SIDE QR · 28 x 50 mm")
-row2 = PAD * 2 + FH + int(10 * MM)
-place(new_front, PAD, row2,
+row2 = top + FH + row_gap
+place(new_front, MARGIN, row2,
       "NEW MEDICATION — FRONT (user-filled) · 50 x 58 mm")
-place(new_qr, PAD * 2 + FW, row2,
+place(new_qr, col2, row2,
       "NEW MEDICATION — SIDE QR · 28 x 50 mm")
-d.text((PAD, sheet_h - int(6 * MM)),
-       "DOSE PORTABLE STICKERS · print at 300 DPI / 100% scale · "
-       "sized for Dose Storage 60.5 x 150 x 33 mm",
-       font=cap, fill="#888888")
+
+# 1-inch calibration ruler so scale can be verified after printing
+ry = row2 + FH + int(18 * MM)
+rx = MARGIN
+d.line([rx, ry, rx + DPI, ry], fill="#0E1626", width=3)
+for i in range(5):
+    tick = rx + int(i * DPI / 4)
+    d.line([tick, ry - int(2 * MM), tick, ry], fill="#0E1626", width=3)
+d.text((rx, ry + int(1.5 * MM)),
+       'calibration: this bar must measure exactly 1 inch (25.4 mm)',
+       font=cap, fill="#555555")
+
 sheet.save(f"{OUT}/stickers_sheet.png", dpi=(DPI, DPI))
 
 # verify the QRs decode
@@ -219,4 +251,4 @@ from pyzbar.pyzbar import decode
 for name in ("sticker_atorvastatin_qr", "sticker_newmed_qr"):
     r = decode(Image.open(f"{OUT}/{name}.png"))
     print(name, "->", r[0].data.decode() if r else "NOT DECODED")
-print("sheet:", sheet.size, "front:", ator_front.size, "qr:", ator_qr.size)
+print("sheet:", sheet.size, "= 8.5x11in at", DPI, "DPI")
