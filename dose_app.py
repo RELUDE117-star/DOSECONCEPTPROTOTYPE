@@ -114,6 +114,9 @@ LIGHT_THEME = {
 }
 
 ACCENT_BLUE = "#5FA3F5"
+DOSE_BLUE = "#6AA7F8"      # website dose-blue (buttons, rings, counts)
+DOSE_BLUE_LT = "#8FBAFA"   # website light blue (countdown text, spin arrow)
+DOSE_GREEN = "#5BD07B"     # website success green
 SETTINGS_ICON_COLORS = ["#5FA3F5", "#FF9F43", "#30D158", "#AF52DE"]
 
 KNOWN_SLOTS = {
@@ -202,21 +205,92 @@ def _pil_ring(size, progress, accent, bg_color, inner_color, scale=2):
     return img.resize((size, size), resample)
 
 
-def _pil_spinner(size, angle, accent, bg_color, inner_color, scale=2):
-    """Rotating arc ring for the SPIN TO DISPENSE animation."""
+def _pil_stroke_ring(size, progress, scale=2):
+    """Website-style hold ring: faint white track + blue arc, round caps."""
+    import math
     ss = size * scale
     img = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    ring_w = 14 * scale
-    d.ellipse([0, 0, ss - 1, ss - 1], fill=_hex_to_rgba(bg_color))
-    ac = _hex_to_rgba(accent)
-    # Main sweeping arc + fading trail
-    d.pieslice([0, 0, ss - 1, ss - 1], angle, angle + 110, fill=ac)
-    trail = (ac[0], ac[1], ac[2], 90)
-    d.pieslice([0, 0, ss - 1, ss - 1], angle - 50, angle, fill=trail)
-    inner_pad = ring_w
-    d.ellipse([inner_pad, inner_pad, ss - 1 - inner_pad, ss - 1 - inner_pad],
-              fill=_hex_to_rgba(inner_color))
+    lw = 15 * scale
+    pad = lw // 2 + scale
+    box = [pad, pad, ss - 1 - pad, ss - 1 - pad]
+    d.arc(box, 0, 360, fill=(255, 255, 255, 31), width=lw)
+    if progress > 0:
+        ac = _hex_to_rgba(DOSE_BLUE)
+        start, end = -90, -90 + progress * 360
+        d.arc(box, start, end, fill=ac, width=lw)
+        # round caps
+        r = (ss - 2 * pad) / 2
+        ccx = ccy = ss / 2
+        for ang in (start, end):
+            a = math.radians(ang)
+            ex, ey = ccx + r * math.cos(a), ccy + r * math.sin(a)
+            d.ellipse([ex - lw / 2, ey - lw / 2, ex + lw / 2, ey + lw / 2],
+                      fill=ac)
+    resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
+    return img.resize((size, size), resample)
+
+
+def _pil_spinner(size, angle, scale=2):
+    """Website-style spin dial: rotating dashed blue circle with a
+    light-blue circular arrow in the middle (matches dose.html)."""
+    import math
+    ss = size * scale
+    img = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    ac = _hex_to_rgba(DOSE_BLUE)
+    lt = _hex_to_rgba(DOSE_BLUE_LT)
+
+    # Dashed outer circle (dash ~14px on / 12px off at website scale)
+    lw = 6 * scale
+    pad = lw // 2 + scale
+    r = (ss - 2 * pad) / 2
+    circumference = 2 * math.pi * r
+    dash_deg = 360 * (14 * scale) / circumference
+    gap_deg = 360 * (12 * scale) / circumference
+    box = [pad, pad, ss - 1 - pad, ss - 1 - pad]
+    a = angle
+    while a < angle + 360:
+        end = min(a + dash_deg, angle + 360)
+        d.arc(box, a, end, fill=ac, width=lw)
+        a += dash_deg + gap_deg
+
+    # Center circular arrow (↻): open arc + arrowhead, rotates with dial
+    cx = cy = ss / 2
+    ar = ss * 0.17
+    aw = 9 * scale
+    abox = [cx - ar, cy - ar, cx + ar, cy + ar]
+    arc_start = angle - 60
+    arc_end = arc_start + 290
+    d.arc(abox, arc_start, arc_end, fill=lt, width=aw)
+    # arrowhead at the arc end, pointing along direction of travel
+    te = math.radians(arc_end)
+    tx, ty = cx + ar * math.cos(te), cy + ar * math.sin(te)
+    tang = te + math.pi / 2  # tangent (clockwise travel)
+    ah = 22 * scale
+    hw = 13 * scale
+    tipx, tipy = tx + ah * math.cos(tang), ty + ah * math.sin(tang)
+    perp = tang + math.pi / 2
+    b1 = (tx + hw * math.cos(perp), ty + hw * math.sin(perp))
+    b2 = (tx - hw * math.cos(perp), ty - hw * math.sin(perp))
+    d.polygon([b1, b2, (tipx, tipy)], fill=lt)
+    resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
+    return img.resize((size, size), resample)
+
+
+def _pil_soft_check(size, scale=2):
+    """Website-style success mark: translucent green circle + green check."""
+    ss = size * scale
+    img = Image.new("RGBA", (ss, ss), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    g = _hex_to_rgba(DOSE_GREEN)
+    d.ellipse([0, 0, ss - 1, ss - 1], fill=(g[0], g[1], g[2], 38))
+    lw = max(3, 5 * scale)
+    x1, y1 = int(ss * 0.30), int(ss * 0.52)
+    x2, y2 = int(ss * 0.44), int(ss * 0.66)
+    x3, y3 = int(ss * 0.72), int(ss * 0.36)
+    d.line([x1, y1, x2, y2], fill=g, width=lw)
+    d.line([x2, y2, x3, y3], fill=g, width=lw)
     resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
     return img.resize((size, size), resample)
 
@@ -787,22 +861,17 @@ class DoseApp:
                 tk_card = self._get_tk_image(f"home_card_{i}", card_img)
                 c.create_image(26, y, image=tk_card, anchor="nw")
 
-                # Slim accent bar on the left edge of the card
-                bar_h = card_h - 28
-                bar_img = _pil_rounded_rect(6, bar_h, 3, entry["accent"])
-                tk_bar = self._get_tk_image(f"home_bar_{i}", bar_img)
-                c.create_image(44, y + (card_h - bar_h) // 2,
-                               image=tk_bar, anchor="nw")
-
-                text_x = 44 + 6 + 20
-                c.create_text(text_x, y + card_h // 2 - 14, text=entry["time"],
+                # Website-style card: name on top, time below, count right
+                text_x = 26 + 30
+                c.create_text(text_x, y + card_h // 2 - 13, text=entry["name"],
                               font=self.font_name, fill=t["fg"], anchor="w")
-                c.create_text(text_x, y + card_h // 2 + 12, text=entry["name"],
+                c.create_text(text_x, y + card_h // 2 + 14, text=entry["time"],
                               font=self.font_small, fill=t["muted"], anchor="w")
 
                 cnt = entry.get("count", 0)
-                c.create_text(card_w - 6, y + card_h // 2, text=f"{cnt} pills",
-                              font=self.font_title, fill=entry["accent"],
+                c.create_text(26 + card_w - 28, y + card_h // 2,
+                              text=f"{cnt} pills left",
+                              font=self.font_title, fill=DOSE_BLUE,
                               anchor="e")
 
                 self._click_zones.append(
@@ -1753,36 +1822,29 @@ class DoseApp:
     def _draw_hold(self, c):
         t = self.theme
         md = self.med_data[self.dispense_pill]
-        accent = SLOT_COLORS.get(self.dispense_pill, "#C084FC")
         cx = CONTENT_W // 2
-
-        c.create_text(cx, 70, text="HOLD TO CONFIRM DISPENSE",
-                      font=self.font_label, fill=t["muted"], anchor="center")
-        c.create_text(cx, 96, text=md["name"],
-                      font=self.font_name_lg, fill=accent, anchor="center")
-
-        cnt = md["count"]
-        c.create_text(cx, 132, text=f"{cnt} pill{'s' if cnt != 1 else ''} remaining",
-                      font=self.font_body, fill=t["muted"], anchor="center")
 
         elapsed = time.time() - self.hold_start if self.hold_start > 0 else 0
         progress = min(elapsed / HOLD_TIME, 1.0) if self.hold_start > 0 else 0
 
         ring_size = 200
-        ring_img = _pil_ring(ring_size, progress, accent,
-                             t["elevated_bg"], t["card_bg"])
+        ring_img = _pil_stroke_ring(ring_size, progress)
         tk_ring = self._get_tk_image("hold_ring", ring_img)
         ring_x = cx - ring_size // 2
-        ring_y = 168
+        ring_y = 90
         c.create_image(ring_x, ring_y, image=tk_ring, anchor="nw")
 
-        remaining = max(0, HOLD_TIME - elapsed) if self.hold_start > 0 else HOLD_TIME
-        c.create_text(cx, ring_y + ring_size // 2 - 10,
-                      text=f"{remaining:.1f}",
-                      font=self.font_hold_big, fill=t["fg"], anchor="center")
-        c.create_text(cx, ring_y + ring_size // 2 + 22,
-                      text="SECONDS", font=self.font_hold_label,
-                      fill=t["muted"], anchor="center")
+        secs = max(1, int(HOLD_TIME - elapsed) + 1) if self.hold_start > 0 \
+            else int(HOLD_TIME)
+        c.create_text(cx, ring_y + ring_size // 2,
+                      text=f"{secs}s",
+                      font=self.font_hold_big, fill=DOSE_BLUE_LT,
+                      anchor="center")
+
+        c.create_text(cx, 332, text="Hold to Confirm You Want to Dispense",
+                      font=self.font_name, fill=t["fg"], anchor="center")
+        c.create_text(cx, 362, text=f"1 pill · {md['name']}",
+                      font=self.font_body, fill=t["muted"], anchor="center")
 
         cancel_w, cancel_h = 160, 52
         cancel_img = _pil_rounded_rect(cancel_w, cancel_h, 16, t["elevated_bg"])
@@ -1883,30 +1945,22 @@ class DoseApp:
     def _draw_spin(self, c):
         t = self.theme
         md = self.med_data[self.dispense_pill]
-        accent = SLOT_COLORS.get(self.dispense_pill, "#C084FC")
         cx = CONTENT_W // 2
 
-        c.create_text(cx, 70, text="SPIN TO DISPENSE",
-                      font=self.font_label, fill=t["muted"], anchor="center")
-        c.create_text(cx, 96, text=md["name"],
-                      font=self.font_name_lg, fill=accent, anchor="center")
-        c.create_text(cx, 132, text="Turn the spindle until your dose drops",
-                      font=self.font_body, fill=t["muted"], anchor="center")
-
         elapsed = time.time() - self.spin_start
-        angle = (elapsed * 240) % 360  # smooth continuous rotation
+        angle = (elapsed * 200) % 360  # smooth continuous rotation
 
         ring_size = 200
-        spin_img = _pil_spinner(ring_size, angle, accent,
-                                t["elevated_bg"], t["card_bg"])
+        spin_img = _pil_spinner(ring_size, angle)
         tk_spin = self._get_tk_image("spin_ring", spin_img)
         ring_x = cx - ring_size // 2
-        ring_y = 168
+        ring_y = 90
         c.create_image(ring_x, ring_y, image=tk_spin, anchor="nw")
 
-        c.create_text(cx, ring_y + ring_size // 2,
-                      text="SPIN", font=self.font_hold_big,
-                      fill=t["fg"], anchor="center")
+        c.create_text(cx, 332, text="Spin the Spindle",
+                      font=self.font_name, fill=t["fg"], anchor="center")
+        c.create_text(cx, 362, text=f"1 pill · {md['name']}",
+                      font=self.font_body, fill=t["muted"], anchor="center")
 
         cancel_w, cancel_h = 160, 52
         cancel_img = _pil_rounded_rect(cancel_w, cancel_h, 16, t["elevated_bg"])
@@ -1924,24 +1978,20 @@ class DoseApp:
     def _draw_confirm_dispense(self, c):
         t = self.theme
         md = self.med_data[self.dispense_pill]
-        accent = SLOT_COLORS.get(self.dispense_pill, "#C084FC")
         cx = CONTENT_W // 2
 
-        c.create_text(cx, 90, text="DOSE READY",
-                      font=self.font_label, fill=t["muted"], anchor="center")
-        c.create_text(cx, 118, text=md["name"],
-                      font=self.font_name_lg, fill=accent, anchor="center")
-        c.create_text(cx, 156, text="Did your dose drop? Confirm to log it.",
-                      font=self.font_body, fill=t["muted"], anchor="center")
+        c.create_text(cx, 150, text=f"Dispense 1 pill · {md['name']}?",
+                      font=self.font_name_lg, fill=t["fg"], anchor="center")
 
-        btn_w, btn_h = 380, 72
-        btn_img = _pil_rounded_rect(btn_w, btn_h, 20, accent)
+        # Pill-shaped blue button, dark navy text — same as dose.html
+        btn_w, btn_h = 300, 84
+        btn_img = _pil_rounded_rect(btn_w, btn_h, btn_h // 2, DOSE_BLUE)
         tk_btn = self._get_tk_image("confirm_btn", btn_img)
         btn_x = cx - btn_w // 2
-        btn_y = 220
+        btn_y = 214
         c.create_image(btn_x, btn_y, image=tk_btn, anchor="nw")
-        c.create_text(cx, btn_y + btn_h // 2, text="CONFIRM DISPENSE",
-                      font=self.font_name, fill="#FFFFFF", anchor="center")
+        c.create_text(cx, btn_y + btn_h // 2, text="Confirm",
+                      font=self.font_name_lg, fill="#06101E", anchor="center")
         self._click_zones.append(
             (btn_x, btn_y, btn_x + btn_w, btn_y + btn_h,
              self._confirm_dispense))
@@ -1994,17 +2044,21 @@ class DoseApp:
     def _draw_dispensed(self, c):
         t = self.theme
         md = self.med_data[self.dispense_pill]
-        accent = SLOT_COLORS.get(self.dispense_pill, "#C084FC")
         cx = CONTENT_W // 2
 
-        c.create_text(cx, 68, text="DISPENSED",
-                      font=self.font_label, fill=t["muted"], anchor="center")
-        c.create_text(cx, 92, text=md["name"],
-                      font=self.font_name_lg, fill=accent, anchor="center")
-
-        check_img = _pil_checkmark(96, ACCENT_BLUE)
+        check_size = 130
+        check_img = _pil_soft_check(check_size)
         tk_check = self._get_tk_image("dispensed_check", check_img)
-        c.create_image(cx - 48, 140, image=tk_check, anchor="nw")
+        c.create_image(cx - check_size // 2, 96, image=tk_check, anchor="nw")
+
+        c.create_text(cx, 282, text=f"Dispensed · {md['name']}",
+                      font=self.font_name, fill=t["fg"], anchor="center")
+        try:
+            logged = datetime.now().strftime("%-I:%M %p")
+        except ValueError:
+            logged = datetime.now().strftime("%I:%M %p").lstrip("0")
+        c.create_text(cx, 314, text=f"Logged {logged}",
+                      font=self.font_body, fill=t["muted"], anchor="center")
 
         remaining = md["count"]
         text = (f"{remaining} pill{'s' if remaining != 1 else ''} remaining"
