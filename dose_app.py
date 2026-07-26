@@ -599,6 +599,7 @@ class DoseApp:
         self._alert_return = "home"
         self._addmed_cancel_time = 0.0
         self._qty_cancel_time = 0.0
+        self.qr_x_pos = {}   # last seen camera x-position per slot
         self.camera = None
         self.camera_running = False
         self.mpr = None
@@ -1119,10 +1120,12 @@ class DoseApp:
         all_keys = SLOT_KEYS + (["demo"] if self._demo_registered else [])
         visible = [k for k in all_keys
                    if self._is_loaded(k) and self._is_qr_present(k)]
+        # Mirror the physical arrangement in the unit: the rightmost QR
+        # in the camera frame is listed at the top, the leftmost at the
+        # bottom — reordering live as bottles are swapped around
+        visible.sort(key=lambda k: self.qr_x_pos.get(k, 0), reverse=True)
 
-        for i, key in enumerate(all_keys):
-            if key not in visible:
-                continue
+        for key in visible:
             md = self.med_data[key]
             accent = SLOT_COLORS.get(key, "#C084FC")
             vi = visible.index(key)
@@ -3195,6 +3198,7 @@ class DoseApp:
             # Known slot (blue/red/green/yellow) — instant recognition
             if slot in KNOWN_SLOTS:
                 self.qr_last_seen[slot] = now
+                self.qr_x_pos[slot] = x_pos
                 md = self.med_data[slot]
                 # The QR payload is the source of truth for the name —
                 # overwrites any stale saved name (e.g. old "Vitamin D"
@@ -3217,6 +3221,7 @@ class DoseApp:
 
             # Demo / unknown slot — new medication flow
             self.qr_last_seen["demo"] = now
+            self.qr_x_pos["demo"] = x_pos
             if not self._demo_registered:
                 if (not triggered_addmed and self.dispense_state == 0
                         and self.mode in ("home", "storage")
