@@ -1219,11 +1219,22 @@ class DoseApp:
         info_lines = MED_INFO.get(md.get("name", "").strip().lower(),
                                   MED_INFO_DEFAULT)
         ly = info_y + 28
+        try:
+            line_h = self.font_body.metrics("linespace")
+        except Exception:
+            line_h = 26
         for line in info_lines[:3]:
-            c.create_text(px, ly, text="·  " + line,
+            txt = "·  " + line
+            c.create_text(px, ly, text=txt,
                           font=self.font_body, fill=t["fg"], anchor="nw",
                           width=354)
-            ly += 34
+            # advance by however many rows the text actually wraps to,
+            # so wrapped lines never draw over the next one
+            try:
+                rows = max(1, math.ceil(self.font_body.measure(txt) / 354))
+            except Exception:
+                rows = 1
+            ly += rows * line_h + 8
 
         # DISPENSE button — pinned to the bottom of the card
         disp_y = 396
