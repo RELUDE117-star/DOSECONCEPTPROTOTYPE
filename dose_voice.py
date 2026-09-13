@@ -415,6 +415,47 @@ class DoseVoice:
             return i, name + " (no signal yet)", rate
         return None, "default", SAMPLE_RATE
 
+    def _pw_dump(self):
+        try:
+            r = subprocess.run(["pw-dump"], capture_output=True,
+                               text=True, timeout=10,
+                               env=self._audio_env())
+            return json.loads(r.stdout) if r.stdout else []
+        except Exception:
+            return []
+
+    @staticmethod
+    def _parse_pw_dump(dump):
+        """(bt_devices, sources): Bluetooth devices with their
+        available profiles, and live audio input sources."""
+        devices, sources = [], []
+        for obj in dump:
+            try:
+                info = obj.get("info") or {}
+                props = info.get("props") or {}
+                if obj.get("type", "").endswith("Interface:Device") \
+                        and props.get("device.api") == "bluez5":
+                    profs = []
+                    for p in (info.get("params") or {}).get(
+                            "EnumProfile") or []:
+                        profs.append({"index": p.get("index"),
+                                      "name": p.get("name", "")})
+                    devices.append({
+                        "id": obj.get("id"),
+                        "name": props.get("device.description",
+                                          props.get("device.name",
+                                                    "?")),
+                        "profiles": profs})
+                elif obj.get("type", "").endswith("Interface:Node") \
+                        and (props.get("media.class")
+                             == "Audio/Source"):
+                    sources.append(props.get(
+                        "node.description",
+                        props.get("node.name", "?")))
+            except Exception:
+                continue
+        return devices, sources
+
     def _engage_bt_mic(self):
         """Force Bluetooth cards into their headset (mic-capable)
         profile — AirPods stay in playback-only A2DP until asked."""
@@ -445,6 +486,30 @@ class DoseVoice:
                         return
                 except Exception:
                     continue
+
+    def _engage_bt_mic_pw(self):
+        """Profile switch using PipeWire's own tools (pw-dump +
+        pw-cli) — these ship with PipeWire itself, so this works
+        even when pulseaudio-utils was never installed."""
+        devices, _ = self._parse_pw_dump(self._pw_dump())
+        for dev in devices:
+            head = [p for p in dev["profiles"]
+                    if "head" in (p["name"] or "").lower()]
+            if not head or dev["id"] is None:
+                continue
+            idx = head[0]["index"]
+            try:
+                subprocess.run(
+                    ["pw-cli", "set-param", str(dev["id"]),
+                     "Profile",
+                     '{ "index": %d, "save": true }' % idx],
+                    capture_output=True, timeout=10,
+                    env=self._audio_env())
+                time.sleep(1.0)
+                return True
+            except Exception:
+                continue
+        return False
 
     def list_inputs(self):
         """Names of all input-capable devices, for the mic selector."""
@@ -535,23 +600,40 @@ class DoseVoice:
         except Exception:
             pass
 
-        low = report.lower()
-        if "pactl -> (not installed)" in low \
-                or "pactl' ->" in low:
-            return ("Bluetooth audio tools are still installing — "
-                    "restart the app in a minute, or run DOSE.sh")
+        # Decisive facts straight from PipeWire itself
+        devices, sources = self._parse_pw_dump(self._pw_dump())
+        lines2 = ["", "pw-dump summary:"]
+        for d in devices:
+            lines2.append("  bt device: %s profiles=%s" % (
+                d["name"], [p["name"] for p in d["profiles"]]))
+        for s in sources:
+            lines2.append("  audio source: %s" % s)
+        try:
+            with open(os.path.join(VOICE_DIR, "mic_report.txt"),
+                      "a") as f:
+                f.write("\n".join(lines2))
+        except Exception:
+            pass
+
         if "usb" in (self.mic_name or "").lower():
             return ("USB mic selected but silent — capture volume "
                     "was probably muted; I've unmuted it, tap "
                     "RETEST while speaking")
-        if "bluez" not in low:
-            return ("Bluetooth mic not visible to the audio system "
-                    "— re-pair, or use a USB mic")
-        if "pw-record" in low or "parec" in low:
-            return ("Bluetooth source exists but is silent — AirPods "
-                    "mic support on Pi is unreliable; a USB mic "
-                    "always works")
-        return "see voice/mic_report.txt"
+        if not devices:
+            return ("No Bluetooth device visible to PipeWire — "
+                    "re-pair the AirPods (SCAN & PAIR), or use "
+                    "a USB mic")
+        has_head = any("head" in (p["name"] or "").lower()
+                       for d in devices for p in d["profiles"])
+        if not has_head:
+            return ("Your AirPods offer NO microphone profile to "
+                    "this Pi — a known AirPods-on-Linux limit. "
+                    "Use a USB mic; AirPods stay as the speaker")
+        if not sources:
+            return ("Mic profile exists — switching it now; tap "
+                    "RETEST in a few seconds")
+        return ("A mic source exists but was silent — tap RETEST "
+                "while speaking close to the mic")
 
     def mic_level(self, seconds=2.0):
         """Live mic test for the Settings screen: taps the RUNNING
@@ -723,6 +805,7 @@ class DoseVoice:
             headsets engage their hands-free mic profile — ALSA/
             PortAudio alone often sees only a dead route."""
             self._engage_bt_mic()
+            self._engage_bt_mic_pw()
             cmds = (
                 ["pw-record", "--rate", "16000", "--channels", "1",
                  "--format", "s16", "-"],
