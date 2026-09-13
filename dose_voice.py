@@ -467,6 +467,24 @@ class DoseVoice:
         except Exception:
             return "auto"
 
+    def speaker_test(self):
+        """Play a short spoken line on the current speaker. Returns
+        the playback path used, or False if nothing could play."""
+        try:
+            voice = self._load_piper()
+            fd, path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            with wave.open(path, "wb") as w:
+                voice.synthesize_wav(
+                    "Speaker test. If you can hear me, Pilot, this "
+                    "speaker is working.", w)
+            method = self._play_wav(path)
+            os.unlink(path)
+            return method
+        except Exception:
+            return self._play_wav(
+                "/usr/share/sounds/alsa/Front_Center.wav")
+
     def mic_report(self):
         """Write a full microphone diagnostic to voice/mic_report.txt
         and return a one-line human verdict. Called when a mic test
@@ -973,7 +991,7 @@ class DoseVoice:
                                stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, timeout=120)
             if r.returncode == 0:
-                return True
+                return "system default (aplay)"
         except Exception:
             pass
         try:
@@ -984,7 +1002,7 @@ class DoseVoice:
             with self._sd.RawOutputStream(samplerate=rate, channels=ch,
                                           dtype="int16") as out:
                 out.write(data)
-            return True
+            return "PortAudio default output"
         except Exception:
             return False
 

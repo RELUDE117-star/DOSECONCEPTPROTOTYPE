@@ -3955,12 +3955,13 @@ class DoseApp:
         show_report = (r is not None and r <= 5
                        and getattr(self, "_mic_report_lines", None))
         buttons = [("TEST MIC", self._voice_mic_test, False),
-                   ("SCAN & PAIR",
+                   ("TEST SPKR", self._speaker_test, False),
+                   ("SCAN",
                     lambda: self._bt_refresh(scan=True), False)]
         if show_report:
             buttons.append(("DETAILS", self._open_mic_report, False))
         buttons.append(("CLOSE", self._bt_close, True))
-        bw = 136
+        bw = 108
         bx = 56
         for label, cb, primary in buttons:
             b_img = _pil_rounded_rect(bw, 44, 14, DOSE_BLUE if primary
@@ -3972,7 +3973,48 @@ class DoseApp:
                           fill="#06101E" if primary else t["fg"],
                           anchor="center")
             self._click_zones.append((bx, 400, bx + bw, 444, cb))
-            bx += bw + 10
+            bx += bw + 8
+
+    def _speaker_test(self):
+        """Play a spoken test line and report which output path
+        carried it — answers 'can I hear anything?' directly."""
+        bt = self._bt_state()
+        if bt["busy"]:
+            return
+        bt["busy"] = True
+        bt["status"] = "Playing speaker test — listen…"
+        self._draw_frame()
+
+        def worker():
+            method = False
+            try:
+                if self.voice:
+                    method = self.voice.speaker_test()
+                else:
+                    r = subprocess.run(
+                        ["aplay", "-q",
+                         "/usr/share/sounds/alsa/Front_Center.wav"],
+                        capture_output=True, timeout=30)
+                    method = ("system default (aplay)"
+                              if r.returncode == 0 else False)
+            except Exception:
+                method = False
+
+            def done():
+                bt["busy"] = False
+                bt["status"] = (
+                    f"Speaker played via {method} — did you hear "
+                    "Amy? If not, the wrong output is selected."
+                    if method else
+                    "Speaker playback FAILED — no working output "
+                    "device found.")
+                if self.mode == "btaudio":
+                    self._draw_frame()
+            try:
+                self.root.after(0, done)
+            except Exception:
+                pass
+        threading.Thread(target=worker, daemon=True).start()
 
     def _set_mic_device(self, value):
         self.settings["mic_device"] = value
