@@ -3428,8 +3428,115 @@ class DoseApp:
                                        "vosk not installed",
                                        "piper not installed"):
                 self._voice_self_install()
+            elif self.voice.reason in ("speech model missing",
+                                       "voice model missing"):
+                self._voice_download_models()
         except Exception:
             self.voice = None
+
+    def _voice_download_models(self):
+        """Missing speech/voice models: fetch them ourselves in the
+        background (Vosk small ~40 MB, Piper Amy voice ~60 MB), then
+        start the assistant. Pi only, once per boot."""
+        if getattr(self, "_voice_downloading", False):
+            return
+        if not hasattr(self, "_voice_dl_tries"):
+            self._voice_dl_tries = 0
+        on_pi = (os.path.exists("/boot/config.txt")
+                 or os.path.exists("/boot/firmware/config.txt"))
+        if not on_pi or os.environ.get("DOSE_DISABLE_SELF_INSTALL"):
+            return
+        self._voice_downloading = True
+
+        def fetch(url, path, min_bytes):
+            try:
+                data = urlopen(url, timeout=600).read()
+                if len(data) < min_bytes:
+                    return False
+                with open(path, "wb") as f:
+                    f.write(data)
+                return True
+            except Exception:
+                return False
+
+        def worker():
+            import glob as _glob
+            import tempfile as _tf
+            vdir = os.path.expanduser("~/dose-home-station/voice")
+            try:
+                os.makedirs(vdir, exist_ok=True)
+            except Exception:
+                pass
+
+            if not _glob.glob(os.path.join(vdir, "vosk-model*")):
+                fd, zpath = _tf.mkstemp(suffix=".zip")
+                os.close(fd)
+                if fetch("https://alphacephei.com/vosk/models/"
+                         "vosk-model-small-en-us-0.15.zip",
+                         zpath, 10_000_000):
+                    try:
+                        import zipfile
+                        with zipfile.ZipFile(zpath) as z:
+                            z.extractall(vdir)
+                    except Exception:
+                        pass
+                try:
+                    os.unlink(zpath)
+                except Exception:
+                    pass
+
+            if not _glob.glob(os.path.join(vdir, "*.onnx")):
+                base = ("https://huggingface.co/rhasspy/piper-voices/"
+                        "resolve/v1.0.0/en/en_US/amy/medium/")
+                got = (fetch(base + "en_US-amy-medium.onnx",
+                             os.path.join(vdir, "en_US-amy-medium.onnx"),
+                             10_000_000)
+                       and fetch(base + "en_US-amy-medium.onnx.json",
+                                 os.path.join(
+                                     vdir, "en_US-amy-medium.onnx.json"),
+                                 500))
+                if not got:
+                    for p in ("en_US-amy-medium.onnx",
+                              "en_US-amy-medium.onnx.json"):
+                        try:
+                            os.unlink(os.path.join(vdir, p))
+                        except Exception:
+                            pass
+                    fd, tpath = _tf.mkstemp(suffix=".tar.gz")
+                    os.close(fd)
+                    if fetch("https://github.com/rhasspy/piper/releases/"
+                             "download/v0.0.2/voice-en-us-amy-low.tar.gz",
+                             tpath, 10_000_000):
+                        try:
+                            import tarfile
+                            with tarfile.open(tpath) as tf:
+                                tf.extractall(vdir)
+                        except Exception:
+                            pass
+                    try:
+                        os.unlink(tpath)
+                    except Exception:
+                        pass
+
+            def finish():
+                self._voice_downloading = False
+                self._start_voice()
+                self._draw_frame()
+                # network hiccup? retry automatically, up to 5 times
+                still_missing = (
+                    self.voice is not None
+                    and not self.voice.available
+                    and "model missing" in self.voice.reason)
+                if still_missing and self._voice_dl_tries < 5:
+                    self._voice_dl_tries += 1
+                    self.root.after(120000,
+                                    self._voice_download_models)
+            try:
+                self.root.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _voice_self_install(self):
         """The audio libraries are missing even though the voice files
@@ -3501,6 +3608,8 @@ class DoseApp:
     def _voice_status_text(self):
         if getattr(self, "_voice_installing", False):
             return "Voice: installing audio components…"
+        if getattr(self, "_voice_downloading", False):
+            return "Voice: downloading speech models… (a few minutes)"
         if self.voice is None:
             return "Voice: run DOSE.sh to finish setup"
         if not self.voice.available:
