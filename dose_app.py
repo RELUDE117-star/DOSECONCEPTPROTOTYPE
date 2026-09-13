@@ -3529,32 +3529,57 @@ class DoseApp:
         self._audio_pkg_status = "installing audio tools…"
 
         def worker():
+            import shutil as _sh
             status = ""
             try:
-                r = subprocess.run(
-                    ["sudo", "-n", "apt-get", "install", "-y",
-                     "pipewire", "pipewire-pulse", "pipewire-alsa",
-                     "wireplumber", "libspa-0.2-bluez5",
-                     "pulseaudio-utils", "alsa-utils"],
-                    capture_output=True, text=True, timeout=600)
-                err = (r.stderr or "").lower()
-                if r.returncode == 0:
-                    status = "audio tools installed ✓"
+                # refresh the package index first — a stale index is
+                # the usual reason a package name fails to resolve
+                subprocess.run(["sudo", "-n", "apt-get", "update"],
+                               capture_output=True, text=True,
+                               timeout=300)
+                # install ONE BY ONE: apt is all-or-nothing per
+                # command, so a single unresolvable package must
+                # never sink the critical ones
+                pkgs = ["pulseaudio-utils", "pipewire-pulse",
+                        "pipewire", "pipewire-alsa", "wireplumber",
+                        "alsa-utils", "libspa-0.2-bluez5"]
+                failed = []
+                sudo_blocked = False
+                for pkg in pkgs:
+                    try:
+                        r = subprocess.run(
+                            ["sudo", "-n", "apt-get", "install",
+                             "-y", pkg],
+                            capture_output=True, text=True,
+                            timeout=300)
+                        err = (r.stderr or "").lower()
+                        if r.returncode != 0:
+                            if ("password is required" in err
+                                    or "a terminal is required"
+                                    in err):
+                                sudo_blocked = True
+                                break
+                            if "lock" in err:
+                                self._audio_pkg_last = 0
+                            failed.append(pkg)
+                    except Exception:
+                        failed.append(pkg)
+                if sudo_blocked:
+                    status = ("can't install: sudo needs a password "
+                              "— run DOSE.sh once to finish")
+                elif _sh.which("pactl"):
+                    status = ("audio tools installed ✓"
+                              + (" (optional missing: %s)"
+                                 % ", ".join(failed) if failed
+                                 else ""))
                     subprocess.run(
                         ["systemctl", "--user", "restart",
                          "wireplumber", "pipewire",
                          "pipewire-pulse"],
                         capture_output=True, timeout=30)
-                elif "password is required" in err or "sudo:" in err:
-                    status = ("can't install: sudo needs a password "
-                              "— run DOSE.sh once to finish")
-                elif "lock" in err:
-                    status = ("apt is busy (system updates?) — "
-                              "will retry")
-                    self._audio_pkg_last = 0
                 else:
-                    status = ("install failed: "
-                              + (r.stderr or "unknown").strip()[-80:])
+                    status = ("install incomplete — failed: "
+                              + ", ".join(failed[:3]))
             except Exception as e:
                 status = "install failed: %s" % e
 
@@ -3740,13 +3765,14 @@ class DoseApp:
         self._voice_installing = True
 
         def worker():
-            try:
-                subprocess.run(["sudo", "-n", "apt-get", "install",
-                                "-y", "libportaudio2", "python3-srt",
-                                "alsa-utils"],
-                               capture_output=True, timeout=300)
-            except Exception:
-                pass
+            for pkg in ("libportaudio2", "python3-srt",
+                        "alsa-utils"):
+                try:
+                    subprocess.run(["sudo", "-n", "apt-get",
+                                    "install", "-y", pkg],
+                                   capture_output=True, timeout=300)
+                except Exception:
+                    pass
             for extra_env in (None, {"SETUPTOOLS_USE_DISTUTILS":
                                      "stdlib"}):
                 env = dict(os.environ)
