@@ -89,11 +89,66 @@ fi  # end TOUCH_SENSOR_ENABLED
 # ── Copy app files ──
 mkdir -p "$APP_DIR"
 cp "$SCRIPT_DIR/dose_app.py" "$APP_DIR/dose_app.py" 2>/dev/null || true
+cp "$SCRIPT_DIR/dose_voice.py" "$APP_DIR/dose_voice.py" 2>/dev/null || true
 cp "$SCRIPT_DIR/DOSE.sh" "$APP_DIR/DOSE.sh" 2>/dev/null || true
 cp "$SCRIPT_DIR/dose_logo.png" "$APP_DIR/dose_logo.png" 2>/dev/null || true
 cp "$SCRIPT_DIR/demo_qr.png" "$APP_DIR/demo_qr.png" 2>/dev/null || true
 chmod +x "$APP_DIR"/*.py "$APP_DIR"/*.sh 2>/dev/null || true
 touch "$APP_DIR/.ready"
+
+# ── Voice assistant ("Hey Dose") — offline models, one-time setup ──
+VOICE_DIR="$APP_DIR/voice"
+mkdir -p "$VOICE_DIR"
+
+if [ ! -f "$VOICE_DIR/.voice_ready" ]; then
+    echo "  Setting up the voice assistant (one time, ~120 MB)..."
+    sudo apt install -y libportaudio2 alsa-utils python3-srt 2>/dev/null || true
+    pip install --break-system-packages vosk sounddevice piper-tts 2>/dev/null \
+        || pip install vosk sounddevice piper-tts 2>/dev/null || true
+
+    # Speech recognition model (Vosk small English, ~40 MB)
+    if ! ls -d "$VOICE_DIR"/vosk-model* >/dev/null 2>&1; then
+        echo "  Downloading speech recognition model..."
+        TMPZ=$(mktemp --suffix=.zip)
+        if curl -sSL -o "$TMPZ" "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip" \
+                && [ "$(stat -c%s "$TMPZ" 2>/dev/null || echo 0)" -gt 10000000 ]; then
+            (cd "$VOICE_DIR" && unzip -oq "$TMPZ")
+        else
+            echo "  (speech model download failed — voice will retry next launch)"
+        fi
+        rm -f "$TMPZ"
+    fi
+
+    # Neural voice (Piper "Amy" — soft human voice)
+    if ! ls "$VOICE_DIR"/*.onnx >/dev/null 2>&1; then
+        echo "  Downloading the voice..."
+        if curl -sSL -o "$VOICE_DIR/en_US-amy-medium.onnx" \
+                "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/amy/medium/en_US-amy-medium.onnx" \
+            && curl -sSL -o "$VOICE_DIR/en_US-amy-medium.onnx.json" \
+                "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/amy/medium/en_US-amy-medium.onnx.json" \
+            && [ "$(stat -c%s "$VOICE_DIR/en_US-amy-medium.onnx" 2>/dev/null || echo 0)" -gt 10000000 ]; then
+            echo "  Voice installed: Amy (medium)."
+        else
+            rm -f "$VOICE_DIR/en_US-amy-medium.onnx" "$VOICE_DIR/en_US-amy-medium.onnx.json"
+            echo "  Trying fallback voice source..."
+            TMPT=$(mktemp --suffix=.tar.gz)
+            if curl -sSL -o "$TMPT" "https://github.com/rhasspy/piper/releases/download/v0.0.2/voice-en-us-amy-low.tar.gz" \
+                    && [ "$(stat -c%s "$TMPT" 2>/dev/null || echo 0)" -gt 10000000 ]; then
+                tar xzf "$TMPT" -C "$VOICE_DIR"
+                echo "  Voice installed: Amy (fallback)."
+            else
+                echo "  (voice download failed — will retry next launch)"
+            fi
+            rm -f "$TMPT"
+        fi
+    fi
+
+    # Mark ready only when both models are in place
+    if ls -d "$VOICE_DIR"/vosk-model* >/dev/null 2>&1 && ls "$VOICE_DIR"/*.onnx >/dev/null 2>&1; then
+        touch "$VOICE_DIR/.voice_ready"
+        echo "  Voice assistant ready. Say: Hey Dose."
+    fi
+fi
 
 # ── Check for updates ──
 echo "  Checking for updates..."
@@ -112,8 +167,9 @@ if curl -sL "$RAW_URL/dose_app.py" -o "$TEMP_FILE" 2>/dev/null; then
         read -p "  Would you like to update? (y/n): " ANSWER
         if [ "$ANSWER" = "y" ] || [ "$ANSWER" = "Y" ]; then
             cp "$TEMP_FILE" "$APP_DIR/dose_app.py"
-            # Also update DOSE.sh and logo
+            # Also update DOSE.sh, the voice assistant, and logo
             curl -sL "$RAW_URL/DOSE.sh" -o "$APP_DIR/DOSE.sh" 2>/dev/null || true
+            curl -sL "$RAW_URL/dose_voice.py" -o "$APP_DIR/dose_voice.py" 2>/dev/null || true
             curl -sL "$RAW_URL/dose_logo.png" -o "$APP_DIR/dose_logo.png" 2>/dev/null || true
             curl -sL "$RAW_URL/demo_qr.png" -o "$APP_DIR/demo_qr.png" 2>/dev/null || true
             chmod +x "$APP_DIR"/*.py "$APP_DIR"/*.sh 2>/dev/null || true
