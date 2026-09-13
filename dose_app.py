@@ -847,6 +847,8 @@ class DoseApp:
             self._draw_qty_confirm(c)
         elif self.mode == "timeedit":
             self._draw_time_edit(c)
+        elif self.mode == "micreport":
+            self._draw_mic_report(c)
         elif self.mode == "dosealert":
             self._draw_dose_alert(c)
 
@@ -870,6 +872,8 @@ class DoseApp:
             active = getattr(self, "_te_return", "storage")
         if active == "dosealert":
             active = getattr(self, "_alert_return", "home")
+        if active == "micreport":
+            active = "settings"
         if active in ("hold", "spin", "confirmdisp", "dispensed",
                       "qtyconfirm", "addmed"):
             active = self._prev_mode
@@ -1690,7 +1694,7 @@ class DoseApp:
                                       fill=t["muted"], anchor="w")
                     self._click_zones.append(
                         (px, y, px + 440, y + row_h,
-                         self._voice_mic_test))
+                         self._voice_row_tap))
 
             elif kind == "button":
                 bw, bh = 120, 44
@@ -3725,6 +3729,62 @@ class DoseApp:
             return f"Mic: {self.voice.mic_name} · tap row to test"
         return ""
 
+    def _draw_mic_report(self, c):
+        """The Pi's audio-system data, on screen: chosen backend,
+        every input device, Bluetooth cards/sources, recorders."""
+        t = self.theme
+        card_img = _pil_rounded_rect(620, 440, 22, t["card_bg"])
+        tk_card = self._get_tk_image("micrep_card", card_img)
+        c.create_image(26, 20, image=tk_card, anchor="nw")
+        c.create_text(56, 44, text="MICROPHONE REPORT",
+                      font=self.font_label, fill=t["muted"],
+                      anchor="nw")
+        lines = getattr(self, "_mic_report_lines", None) or             ["No report yet — run a mic test first."]
+        y = 70
+        for ln in lines[:24]:
+            if not ln.strip():
+                y += 6
+                continue
+            color = DOSE_BLUE_LT if ln.startswith("$") else t["fg"]
+            c.create_text(56, y,
+                          text=self._fit_text(ln, self.font_small, 556),
+                          font=self.font_small, fill=color, anchor="nw")
+            y += 14
+            if y > 380:
+                break
+
+        for label, x0, cb in (("RETEST", 56, self._mic_retest),
+                              ("CLOSE", 466, self._mic_report_close)):
+            btn_img = _pil_rounded_rect(150, 44, 14, DOSE_BLUE if
+                                        label == "CLOSE" else
+                                        t["elevated_bg"])
+            tk_b = self._get_tk_image(f"micrep_{label}", btn_img)
+            c.create_image(x0, 400, image=tk_b, anchor="nw")
+            c.create_text(x0 + 75, 422, text=label,
+                          font=self.font_btn,
+                          fill="#06101E" if label == "CLOSE"
+                          else t["fg"], anchor="center")
+            self._click_zones.append((x0, 400, x0 + 150, 444, cb))
+
+    def _mic_retest(self):
+        self.mode = "settings"
+        self._draw_frame()
+        self._voice_mic_test()
+
+    def _mic_report_close(self):
+        self.mode = "settings"
+        self._draw_frame()
+
+    def _voice_row_tap(self):
+        r = getattr(self, "_mic_test_result", None)
+        if (r is not None and r <= 5
+                and getattr(self, "_mic_report_lines", None)):
+            self._prev_mode = self.mode
+            self.mode = "micreport"
+            self._draw_frame()
+            return
+        self._voice_mic_test()
+
     def _voice_mic_test(self):
         """Tap the Voice Assistant row: 2-second live mic check with
         a plain verdict — answers 'is the AirPods mic even working?'"""
@@ -3738,9 +3798,16 @@ class DoseApp:
         def worker():
             level = self.voice.mic_level(2.0)
             self._mic_diag = None
+            self._mic_report_lines = None
             if level <= 5:
                 try:
-                    self._mic_diag = self.voice.mic_report()
+                    self._mic_diag = (self.voice.mic_report()
+                                      + " — tap for details")
+                    import dose_voice as _dv
+                    rp = os.path.join(_dv.VOICE_DIR, "mic_report.txt")
+                    with open(rp) as f:
+                        self._mic_report_lines = [
+                            ln.rstrip() for ln in f.readlines()][:40]
                 except Exception:
                     pass
 
