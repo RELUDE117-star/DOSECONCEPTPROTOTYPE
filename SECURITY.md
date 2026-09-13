@@ -126,8 +126,21 @@ GitHub update check (TLS, certificate-validated).
 - No biometrics collected (no voiceprints) — avoids BIPA-class laws.
 - COPPA/child use: not designed for children; child-safety review
   required if that changes.
-- Piper voices (MIT / model-specific licenses), Vosk (Apache-2.0),
-  Moonshine (MIT): verify license inventory before distribution.
+- Voice licensing (checked 2026-09): Piper engine MIT, Vosk
+  Apache-2.0, Moonshine MIT — all commercial-friendly. The AMY
+  VOICE'S dataset license is NOT clearly stated (its model card
+  says "License: See URL" pointing at MycroftAI/mimic3-voices) —
+  fine for the prototype/demo, but DO NOT rely on it for a sold
+  product without confirming that license or swapping voices.
+  Commercial-safe swap candidates in the same Piper format:
+  en_US-ljspeech (public-domain dataset, female) or
+  en_US-libritts_r (CC BY 4.0, attribution required). Avoid
+  en_US-lessac (research-restricted dataset). Cleanest path for a
+  shipped product: commission ~1-2 hours of studio recordings from
+  a voice actor under a signed commercial release and fine-tune a
+  private Piper voice — the assistant then ships with a voice you
+  own outright. The app loads whichever .onnx is present, so the
+  swap is a file replacement.
 - The assistant persona is inspired by, but does not use names,
   dialogue, or assets from, any copyrighted character; no real
   person's voice is cloned.

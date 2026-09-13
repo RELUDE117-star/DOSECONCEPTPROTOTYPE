@@ -147,7 +147,7 @@ mkdir -p "$VOICE_DIR"
 # Bluetooth audio (AirPods etc.) + optional Moonshine — once
 if [ ! -f "$VOICE_DIR/.bt_ready" ]; then
     sudo apt install -y pipewire pipewire-alsa wireplumber \
-        libspa-0.2-bluez5 bluez 2>/dev/null || true
+        libspa-0.2-bluez5 bluez pulseaudio-utils 2>/dev/null || true
     systemctl --user enable --now pipewire wireplumber 2>/dev/null || true
     # Optional stronger command recognizer (Moonshine, offline ONNX)
     python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \

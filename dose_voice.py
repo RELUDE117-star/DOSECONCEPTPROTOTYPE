@@ -217,6 +217,7 @@ class DoseVoice:
         self.mic_name = "default"
         self.mic_rms = 0
         self._ack_files = []
+        self._level_probe = None
         self._probe()
         self._probe_moonshine()
 
@@ -382,9 +383,47 @@ class DoseVoice:
             return i, name + " (no signal yet)", rate
         return None, "default", SAMPLE_RATE
 
+    def _engage_bt_mic(self):
+        """Force Bluetooth cards into their headset (mic-capable)
+        profile — AirPods stay in playback-only A2DP until asked."""
+        try:
+            out = subprocess.run(["pactl", "list", "cards", "short"],
+                                 capture_output=True, text=True,
+                                 timeout=8).stdout
+        except Exception:
+            return
+        for line in out.splitlines():
+            if "bluez" not in line:
+                continue
+            parts = line.split()
+            card = parts[1] if len(parts) > 1 else None
+            if not card:
+                continue
+            for prof in ("headset-head-unit", "headset_head_unit",
+                         "handsfree_head_unit",
+                         "headset-head-unit-cvsd"):
+                try:
+                    r = subprocess.run(
+                        ["pactl", "set-card-profile", card, prof],
+                        capture_output=True, timeout=8)
+                    if r.returncode == 0:
+                        time.sleep(0.8)   # let the source appear
+                        return
+                except Exception:
+                    continue
+
     def mic_level(self, seconds=2.0):
-        """Live mic test for the Settings screen: records briefly on
-        the chosen device and returns peak RMS (0 = dead mic)."""
+        """Live mic test for the Settings screen: taps the RUNNING
+        capture backend (whatever is actually feeding recognition)
+        and returns the peak level heard. 0 = dead mic."""
+        if self.available:
+            self._level_probe = {"until": time.time() + seconds,
+                                 "max": 0}
+            time.sleep(seconds + 0.4)
+            probe = self._level_probe
+            self._level_probe = None
+            return probe["max"] if probe else 0
+        # engine not running: direct one-off probe
         try:
             import audioop
             frames = []
@@ -482,10 +521,11 @@ class DoseVoice:
         self._native_rate = SAMPLE_RATE
         self._ratecv_state = None
 
-        def callback(indata, frames, t, status):
+        def ingest(data):
+            """Common path for every capture backend: gate, resample
+            to 16 kHz, feed the queue, service the live level meter."""
             if self._muted or self.state == "speaking":
                 return
-            data = bytes(indata)
             if self._native_rate != SAMPLE_RATE:
                 try:
                     import audioop
@@ -494,15 +534,21 @@ class DoseVoice:
                         self._ratecv_state)
                 except Exception:
                     return
+            lp = self._level_probe
+            if lp and time.time() < lp["until"]:
+                try:
+                    import audioop
+                    lp["max"] = max(lp["max"], audioop.rms(data, 2))
+                except Exception:
+                    pass
             self._audio_q.put(data)
 
-        def open_stream():
-            """Pick the input device that actually carries audio
-            (AirPods/BT/USB aware), open it at a workable rate, and
-            resample to 16 kHz when needed."""
+        def callback(indata, frames, t, status):
+            ingest(bytes(indata))
+
+        def open_portaudio():
             index, name, rate = self._pick_input_device()
             self.mic_index = index
-            self.mic_name = name
             try:
                 s = self._sd.RawInputStream(
                     device=index, samplerate=rate,
@@ -511,10 +557,10 @@ class DoseVoice:
                 s.start()
                 self._native_rate = rate
                 self._ratecv_state = None
-                return s
+                self.mic_name = name
+                return ("portaudio", s)
             except Exception:
                 pass
-            # last resort: system default at any workable rate
             for r in (SAMPLE_RATE, 48000, 44100, 24000, 8000):
                 try:
                     s = self._sd.RawInputStream(
@@ -525,12 +571,102 @@ class DoseVoice:
                     self._native_rate = r
                     self._ratecv_state = None
                     self.mic_name = "default"
-                    return s
+                    return ("portaudio", s)
                 except Exception:
                     continue
             return None
 
-        stream = open_stream()
+        def open_pipewire():
+            """Capture through PipeWire/Pulse itself (parec /
+            pw-record). This is the path that makes Bluetooth
+            headsets engage their hands-free mic profile — ALSA/
+            PortAudio alone often sees only a dead route."""
+            self._engage_bt_mic()
+            cmds = (
+                ["parec", "--rate=16000", "--format=s16le",
+                 "--channels=1", "--latency-msec=50"],
+                ["pw-record", "--rate", "16000", "--channels", "1",
+                 "--format", "s16", "-"],
+            )
+            for cmd in cmds:
+                try:
+                    p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL)
+                except Exception:
+                    continue
+                time.sleep(0.3)
+                if p.poll() is not None:
+                    continue
+                self._native_rate = SAMPLE_RATE
+                self._ratecv_state = None
+
+                def reader(proc=p):
+                    while (proc.poll() is None
+                           and not self._stop.is_set()):
+                        try:
+                            data = proc.stdout.read(BLOCK_SIZE * 2)
+                        except Exception:
+                            break
+                        if not data:
+                            break
+                        ingest(data)
+                threading.Thread(target=reader, daemon=True).start()
+                self.mic_name = "Bluetooth/PipeWire (%s)" % cmd[0]
+                return ("pipe", p)
+            return None
+
+        def capture_is_live(seconds=1.4):
+            """Drain the queue for a moment and measure real signal."""
+            try:
+                import audioop
+            except Exception:
+                return True
+            end = time.time() + seconds
+            peak = 0
+            while time.time() < end:
+                try:
+                    data = self._audio_q.get(timeout=0.3)
+                    peak = max(peak, audioop.rms(data, 2))
+                except queue.Empty:
+                    continue
+            self.mic_rms = peak
+            return peak > 5
+
+        def close_capture(cap):
+            if not cap:
+                return
+            kind, h = cap
+            try:
+                if kind == "portaudio":
+                    h.stop(); h.close()
+                else:
+                    h.kill()
+            except Exception:
+                pass
+
+        def open_capture():
+            """Backend selection by LIVENESS: PortAudio first; if it
+            only yields silence, switch to PipeWire capture (wakes
+            Bluetooth mics); keep whichever actually carries audio."""
+            cap = open_portaudio()
+            if cap and capture_is_live():
+                return cap
+            pa_cap, pa_rms = cap, self.mic_rms
+            pa_name = self.mic_name
+            close_capture(cap)
+            cap = open_pipewire()
+            if cap and capture_is_live():
+                return cap
+            close_capture(cap)
+            # nothing live anywhere — keep PortAudio open so a mic
+            # that comes alive later is heard; label it honestly
+            cap = open_portaudio()
+            if cap:
+                self.mic_name = pa_name + " (no signal)"
+                self.mic_rms = pa_rms
+            return cap
+
+        stream = open_capture()
         if stream is None:
             self.available = False
             self.reason = "microphone failed to open"
@@ -539,14 +675,11 @@ class DoseVoice:
         last_audio = time.time()
         while not self._stop.is_set():
             # Bluetooth drops: if no audio arrives for a while, the
-            # stream likely died — reopen it (device may have
-            # reconnected on a different rate)
+            # capture likely died — redo the full selection (the
+            # device may have reconnected on a different profile)
             if time.time() - last_audio > 10 and self.state == "idle":
-                try:
-                    stream.stop(); stream.close()
-                except Exception:
-                    pass
-                stream = open_stream()
+                close_capture(stream)
+                stream = open_capture()
                 last_audio = time.time()
                 if stream is None:
                     time.sleep(3)
