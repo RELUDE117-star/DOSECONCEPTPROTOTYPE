@@ -345,7 +345,8 @@ class DoseVoice:
             try:
                 out = subprocess.run(
                     ["amixer", "-c", str(card), "scontrols"],
-                    capture_output=True, text=True, timeout=5).stdout
+                    capture_output=True, text=True, timeout=5,
+                    env=self._audio_env()).stdout
             except Exception:
                 break
             if not out:
@@ -420,7 +421,8 @@ class DoseVoice:
         try:
             out = subprocess.run(["pactl", "list", "cards", "short"],
                                  capture_output=True, text=True,
-                                 timeout=8).stdout
+                                 timeout=8,
+                                 env=self._audio_env()).stdout
         except Exception:
             return
         for line in out.splitlines():
@@ -436,7 +438,8 @@ class DoseVoice:
                 try:
                     r = subprocess.run(
                         ["pactl", "set-card-profile", card, prof],
-                        capture_output=True, timeout=8)
+                        capture_output=True, timeout=8,
+                        env=self._audio_env())
                     if r.returncode == 0:
                         time.sleep(0.8)   # let the source appear
                         return
@@ -490,6 +493,7 @@ class DoseVoice:
         and return a one-line human verdict. Called when a mic test
         reads silence, so we can see exactly what the audio system
         is exposing."""
+        self._kick_audio_services()
         self._unmute_alsa_inputs()
         lines = ["DOSE mic report", time.ctime(), ""]
         lines.append("chosen backend: %s (rms %s)"
@@ -502,13 +506,19 @@ class DoseVoice:
                                     d.get("default_samplerate")))
         except Exception as e:
             lines.append("portaudio query failed: %r" % (e,))
-        for cmd in (["pactl", "list", "cards", "short"],
+        env = self._audio_env()
+        lines.append("uid=%s XDG_RUNTIME_DIR=%s"
+                     % (os.getuid(), env.get("XDG_RUNTIME_DIR")))
+        for cmd in (["systemctl", "--user", "is-active", "pipewire",
+                     "pipewire-pulse", "wireplumber"],
+                    ["pactl", "info"],
+                    ["pactl", "list", "cards", "short"],
                     ["pactl", "list", "sources", "short"],
                     ["pw-record", "--version"],
                     ["parec", "--version"]):
             try:
                 r = subprocess.run(cmd, capture_output=True,
-                                   text=True, timeout=8)
+                                   text=True, timeout=8, env=env)
                 lines.append("$ " + " ".join(cmd))
                 lines.append((r.stdout or r.stderr).strip()[:800])
             except FileNotFoundError:
@@ -722,7 +732,8 @@ class DoseVoice:
             for cmd in cmds:
                 try:
                     p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                         stderr=subprocess.DEVNULL)
+                                         stderr=subprocess.DEVNULL,
+                                         env=self._audio_env())
                 except Exception:
                     continue
                 time.sleep(0.3)
@@ -805,6 +816,7 @@ class DoseVoice:
         def open_capture():
             """Selection honors the user's choice in Settings first,
             then falls back to LIVENESS-based automatic picking."""
+            self._kick_audio_services()
             self._unmute_alsa_inputs()
             pref = self._mic_pref()
             if pref == "pipewire":
@@ -986,6 +998,28 @@ class DoseVoice:
             self._piper_voice = PiperVoice.load(self._piper_path)
         return self._piper_voice
 
+    @staticmethod
+    def _audio_env():
+        """Environment that reaches the user's PipeWire session —
+        the same one desktop apps (YouTube) use. XDG_RUNTIME_DIR is
+        the key: without it pw-play/parec/pactl silently fail."""
+        env = dict(os.environ)
+        if not env.get("XDG_RUNTIME_DIR"):
+            env["XDG_RUNTIME_DIR"] = "/run/user/%d" % os.getuid()
+        return env
+
+    def _kick_audio_services(self):
+        """Make sure the user audio services are actually running —
+        a dead pipewire-pulse means silence in BOTH directions."""
+        try:
+            subprocess.run(["systemctl", "--user", "start",
+                            "pipewire", "pipewire-pulse",
+                            "wireplumber"],
+                           capture_output=True, timeout=15,
+                           env=self._audio_env())
+        except Exception:
+            pass
+
     def _play_wav(self, path):
         """Play a wav on whatever the system's ACTIVE output is.
         Order matters: pw-play/paplay follow PipeWire's current sink
@@ -998,7 +1032,7 @@ class DoseVoice:
             try:
                 r = subprocess.run(cmd, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL,
-                                   timeout=120)
+                                   timeout=120, env=self._audio_env())
                 if r.returncode == 0:
                     return label
             except Exception:
@@ -1006,7 +1040,8 @@ class DoseVoice:
         try:
             r = subprocess.run(["aplay", "-q", path],
                                stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, timeout=120)
+                               stderr=subprocess.DEVNULL, timeout=120,
+                               env=self._audio_env())
             if r.returncode == 0:
                 return "legacy ALSA (aplay) — may be routed to HDMI"
         except Exception:
