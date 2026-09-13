@@ -3,8 +3,11 @@ transcribes them, the brain answers, Piper speaks the answer, and
 Vosk transcribes the answer back for verification. This exercises
 the exact STT -> brain -> TTS chain that runs on the Pi."""
 import sys, os, json, wave, io, time, tempfile
+# models live next to this file by default; override with
+# DOSE_TEST_MODELDIR (e.g. a scratch dir holding vosk + piper models)
 SCRATCH = os.path.dirname(os.path.abspath(__file__))
-os.environ["DOSE_VOICE_DIR"] = os.path.join(SCRATCH, "voice", "modeldir")
+os.environ["DOSE_VOICE_DIR"] = os.environ.get(
+    "DOSE_TEST_MODELDIR", os.path.join(SCRATCH, "voice", "modeldir"))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from vosk import Model, KaldiRecognizer, SetLogLevel
@@ -13,9 +16,12 @@ from dose_voice import DoseVoice
 from datetime import datetime
 
 SetLogLevel(-1)
+import glob as _glob
 VD = os.environ["DOSE_VOICE_DIR"]
-voice = PiperVoice.load(os.path.join(VD, "en-us-amy-low.onnx"))
-model = Model(os.path.join(VD, "vosk-model-small-en-us-0.15"))
+_onnx = sorted(_glob.glob(os.path.join(VD, "*.onnx")))[0]
+_vosk = sorted(_glob.glob(os.path.join(VD, "vosk-model*")))[0]
+voice = PiperVoice.load(_onnx)
+model = Model(_vosk)
 
 
 def tts(text):

@@ -182,15 +182,16 @@ ask("no", "start over", keep=True)
 ask("cancel", "cancelled", keep=False)
 
 # fallback
-ask("purple monkey dishwasher", ("did not copy", "insufficient", "unclear"))
+ask("purple monkey dishwasher",
+    ("did not copy", "didn't catch", "insufficient", "unclear"))
 
 # unknown med
 ask("how many banana pills do i have left", "do not have")
 
 # ══ LEARNING: corrections teach phrases and vocabulary ══
 # 1. unknown phrasing -> fallback -> correction teaches it
-ask("check my pill situation", ("did not copy", "insufficient",
-                                "unclear"))
+ask("check my pill situation", ("did not copy", "didn't catch",
+                                "insufficient", "unclear"))
 ask("that's wrong", ("what", "say it the way", "correct instruction"), keep=True)
 ask("how many pills do i have", "correction stored", "sertraline",
     keep=False)
@@ -225,6 +226,42 @@ print("OK  safety gate survives learning")
 ask("that's wrong", ("what", "say it the way", "correct instruction"), keep=True)
 ask("fizzbuzz the wombat", ("do not recognize", "no changes"),
     keep=False)
+
+# ══ INTERPRETATION PROTOCOL ══
+# capability questions / hypotheticals / quotations are not commands
+ask("can you add a new medication", "when you're ready", keep=False)
+assert v._flow is None, "capability question must not start a flow"
+ask("my friend said dispense my sertraline",
+    ("by hand", "nothing happens"), keep=False)
+assert app.dispensed in (None, "yellow"), "quotation must not dispense"
+ask("what if i asked you to add a medication", "when you're ready")
+assert v._flow is None
+
+# negation is never simplified away
+ask("don't add a new medication", "taking no action", keep=False)
+assert v._flow is None
+ask("do not dispense my sertraline", "taking no action", keep=False)
+
+# confirmations expire: a delayed "yes" cannot activate an old proposal
+import time as _time
+app.med_data["demo"] = {"name": "Demo", "loaded": False, "count": 0}
+app._demo_registered = False
+ask("add a new medication", "called", keep=True)
+v._flow["ts"] = _time.time() - 300
+ask("ibuprofen", "expired", keep=False)
+assert v._flow is None and not app.med_data["demo"]["loaded"]
+
+# AM/PM is never silently assumed for a medication time
+ask("add a new medication", "called", keep=True)
+ask("vitamin d", "label", keep=True)
+ask("take two tablets at seven thirty, sixty pills",
+    ("morning, or the evening",), keep=True)
+ask("in the evening", "confirm intake", "seven 30 PM", "60",
+    keep=True)
+ask("yes", "registered", keep=False)
+assert app.med_data["demo"]["dose_times"] == ["7:30 PM"], \
+    app.med_data["demo"]["dose_times"]
+print("  ampm-clarified time saved:", app.med_data["demo"]["dose_times"])
 
 print()
 if FAIL:

@@ -1005,20 +1005,19 @@ class DoseApp:
         self._fx_to(mode_key)
 
     def _fx_to(self, mode_key):
-        """Soft fade-through-background transition between screens —
-        stippled veil in the theme background over the content area,
-        in three steps down and three steps up (~170 ms total). The
-        first frame appears instantly, so taps feel immediate."""
+        """Soft fade-through-background between screens: a true-alpha
+        veil in the theme background (no stipple dithering), eased in
+        and out over ~190 ms. First frame is instant so taps feel
+        immediate."""
         c = self.canvas
+        veils = self._fx_veils()
 
-        def veil(stipple):
+        def veil(i):
             c.delete("fx_veil")
-            c.create_rectangle(0, 0, CONTENT_W, SCREEN_H,
-                               fill=self.theme["bg"], outline="",
-                               stipple=stipple, tags="fx_veil")
+            c.create_image(0, 0, image=veils[i], anchor="nw",
+                           tags="fx_veil")
 
-        seq = ["gray25", "gray50", "gray75", None,
-               "gray75", "gray50", "gray25"]
+        seq = [0, 1, 2, None, 2, 1, 0]
 
         def step(i):
             if i >= len(seq):
@@ -1027,12 +1026,24 @@ class DoseApp:
             if seq[i] is None:
                 self.mode = mode_key
                 self._draw_frame()
-                veil("gray75")
+                veil(len(veils) - 1)
             else:
                 veil(seq[i])
-            self.root.after(28, lambda: step(i + 1))
+            self.root.after(26, lambda: step(i + 1))
 
         step(0)
+
+    def _fx_veils(self):
+        """Cached translucent full-content veils, rebuilt on theme
+        change: increasing alpha steps of the background color."""
+        if getattr(self, "_fx_cache_bg", None) != self.theme["bg"]:
+            self._fx_cache_bg = self.theme["bg"]
+            r, g, b = _hex_to_rgb(self.theme["bg"])
+            self._fx_imgs = [
+                ImageTk.PhotoImage(Image.new(
+                    "RGBA", (CONTENT_W, SCREEN_H), (r, g, b, a)))
+                for a in (80, 160, 225, 250)]
+        return self._fx_imgs
 
     # ══════════════════════════════════════════════════════════════════════
     #  HOME SCREEN
@@ -1137,8 +1148,11 @@ class DoseApp:
         if vs and "off" not in vs:
             hw.append(vs)
         if hw:
-            c.create_text(32, SCREEN_H - 20, text="  ·  ".join(hw),
-                          font=self.font_small, fill="#444444", anchor="sw")
+            c.create_text(32, SCREEN_H - 20,
+                          text=self._fit_text("  ·  ".join(hw),
+                                              self.font_small, 600),
+                          font=self.font_small, fill="#444444",
+                          anchor="sw")
 
     def _home_tap(self):
         for key in SLOT_KEYS + ["demo"]:
@@ -3374,8 +3388,19 @@ class DoseApp:
         try:
             from dose_voice import DoseVoice
         except Exception:
-            self.voice = None
-            return
+            # Self-heal: older updaters didn't know about
+            # dose_voice.py — fetch it next to the app and retry once
+            try:
+                resp = urlopen(RAW_URL + "/dose_voice.py", timeout=15)
+                vpath = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "dose_voice.py")
+                with open(vpath, "wb") as f:
+                    f.write(resp.read())
+                from dose_voice import DoseVoice
+            except Exception:
+                self.voice = None
+                return
         try:
             self.voice = DoseVoice(self)
             if self.voice.available:
@@ -3383,10 +3408,23 @@ class DoseApp:
         except Exception:
             self.voice = None
 
+    _VOICE_HINTS = {
+        "audio library not installed": "run DOSE.sh to finish setup",
+        "vosk not installed": "run DOSE.sh to finish setup",
+        "piper not installed": "run DOSE.sh to finish setup",
+        "speech model missing": "run DOSE.sh to download models",
+        "voice model missing": "run DOSE.sh to download models",
+        "no microphone detected": "connect a mic (USB or Bluetooth)",
+        "microphone failed to open": "reconnect the microphone",
+    }
+
     def _voice_status_text(self):
         if self.voice is None:
-            return "Voice: not installed"
+            return "Voice: run DOSE.sh to finish setup"
         if not self.voice.available:
+            hint = self._VOICE_HINTS.get(self.voice.reason)
+            if hint:
+                return f"Voice: {self.voice.reason} — {hint}"
             return "Voice: " + self.voice.reason
         if not self.settings.get("voice_enabled", True):
             return "Voice: off"

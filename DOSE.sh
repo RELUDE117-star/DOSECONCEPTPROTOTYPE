@@ -103,6 +103,11 @@ mkdir -p "$VOICE_DIR"
 if [ ! -f "$VOICE_DIR/.voice_ready" ]; then
     echo "  Setting up the voice assistant (one time, ~120 MB)..."
     sudo apt install -y libportaudio2 alsa-utils python3-srt 2>/dev/null || true
+    # Bluetooth audio (AirPods etc.): PipeWire routes BT mics and
+    # speakers to the ALSA default the app uses
+    sudo apt install -y pipewire pipewire-alsa wireplumber \
+        libspa-0.2-bluez5 bluez 2>/dev/null || true
+    systemctl --user enable --now pipewire wireplumber 2>/dev/null || true
     pip install --break-system-packages vosk sounddevice piper-tts 2>/dev/null \
         || pip install vosk sounddevice piper-tts 2>/dev/null || true
     # Optional stronger command recognizer (Moonshine, offline ONNX).
@@ -165,6 +170,9 @@ PYEOF2
     if ls -d "$VOICE_DIR"/vosk-model* >/dev/null 2>&1 && ls "$VOICE_DIR"/*.onnx >/dev/null 2>&1; then
         touch "$VOICE_DIR/.voice_ready"
         echo "  Voice assistant ready. Say: Hey Dose."
+        echo "  Bluetooth (AirPods): pair via the Bluetooth icon in the"
+        echo "  Pi menu bar; Dose picks up the default mic/speaker"
+        echo "  automatically, including after reconnects."
     fi
 fi
 

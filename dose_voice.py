@@ -346,23 +346,78 @@ class DoseVoice:
             self.reason = "speech model failed to load"
             return
 
-        def callback(indata, frames, t, status):
-            if not self._muted and self.state != "speaking":
-                self._audio_q.put(bytes(indata))
+        self._native_rate = SAMPLE_RATE
+        self._ratecv_state = None
 
-        try:
-            stream = self._sd.RawInputStream(
-                samplerate=SAMPLE_RATE, blocksize=BLOCK_SIZE,
-                dtype="int16", channels=1, callback=callback)
-            stream.start()
-        except Exception:
+        def callback(indata, frames, t, status):
+            if self._muted or self.state == "speaking":
+                return
+            data = bytes(indata)
+            if self._native_rate != SAMPLE_RATE:
+                try:
+                    import audioop
+                    data, self._ratecv_state = audioop.ratecv(
+                        data, 2, 1, self._native_rate, SAMPLE_RATE,
+                        self._ratecv_state)
+                except Exception:
+                    return
+            self._audio_q.put(data)
+
+        def open_stream():
+            """Try 16 kHz first; Bluetooth headsets (AirPods over
+            HFP) often only offer 8/24/48 kHz — open at the device's
+            native rate and resample."""
+            rates = [SAMPLE_RATE]
+            try:
+                dev = self._sd.query_devices(kind="input")
+                native = int(dev.get("default_samplerate") or 0)
+                if native and native != SAMPLE_RATE:
+                    rates.append(native)
+            except Exception:
+                pass
+            rates += [48000, 44100, 24000, 8000]
+            seen = set()
+            for rate in rates:
+                if rate in seen:
+                    continue
+                seen.add(rate)
+                try:
+                    s = self._sd.RawInputStream(
+                        samplerate=rate,
+                        blocksize=int(BLOCK_SIZE * rate / SAMPLE_RATE),
+                        dtype="int16", channels=1, callback=callback)
+                    s.start()
+                    self._native_rate = rate
+                    self._ratecv_state = None
+                    return s
+                except Exception:
+                    continue
+            return None
+
+        stream = open_stream()
+        if stream is None:
             self.available = False
             self.reason = "microphone failed to open"
             return
 
+        last_audio = time.time()
         while not self._stop.is_set():
+            # Bluetooth drops: if no audio arrives for a while, the
+            # stream likely died — reopen it (device may have
+            # reconnected on a different rate)
+            if time.time() - last_audio > 10 and self.state == "idle":
+                try:
+                    stream.stop(); stream.close()
+                except Exception:
+                    pass
+                stream = open_stream()
+                last_audio = time.time()
+                if stream is None:
+                    time.sleep(3)
+                    continue
             try:
                 data = self._audio_q.get(timeout=0.5)
+                last_audio = time.time()
             except queue.Empty:
                 continue
             if self._muted:
@@ -632,7 +687,7 @@ class DoseVoice:
             return ("addmed", None)
 
         m = re.search(r"(?:dispense|give me)(?: my| the| some)? (.+)", t)
-        if m and not has(" do not ", " don't "):
+        if m:
             return ("dispense", m.group(1))
 
         if has(" adherence ", " my score ", " how am i doing ",
@@ -726,6 +781,11 @@ class DoseVoice:
                     "Protocol three: protect the patient."), False
 
         if self._flow:
+            if time.time() - self._flow.get("ts", time.time()) > 120:
+                self._flow = None
+                return ("That request expired, Pilot — nothing was "
+                        "changed. Start again when you're ready."), False
+            self._flow["ts"] = time.time()
             return self._flow_step(text, t)
 
         def has(*phrases):
@@ -748,7 +808,7 @@ class DoseVoice:
             if not self._last_exchange:
                 return ("I have nothing to correct yet, Pilot. "
                         "Give me an instruction first."), False
-            self._flow = {"name": "correct",
+            self._flow = {"name": "correct", "ts": time.time(),
                           "prev": dict(self._last_exchange)}
             return random.choice([
                 "Understood. Corrections improve my model. "
@@ -845,9 +905,9 @@ class DoseVoice:
 
         if has(" thank ", " thanks "):
             return random.choice([
-                "You are welcome, Pilot.",
+                "You're welcome, Pilot.",
                 "Acknowledged. Protocol three: protect the patient.",
-                "It is what I am here for."]), False
+                "It's what I'm here for."]), False
 
         if has(" hello ", " hi there ", " good morning ",
                " good evening ", " good afternoon ", " hey there "):
@@ -893,6 +953,24 @@ class DoseVoice:
         route = self._match_builtin(t)
         if route:
             intent_id, arg = route
+            # A capability question, hypothetical, or quotation is not
+            # an instruction: describe the capability, do nothing
+            if intent_id in ("addmed", "dispense") and \
+                    self._is_indirect(t):
+                if intent_id == "addmed":
+                    return ("I can do that. When you're ready, just "
+                            "say: add a new medication — and I'll "
+                            "walk you through it."), False
+                return ("I never dispense anything myself. I can "
+                        "bring a medication up on screen, and the "
+                        "rest is always your hands — tap, hold, and "
+                        "spin. Nothing happens until you ask for "
+                        "real."), False
+            # Negation is never simplified away: "don't add..." acts on
+            # nothing
+            if intent_id in ("addmed", "dispense") and \
+                    self._is_negated(t):
+                return ("Understood — taking no action, Pilot."), False
             self._last_exchange = {"text": t, "intent": intent_id,
                                    "arg": arg}
             return self._dispatch(intent_id, arg)
@@ -901,11 +979,39 @@ class DoseVoice:
         self._last_exchange = {"text": t, "intent": "fallback",
                                "arg": None}
         return random.choice([
-            "I did not copy that, Pilot. If I misheard, say: "
-            "that is wrong — and teach me.",
+            "I didn't catch that, Pilot. If I misheard, say: "
+            "that's wrong — and teach me.",
             "Insufficient data. Try: what do I take next?",
             "That instruction is unclear. Say help, for what I "
             "can do."]), False
+
+    INDIRECT_MARKERS = (
+        " can you ", " could you ", " would you ", " are you able ",
+        " is it possible ", " what if ", " if you ", " imagine ",
+        " suppose ", " for example ", " he said ", " she said ",
+        " they said ", " my friend said ", " someone said ",
+        " i heard ", " hypothetically ", " do you know how to ",
+        " would you ever ", " what happens if i say ")
+
+    def _is_indirect(self, t):
+        """Capability questions, hypotheticals, and quoted/reported
+        speech are NOT instructions."""
+        return any(m in t for m in self.INDIRECT_MARKERS)
+
+    NEG_MARKERS = (" don't ", " do not ", " never ", " not going to ",
+                   " no need to ")
+
+    def _is_negated(self, t):
+        return any(m in t for m in self.NEG_MARKERS)
+
+    @staticmethod
+    def _ampm_explicit(raw):
+        """True when the utterance states AM/PM or a part of day —
+        we never silently pick AM vs PM for a medication time."""
+        r = " " + raw.lower() + " "
+        return any(m in r for m in (
+            " am ", " pm ", " a m ", " p m ", "morning", "evening",
+            "night", "afternoon", "noon", "midnight"))
 
     def _is_emergency(self, t):
         risky = ("emergency", "call 911", "call nine one one",
@@ -919,12 +1025,17 @@ class DoseVoice:
     def _is_medical_question(self, t):
         """Dose-change / interaction / medical-advice questions.
         Hard-checked before everything else."""
+        # Question-context patterns: "can i take two" is a medical
+        # question; "take two tablets at seven thirty" is label
+        # dictation and must NOT trip the gate
         risky = ("double dose", "double the", "extra pill",
-                 "extra dose", "take more", "take two", "twice the",
+                 "extra dose", "can i take more", "can i take two",
+                 "should i take more", "should i take two",
+                 "if i take more", "if i take two", "twice the",
                  "overdose", "skip my", "skip a dose", "skip tonight",
                  "stop taking", "quit taking", "alcohol", "drink with",
                  "mix with", "mixing", "pregnant", "pregnancy",
-                 "side effect", "is it safe to", "can i take more",
+                 "side effect", "is it safe to",
                  "increase my dose", "decrease my dose", "half a pill",
                  "crush", "expired")
         return any(p in t for p in risky)
@@ -1147,7 +1258,8 @@ class DoseVoice:
             return ("The self-fill slot is already occupied by "
                     f"{demo.get('name', 'a medication')}. Remove it "
                     "first, Pilot."), False
-        self._flow = {"name": "addmed", "step": "name", "data": {}}
+        self._flow = {"name": "addmed", "step": "name", "data": {},
+                      "ts": time.time()}
         return ("Understood. New medication intake. First: what is "
                 "the medication called?"), True
 
@@ -1196,7 +1308,7 @@ class DoseVoice:
         if step == "name":
             name = " ".join(w.capitalize() for w in raw.split())[:40]
             if not name:
-                return "I did not catch the name. Say it again?", True
+                return "I didn't catch the name. Say it again?", True
             data["name"] = name
             flow["step"] = "label"
             return (f"{name}. Copy. Now read me the label — the "
@@ -1207,7 +1319,10 @@ class DoseVoice:
             data["label"] = raw
             ts = parse_spoken_time(raw)
             if ts:
-                data["time"] = ts
+                if self._ampm_explicit(raw):
+                    data["time"] = ts
+                else:
+                    data["time_pending"] = ts
             # bottle quantity: dose amounts ("take ONE tablet") are
             # small — only counts of 5+ next to pills/count qualify
             for qm in re.finditer(
@@ -1220,11 +1335,7 @@ class DoseVoice:
             if "qty" not in data:
                 flow["step"] = "qty"
                 return "Copy. How many pills are in the bottle?", True
-            if "time" not in data:
-                flow["step"] = "time"
-                return "And what time should you take it?", True
-            flow["step"] = "confirm"
-            return self._addmed_confirm_line(data), True
+            return self._addmed_after_qty(flow, data)
 
         if step == "qty":
             q = words_to_number(raw)
@@ -1232,18 +1343,34 @@ class DoseVoice:
                 return ("A number, Pilot. How many pills are in "
                         "the bottle?"), True
             data["qty"] = q
-            if "time" not in data:
-                flow["step"] = "time"
-                return "And what time should you take it?", True
-            flow["step"] = "confirm"
-            return self._addmed_confirm_line(data), True
+            return self._addmed_after_qty(flow, data)
 
         if step == "time":
             ts = parse_spoken_time(raw)
             if not ts:
                 return ("I need a time, Pilot. For example: "
                         "eight AM, or seven thirty PM."), True
-            data["time"] = ts
+            if self._ampm_explicit(raw):
+                data["time"] = ts
+                flow["step"] = "confirm"
+                return self._addmed_confirm_line(data), True
+            data["time_pending"] = ts
+            flow["step"] = "ampm"
+            clock = ts.rsplit(" ", 1)[0]
+            return f"{clock} — in the morning, or the evening?", True
+
+        if step == "ampm":
+            pending = data.get("time_pending", "8:00 AM")
+            clock = pending.rsplit(" ", 1)[0]
+            if any(m in t for m in (" am ", " a m ", " morning ")):
+                data["time"] = clock + " AM"
+            elif any(m in t for m in (" pm ", " p m ", " evening ",
+                                      " night ", " afternoon ")):
+                data["time"] = clock + " PM"
+            else:
+                return ("Morning or evening, Pilot? I never guess "
+                        "with medication times."), True
+            data.pop("time_pending", None)
             flow["step"] = "confirm"
             return self._addmed_confirm_line(data), True
 
@@ -1274,6 +1401,18 @@ class DoseVoice:
 
         self._flow = None
         return "Standing by.", False
+
+    def _addmed_after_qty(self, flow, data):
+        if "time" in data:
+            flow["step"] = "confirm"
+            return self._addmed_confirm_line(data), True
+        if "time_pending" in data:
+            flow["step"] = "ampm"
+            clock = data["time_pending"].rsplit(" ", 1)[0]
+            return (f"{clock} — in the morning, or the "
+                    "evening?"), True
+        flow["step"] = "time"
+        return "And what time should you take it?", True
 
     def _addmed_confirm_line(self, data):
         return ("Confirm intake: %s, %d pills, take at %s, daily. "

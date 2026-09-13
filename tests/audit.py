@@ -269,6 +269,13 @@ def alert_flow():
 
 check("full-screen dose alert flow", alert_flow)
 
+# From here on, the clock tick must not fire real dose alerts into
+# the middle of unrelated checks (meds are scheduled at test times)
+app._check_due_doses = lambda: None
+app._due_keys = {}
+app._due_prev = set()
+app.mode = "home"
+
 def dose_status():
     from datetime import datetime
     now = datetime.now()
