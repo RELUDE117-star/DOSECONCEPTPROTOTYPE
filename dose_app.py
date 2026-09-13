@@ -619,6 +619,14 @@ class DoseApp:
         self._spin_ring_id = None
         self._due_keys = {}
         self._due_prev = set()
+        # Build ID: short hash of the running app file — shown in
+        # Settings so the installed version is always verifiable
+        try:
+            with open(os.path.abspath(__file__), "rb") as _f:
+                self._build_id = hashlib.md5(
+                    _f.read()).hexdigest()[:7]
+        except Exception:
+            self._build_id = "unknown"
         self._banner_dismissed = False
         self._alert_key = None
         self._alert_return = "home"
@@ -1711,10 +1719,14 @@ class DoseApp:
                               anchor="center")
 
                 status = getattr(self, '_update_status_text', '')
+                ver = "Build " + getattr(self, "_build_id", "?")
                 if status:
-                    c.create_text(px + 64, y + row_h // 2 + 16, text=status,
-                                  font=self.font_small, fill=t["muted"],
-                                  anchor="w")
+                    ver += "  ·  " + status
+                c.create_text(px + 64, y + row_h // 2 + 16,
+                              text=self._fit_text(ver,
+                                                  self.font_small, 430),
+                              font=self.font_small, fill=t["muted"],
+                              anchor="w")
 
                 self._click_zones.append(
                     (bx, by, bx + bw, by + bh,
@@ -3085,7 +3097,9 @@ class DoseApp:
 
         if remote_hash == local_hash:
             if not silent:
-                self.root.after(0, self._update_result, "Up to date")
+                self.root.after(0, self._update_result,
+                                "Up to date (build %s)"
+                                % remote_hash[:7])
             return
         if silent:
             # Never auto-overwrite on launch: GitHub's raw CDN can serve a
@@ -3093,7 +3107,8 @@ class DoseApp:
             # revert newer local code. Just announce it — applying stays
             # one tap away on the UPDATE button.
             self.root.after(0, self._update_result,
-                            "Update available — press UPDATE")
+                            "Update available: %s → %s"
+                            % (local_hash[:7], remote_hash[:7]))
             return
         self.root.after(0, self._apply_update, remote_data)
 
