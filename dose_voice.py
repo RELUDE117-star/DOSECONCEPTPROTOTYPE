@@ -218,6 +218,8 @@ class DoseVoice:
         self.mic_rms = 0
         self._ack_files = []
         self._level_probe = None
+        self._force_reopen = False
+        self._force_reopen = False
         self._probe()
         self._probe_moonshine()
 
@@ -411,6 +413,30 @@ class DoseVoice:
                         return
                 except Exception:
                     continue
+
+    def list_inputs(self):
+        """Names of all input-capable devices, for the mic selector."""
+        out = []
+        try:
+            for d in self._sd.query_devices():
+                if d.get("max_input_channels", 0) > 0:
+                    n = d.get("name", "")
+                    if n and n not in out:
+                        out.append(n)
+        except Exception:
+            pass
+        return out
+
+    def request_reopen(self):
+        """Ask the capture loop to redo device selection now (used
+        when the user picks a different microphone)."""
+        self._force_reopen = True
+
+    def _mic_pref(self):
+        try:
+            return self.app.settings.get("mic_device", "auto")
+        except Exception:
+            return "auto"
 
     def mic_report(self):
         """Write a full microphone diagnostic to voice/mic_report.txt
@@ -690,10 +716,45 @@ class DoseVoice:
             except Exception:
                 pass
 
+        def open_named(pref_name):
+            """User picked a specific device by name: honor it."""
+            try:
+                for i, d in enumerate(self._sd.query_devices()):
+                    if (d.get("max_input_channels", 0) > 0
+                            and d.get("name") == pref_name):
+                        for rate in (SAMPLE_RATE,
+                                     int(d.get("default_samplerate")
+                                         or 48000), 48000, 8000):
+                            try:
+                                s = self._sd.RawInputStream(
+                                    device=i, samplerate=rate,
+                                    blocksize=int(BLOCK_SIZE * rate
+                                                  / SAMPLE_RATE),
+                                    dtype="int16", channels=1,
+                                    callback=callback)
+                                s.start()
+                                self._native_rate = rate
+                                self._ratecv_state = None
+                                self.mic_name = pref_name
+                                return ("portaudio", s)
+                            except Exception:
+                                continue
+            except Exception:
+                pass
+            return None
+
         def open_capture():
-            """Backend selection by LIVENESS: PortAudio first; if it
-            only yields silence, switch to PipeWire capture (wakes
-            Bluetooth mics); keep whichever actually carries audio."""
+            """Selection honors the user's choice in Settings first,
+            then falls back to LIVENESS-based automatic picking."""
+            pref = self._mic_pref()
+            if pref == "pipewire":
+                cap = open_pipewire()
+                if cap:
+                    return cap
+            elif pref not in ("auto", "", None):
+                cap = open_named(pref)
+                if cap:
+                    return cap
             cap = open_portaudio()
             if cap and capture_is_live():
                 return cap
@@ -720,6 +781,14 @@ class DoseVoice:
 
         last_audio = time.time()
         while not self._stop.is_set():
+            if self._force_reopen:
+                self._force_reopen = False
+                close_capture(stream)
+                stream = open_capture()
+                last_audio = time.time()
+                if stream is None:
+                    time.sleep(3)
+                    continue
             # Bluetooth drops: if no audio arrives for a while, the
             # capture likely died — redo the full selection (the
             # device may have reconnected on a different profile)

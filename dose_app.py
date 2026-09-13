@@ -603,7 +603,8 @@ class DoseApp:
         # ── State ──────────────────────────────────────────────────────────
         self.med_data = {}
         self.settings = {"night_mode": False, "alarm_sound": True,
-                         "constant_scan": False, "voice_enabled": True}
+                         "constant_scan": False, "voice_enabled": True,
+                         "mic_device": "auto"}
         self.theme = dict(DARK_THEME)
         self.mode = "home"
         self.selected_pill = "blue"
@@ -849,6 +850,8 @@ class DoseApp:
             self._draw_time_edit(c)
         elif self.mode == "micreport":
             self._draw_mic_report(c)
+        elif self.mode == "btaudio":
+            self._draw_bt_audio(c)
         elif self.mode == "dosealert":
             self._draw_dose_alert(c)
 
@@ -872,7 +875,7 @@ class DoseApp:
             active = getattr(self, "_te_return", "storage")
         if active == "dosealert":
             active = getattr(self, "_alert_return", "home")
-        if active == "micreport":
+        if active in ("micreport", "btaudio"):
             active = "settings"
         if active in ("hold", "spin", "confirmdisp", "dispensed",
                       "qtyconfirm", "addmed"):
@@ -3729,6 +3732,265 @@ class DoseApp:
             return f"Mic: {self.voice.mic_name} · tap row to test"
         return ""
 
+    # ══════════════════════════════════════════════════════════════════
+    #  VOICE & BLUETOOTH SCREEN — pair headsets from the touchscreen
+    # ══════════════════════════════════════════════════════════════════
+    def _bt_state(self):
+        if not hasattr(self, "_bt"):
+            self._bt = {"status": "", "devices": [], "busy": False}
+        return self._bt
+
+    @staticmethod
+    def _btctl(*args, timeout=12):
+        return subprocess.run(["bluetoothctl"] + list(args),
+                              capture_output=True, text=True,
+                              timeout=timeout)
+
+    def _bt_refresh(self, scan=False):
+        bt = self._bt_state()
+        if bt["busy"]:
+            return
+        bt["busy"] = True
+        bt["status"] = ("Scanning… put your AirPods in pairing mode "
+                        "(open lid, hold the case button)"
+                        if scan else "Reading Bluetooth devices…")
+        self._draw_frame()
+
+        def worker():
+            devices = []
+            try:
+                if scan:
+                    subprocess.run(["bluetoothctl", "--timeout", "10",
+                                    "scan", "on"],
+                                   capture_output=True, timeout=20)
+                paired = set()
+                for listing in (["devices", "Paired"],
+                                ["paired-devices"]):
+                    try:
+                        out = self._btctl(*listing).stdout
+                        for ln in out.splitlines():
+                            p = ln.split(None, 2)
+                            if len(p) >= 2 and p[0] == "Device":
+                                paired.add(p[1])
+                    except Exception:
+                        continue
+                out = self._btctl("devices").stdout
+                seen = set()
+                for ln in out.splitlines():
+                    p = ln.split(None, 2)
+                    if len(p) < 3 or p[0] != "Device":
+                        continue
+                    mac, name = p[1], p[2]
+                    if mac in seen or name.replace("-", ":") == mac:
+                        continue
+                    seen.add(mac)
+                    connected = False
+                    try:
+                        info = self._btctl("info", mac).stdout
+                        connected = "Connected: yes" in info
+                    except Exception:
+                        pass
+                    devices.append({"mac": mac, "name": name,
+                                    "paired": mac in paired,
+                                    "connected": connected})
+                devices.sort(key=lambda d: (not d["connected"],
+                                            not d["paired"]))
+                status = ("" if devices else
+                          "No devices found — tap SCAN with your "
+                          "headset in pairing mode")
+            except FileNotFoundError:
+                status = "Bluetooth tools not available on this system"
+            except Exception:
+                status = "Bluetooth scan failed — try again"
+
+            def done():
+                bt["busy"] = False
+                bt["devices"] = devices
+                bt["status"] = status
+                if self.mode == "btaudio":
+                    self._draw_frame()
+            try:
+                self.root.after(0, done)
+            except Exception:
+                pass
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _bt_action(self, mac, action):
+        bt = self._bt_state()
+        if bt["busy"]:
+            return
+        bt["busy"] = True
+        bt["status"] = {"pair": "Pairing… keep the AirPods case "
+                                "button held",
+                        "connect": "Connecting…",
+                        "remove": "Forgetting device…"}[action]
+        self._draw_frame()
+
+        def worker():
+            ok = False
+            try:
+                if action == "pair":
+                    r1 = self._btctl("pair", mac, timeout=35)
+                    self._btctl("trust", mac)
+                    r2 = self._btctl("connect", mac, timeout=25)
+                    ok = ("successful" in (r1.stdout + r2.stdout).lower()
+                          or r2.returncode == 0)
+                elif action == "connect":
+                    r = self._btctl("connect", mac, timeout=25)
+                    ok = r.returncode == 0 or "successful" in                         r.stdout.lower()
+                else:
+                    r = self._btctl("remove", mac, timeout=20)
+                    ok = r.returncode == 0
+            except Exception:
+                ok = False
+
+            def done():
+                bt["busy"] = False
+                bt["status"] = ("Done. Run the mic test." if ok else
+                                "That didn't work — make sure the "
+                                "device is in pairing mode and try "
+                                "again")
+                self._bt_refresh(scan=False)
+            try:
+                self.root.after(0, done)
+            except Exception:
+                pass
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _draw_bt_audio(self, c):
+        t = self.theme
+        bt = self._bt_state()
+        card_img = _pil_rounded_rect(620, 440, 22, t["card_bg"])
+        tk_card = self._get_tk_image("bta_card", card_img)
+        c.create_image(26, 20, image=tk_card, anchor="nw")
+        c.create_text(56, 44, text="VOICE & BLUETOOTH",
+                      font=self.font_label, fill=t["muted"],
+                      anchor="nw")
+
+        mic_line = self._voice_status_text() or             self._voice_mic_subtext() or "Voice ready."
+        c.create_text(56, 66,
+                      text=self._fit_text(mic_line,
+                                          self.font_small, 556),
+                      font=self.font_small, fill=t["fg"], anchor="nw")
+        if bt["status"]:
+            c.create_text(56, 86,
+                          text=self._fit_text(bt["status"],
+                                              self.font_small, 556),
+                          font=self.font_small, fill=DOSE_BLUE_LT,
+                          anchor="nw")
+
+        # device list
+        y = 112
+        for d in bt["devices"][:3]:
+            row_img = _pil_rounded_rect(560, 44, 12, t["elevated_bg"])
+            tk_row = self._get_tk_image(f"bta_row_{d['mac']}", row_img)
+            c.create_image(56, y, image=tk_row, anchor="nw")
+            state = ("Connected" if d["connected"] else
+                     "Paired" if d["paired"] else "Found")
+            c.create_text(72, y + 22,
+                          text=self._fit_text(
+                              f"{d['name']}  ·  {state}",
+                              self.font_small_bold, 330),
+                          font=self.font_small_bold, fill=t["fg"],
+                          anchor="w")
+            act = ("connect" if d["paired"] and not d["connected"]
+                   else "pair" if not d["paired"] else None)
+            bx = 420
+            if act:
+                b_img = _pil_rounded_rect(88, 32, 10, DOSE_BLUE)
+                tk_b = self._get_tk_image(f"bta_a_{d['mac']}", b_img)
+                c.create_image(bx, y + 6, image=tk_b, anchor="nw")
+                c.create_text(bx + 44, y + 22, text=act.upper(),
+                              font=self.font_small_bold,
+                              fill="#06101E", anchor="center")
+                self._click_zones.append(
+                    (bx, y + 6, bx + 88, y + 38,
+                     lambda m=d["mac"], a=act: self._bt_action(m, a)))
+            fb_img = _pil_rounded_rect(84, 32, 10, t["btn_bg"])
+            tk_fb = self._get_tk_image(f"bta_f_{d['mac']}", fb_img)
+            c.create_image(520, y + 6, image=tk_fb, anchor="nw")
+            c.create_text(562, y + 22, text="FORGET",
+                          font=self.font_small_bold, fill="#FF6B6B",
+                          anchor="center")
+            self._click_zones.append(
+                (520, y + 6, 604, y + 38,
+                 lambda m=d["mac"]: self._bt_action(m, "remove")))
+            y += 52
+
+        # ── microphone selector: tap to choose which mic Dose uses ──
+        mic_y = max(y + 6, 278)
+        c.create_text(56, mic_y, text="MICROPHONE",
+                      font=self.font_label, fill=t["muted"],
+                      anchor="nw")
+        options = [("Auto — picks the live mic", "auto"),
+                   ("Bluetooth via PipeWire", "pipewire")]
+        if self.voice:
+            for n in self.voice.list_inputs()[:1]:
+                options.append((n, n))
+        current = self.settings.get("mic_device", "auto")
+        oy = mic_y + 20
+        for label, value in options[:3]:
+            sel = (value == current)
+            row_img = _pil_rounded_rect(
+                560, 30, 10,
+                t["elevated_bg"],
+                outline=DOSE_BLUE if sel else None,
+                outline_w=2 if sel else 0)
+            tk_row = self._get_tk_image(f"mic_opt_{value}", row_img)
+            c.create_image(56, oy, image=tk_row, anchor="nw")
+            c.create_text(72, oy + 15,
+                          text=self._fit_text(
+                              ("●  " if sel else "○  ") + label,
+                              self.font_small_bold, 520),
+                          font=self.font_small_bold,
+                          fill=DOSE_BLUE_LT if sel else t["fg"],
+                          anchor="w")
+            self._click_zones.append(
+                (56, oy, 616, oy + 30,
+                 lambda v=value: self._set_mic_device(v)))
+            oy += 34
+
+        # bottom actions
+        r = getattr(self, "_mic_test_result", None)
+        show_report = (r is not None and r <= 5
+                       and getattr(self, "_mic_report_lines", None))
+        buttons = [("TEST MIC", self._voice_mic_test, False),
+                   ("SCAN & PAIR",
+                    lambda: self._bt_refresh(scan=True), False)]
+        if show_report:
+            buttons.append(("DETAILS", self._open_mic_report, False))
+        buttons.append(("CLOSE", self._bt_close, True))
+        bw = 136
+        bx = 56
+        for label, cb, primary in buttons:
+            b_img = _pil_rounded_rect(bw, 44, 14, DOSE_BLUE if primary
+                                      else t["elevated_bg"])
+            tk_b = self._get_tk_image(f"bta_btn_{label}", b_img)
+            c.create_image(bx, 400, image=tk_b, anchor="nw")
+            c.create_text(bx + bw // 2, 422, text=label,
+                          font=self.font_small_bold,
+                          fill="#06101E" if primary else t["fg"],
+                          anchor="center")
+            self._click_zones.append((bx, 400, bx + bw, 444, cb))
+            bx += bw + 10
+
+    def _set_mic_device(self, value):
+        self.settings["mic_device"] = value
+        self._save_config()
+        self._mic_test_result = None
+        if self.voice:
+            self.voice.request_reopen()
+        self._draw_frame()
+
+    def _open_mic_report(self):
+        self._prev_mode = self.mode
+        self.mode = "micreport"
+        self._draw_frame()
+
+    def _bt_close(self):
+        self.mode = "settings"
+        self._draw_frame()
+
     def _draw_mic_report(self, c):
         """The Pi's audio-system data, on screen: chosen backend,
         every input device, Bluetooth cards/sources, recorders."""
@@ -3772,18 +4034,15 @@ class DoseApp:
         self._voice_mic_test()
 
     def _mic_report_close(self):
-        self.mode = "settings"
+        self.mode = ("btaudio" if self._prev_mode == "btaudio"
+                     else "settings")
         self._draw_frame()
 
     def _voice_row_tap(self):
-        r = getattr(self, "_mic_test_result", None)
-        if (r is not None and r <= 5
-                and getattr(self, "_mic_report_lines", None)):
-            self._prev_mode = self.mode
-            self.mode = "micreport"
-            self._draw_frame()
-            return
-        self._voice_mic_test()
+        self._prev_mode = self.mode
+        self.mode = "btaudio"
+        self._draw_frame()
+        self._bt_refresh(scan=False)
 
     def _voice_mic_test(self):
         """Tap the Voice Assistant row: 2-second live mic check with
@@ -3814,8 +4073,7 @@ class DoseApp:
             def done():
                 self._mic_testing = False
                 self._mic_test_result = level
-                if self.mode == "settings":
-                    self._draw_frame()
+                self._draw_frame()
             try:
                 self.root.after(0, done)
             except Exception:
