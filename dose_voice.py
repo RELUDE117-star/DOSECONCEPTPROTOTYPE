@@ -213,6 +213,10 @@ class DoseVoice:
         self._piper_voice = None
         self._sd = None
         self._moonshine = None       # optional stronger command STT
+        self.mic_index = None
+        self.mic_name = "default"
+        self.mic_rms = 0
+        self._ack_files = []
         self._probe()
         self._probe_moonshine()
 
@@ -246,6 +250,9 @@ class DoseVoice:
         if not onnx:
             self.reason = "voice model missing"
             return
+        # Always prefer the soft Amy voice, best quality available
+        onnx.sort(key=lambda p: (
+            "medium" not in p.lower(), "amy" not in p.lower(), p))
         self._piper_path = onnx[0]
 
         try:
@@ -293,6 +300,110 @@ class DoseVoice:
         except Exception:
             return vosk_text
 
+    def _probe_device(self, index, native_rate):
+        """Open a device briefly and measure real signal (RMS).
+        Returns (rms, usable_rate) or None if it can't open."""
+        rates = []
+        for r in (SAMPLE_RATE, native_rate, 48000, 44100, 24000, 8000):
+            if r and r not in rates:
+                rates.append(r)
+        for rate in rates:
+            frames = []
+
+            def cb(indata, f, t, s):
+                frames.append(bytes(indata))
+            try:
+                st = self._sd.RawInputStream(
+                    device=index, samplerate=rate,
+                    blocksize=max(256, int(0.2 * rate)),
+                    dtype="int16", channels=1, callback=cb)
+                st.start()
+                time.sleep(0.9)
+                st.stop()
+                st.close()
+            except Exception:
+                continue
+            data = b"".join(frames)
+            if not data:
+                continue
+            try:
+                import audioop
+                rms = audioop.rms(data, 2)
+            except Exception:
+                rms = 1
+            return rms, rate
+        return None
+
+    def _pick_input_device(self):
+        """Choose the input whose audio actually FLOWS. Bluetooth
+        headsets (AirPods) often expose a dead input until the
+        hands-free profile engages, and 'default' may not be them —
+        so prefer headset/USB names, but demand real signal."""
+        try:
+            devs = self._sd.query_devices()
+        except Exception:
+            return None, "default", SAMPLE_RATE
+        cands = []
+        for i, d in enumerate(devs):
+            try:
+                if d.get("max_input_channels", 0) < 1:
+                    continue
+                n = (d.get("name") or "").lower()
+                if any(k in n for k in ("airpod", "bluez", "headset",
+                                        "hands-free", "hfp")):
+                    pri = 0
+                elif "usb" in n:
+                    pri = 1
+                elif n in ("default", "pipewire", "pulse",
+                           "sysdefault"):
+                    pri = 2
+                else:
+                    pri = 3
+                cands.append((pri, i, d.get("name", "?"),
+                              int(d.get("default_samplerate")
+                                  or SAMPLE_RATE)))
+            except Exception:
+                continue
+        cands.sort()
+        best_silent = None
+        for pri, i, name, native in cands:
+            got = self._probe_device(i, native)
+            if got is None:
+                continue
+            rms, rate = got
+            if rms > 25:            # live room audio
+                self.mic_rms = rms
+                return i, name, rate
+            if best_silent is None:
+                best_silent = (i, name, rate, rms)
+        if best_silent:
+            i, name, rate, rms = best_silent
+            self.mic_rms = rms
+            return i, name + " (no signal yet)", rate
+        return None, "default", SAMPLE_RATE
+
+    def mic_level(self, seconds=2.0):
+        """Live mic test for the Settings screen: records briefly on
+        the chosen device and returns peak RMS (0 = dead mic)."""
+        try:
+            import audioop
+            frames = []
+
+            def cb(indata, f, t, s):
+                frames.append(bytes(indata))
+            st = self._sd.RawInputStream(
+                device=getattr(self, "mic_index", None),
+                samplerate=getattr(self, "_native_rate", SAMPLE_RATE),
+                blocksize=1024, dtype="int16", channels=1, callback=cb)
+            st.start()
+            time.sleep(seconds)
+            st.stop()
+            st.close()
+            data = b"".join(frames)
+            return audioop.rms(data, 2) if data else 0
+        except Exception:
+            return -1
+
     # ── lifecycle ─────────────────────────────────────────────────────
     def start(self):
         if not self.available:
@@ -335,9 +446,31 @@ class DoseVoice:
             pass
 
     # ── audio input ───────────────────────────────────────────────────
+    ACKS = ("Yes, Pilot?", "Standing by.", "Go ahead, Pilot.",
+            "I am listening.")
+
+    def _prime_speech(self):
+        """Load Piper up front and pre-render the short acknowledgment
+        lines to wav files, so the reply to 'Hey Dose' starts as fast
+        as a person would answer."""
+        try:
+            voice = self._load_piper()
+            cache = os.path.join(VOICE_DIR, "cache")
+            os.makedirs(cache, exist_ok=True)
+            self._ack_files = []
+            for i, line in enumerate(self.ACKS):
+                path = os.path.join(cache, "ack_%d.wav" % i)
+                if not os.path.exists(path):
+                    with wave.open(path, "wb") as w:
+                        voice.synthesize_wav(line, w)
+                self._ack_files.append((line, path))
+        except Exception:
+            self._ack_files = []
+
     def _run(self):
         from vosk import Model, KaldiRecognizer, SetLogLevel
         SetLogLevel(-1)
+        self._prime_speech()
         try:
             self._vosk_model = Model(self._vosk_dir)
             rec = KaldiRecognizer(self._vosk_model, SAMPLE_RATE)
@@ -364,31 +497,34 @@ class DoseVoice:
             self._audio_q.put(data)
 
         def open_stream():
-            """Try 16 kHz first; Bluetooth headsets (AirPods over
-            HFP) often only offer 8/24/48 kHz — open at the device's
-            native rate and resample."""
-            rates = [SAMPLE_RATE]
+            """Pick the input device that actually carries audio
+            (AirPods/BT/USB aware), open it at a workable rate, and
+            resample to 16 kHz when needed."""
+            index, name, rate = self._pick_input_device()
+            self.mic_index = index
+            self.mic_name = name
             try:
-                dev = self._sd.query_devices(kind="input")
-                native = int(dev.get("default_samplerate") or 0)
-                if native and native != SAMPLE_RATE:
-                    rates.append(native)
+                s = self._sd.RawInputStream(
+                    device=index, samplerate=rate,
+                    blocksize=int(BLOCK_SIZE * rate / SAMPLE_RATE),
+                    dtype="int16", channels=1, callback=callback)
+                s.start()
+                self._native_rate = rate
+                self._ratecv_state = None
+                return s
             except Exception:
                 pass
-            rates += [48000, 44100, 24000, 8000]
-            seen = set()
-            for rate in rates:
-                if rate in seen:
-                    continue
-                seen.add(rate)
+            # last resort: system default at any workable rate
+            for r in (SAMPLE_RATE, 48000, 44100, 24000, 8000):
                 try:
                     s = self._sd.RawInputStream(
-                        samplerate=rate,
-                        blocksize=int(BLOCK_SIZE * rate / SAMPLE_RATE),
+                        samplerate=r,
+                        blocksize=int(BLOCK_SIZE * r / SAMPLE_RATE),
                         dtype="int16", channels=1, callback=callback)
                     s.start()
-                    self._native_rate = rate
+                    self._native_rate = r
                     self._ratecv_state = None
+                    self.mic_name = "default"
                     return s
                 except Exception:
                     continue
@@ -443,14 +579,19 @@ class DoseVoice:
                 if wake_rest is None:
                     wake_rest = text or ""
 
-            self._chime()
             if wake_rest.strip():
                 self._handle_exchange(rec, wake_rest.strip())
             else:
                 self._set_ui_state("listening")
-                self._speak(random.choice([
-                    "Yes, Pilot?", "Standing by.", "Go ahead, Pilot.",
-                    "I am listening."]))
+                acks = getattr(self, "_ack_files", [])
+                if acks:
+                    line, path = random.choice(acks)
+                    self._last_reply = line
+                    self._set_ui_state("speaking", reply_text=line)
+                    self._play_wav(path)
+                    self._set_ui_state("listening")
+                else:
+                    self._chime()
                 command = self._listen_command(rec)
                 if command:
                     self._handle_exchange(rec, command)

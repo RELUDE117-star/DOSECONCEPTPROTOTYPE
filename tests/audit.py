@@ -8,6 +8,9 @@ os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 spec = importlib.util.spec_from_file_location('dose_app', 'dose_app.py')
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
+# No background clock during the audit: every check drives state and
+# redraws explicitly, so the 1 Hz tick only adds races
+mod.DoseApp._tick_clock = lambda self: None
 
 FAILURES = []
 
@@ -183,6 +186,9 @@ def no_hijack():
 
 check("QR events cannot hijack editor/addmed/etc.", no_hijack)
 
+def due_check():
+    app._check_due_doses()
+
 def banner_flow():
     from datetime import datetime
     now = datetime.now()
@@ -190,7 +196,7 @@ def banner_flow():
     app.med_data["green"]["dose_times"] = [ts]
     app.adherence = {"events": []}
     app._due_prev = set()
-    app._check_due_doses()
+    due_check()
     assert "green" in app._due_keys, app._due_keys
     app.mode = "user"
     app._draw_frame(); app.root.update()
@@ -200,7 +206,7 @@ def banner_flow():
     assert app._banner_dismissed
     app.adherence = {"events": [{"key": "green",
                                  "time": now.isoformat()}]}
-    app._check_due_doses()
+    due_check()
     assert "green" not in app._due_keys
     app.med_data["green"]["dose_times"] = ["12:00 PM"]
     app.mode = "home"
@@ -252,16 +258,20 @@ def alert_flow():
     app.adherence = {"events": []}
     app._due_prev = set()
     app.mode = "home"
-    app._check_due_doses(); app.root.update()
+    due_check(); app.root.update()
     assert app.mode == "dosealert", app.mode
     assert app._alert_key == "red"
     app._alert_dismiss(); app.root.update()
     assert app.mode == "home" and not app._banner_dismissed
     app._due_prev = set(); app.mode = "home"
-    app._check_due_doses(); app.root.update()
-    assert app.mode == "dosealert"
+    due_check(); app.root.update()
+    assert app.mode == "dosealert", (app.mode, app._due_keys,
+                                     app._due_prev, app.dispense_state,
+                                     app._alert_key)
     app._alert_dispense(); app.root.update()
-    assert app.mode == "hold" and app.dispense_pill == "red"
+    assert app.mode == "hold" and app.dispense_pill == "red", (
+        app.mode, app.dispense_pill, app.dispense_state,
+        app._alert_key, app._alert_return)
     app._cancel_hold(); app.root.update()
     app.med_data["red"]["dose_times"] = ["9:00 AM"]
     app._due_prev = set()
@@ -269,9 +279,6 @@ def alert_flow():
 
 check("full-screen dose alert flow", alert_flow)
 
-# From here on, the clock tick must not fire real dose alerts into
-# the middle of unrelated checks (meds are scheduled at test times)
-app._check_due_doses = lambda: None
 app._due_keys = {}
 app._due_prev = set()
 app.mode = "home"

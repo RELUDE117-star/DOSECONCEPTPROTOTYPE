@@ -1680,11 +1680,17 @@ class DoseApp:
                     (tx, ty, tx + tw, ty + th,
                      lambda k=key: self._toggle_setting(k)))
                 if key == "voice_enabled":
-                    vs = self._voice_status_text()
+                    vs = self._voice_status_text() \
+                        or self._voice_mic_subtext()
                     if vs:
                         c.create_text(px + 64, y + row_h // 2 + 16,
-                                      text=vs, font=self.font_small,
+                                      text=self._fit_text(
+                                          vs, self.font_small, 430),
+                                      font=self.font_small,
                                       fill=t["muted"], anchor="w")
+                    self._click_zones.append(
+                        (px, y, px + 440, y + row_h,
+                         self._voice_mic_test))
 
             elif kind == "button":
                 bw, bh = 120, 44
@@ -3637,6 +3643,43 @@ class DoseApp:
         if not self.settings.get("voice_enabled", True):
             return "Voice: off"
         return ""
+
+    def _voice_mic_subtext(self):
+        if getattr(self, "_mic_testing", False):
+            return "Testing mic — say something…"
+        r = getattr(self, "_mic_test_result", None)
+        if r is not None:
+            verdict = ("mic is LIVE" if r > 60 else
+                       "very quiet — speak louder / check mic"
+                       if r > 5 else "NO SIGNAL — mic not working")
+            return f"Mic level: {r} — {verdict} (tap to retest)"
+        if self.voice and self.voice.available:
+            return f"Mic: {self.voice.mic_name} · tap row to test"
+        return ""
+
+    def _voice_mic_test(self):
+        """Tap the Voice Assistant row: 2-second live mic check with
+        a plain verdict — answers 'is the AirPods mic even working?'"""
+        if (not self.voice or not self.voice.available
+                or getattr(self, "_mic_testing", False)):
+            return
+        self._mic_testing = True
+        self._mic_test_result = None
+        self._draw_frame()
+
+        def worker():
+            level = self.voice.mic_level(2.0)
+
+            def done():
+                self._mic_testing = False
+                self._mic_test_result = level
+                if self.mode == "settings":
+                    self._draw_frame()
+            try:
+                self.root.after(0, done)
+            except Exception:
+                pass
+        threading.Thread(target=worker, daemon=True).start()
 
     def _med_info_for(self, name):
         """Bridge for the voice assistant: guidance lines for a med."""
