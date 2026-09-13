@@ -144,11 +144,21 @@ mkdir -p "$VOICE_DIR"
 # Probe with the SAME python the app runs on — a ready-flag alone
 # proved unreliable (models could download while pip silently failed,
 # and setup was then never retried)
-# Bluetooth audio (AirPods etc.) + optional Moonshine — once
+# Bluetooth audio packages + optional Moonshine — once
 if [ ! -f "$VOICE_DIR/.bt_ready3" ]; then
     sudo apt install -y pipewire pipewire-alsa pipewire-pulse wireplumber \
         libspa-0.2-bluez5 bluez pulseaudio-utils 2>/dev/null || true
+    # Optional stronger command recognizer (Moonshine, offline ONNX)
+    python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
+        || python3 -m pip install useful-moonshine-onnx 2>/dev/null || true
+    touch "$VOICE_DIR/.bt_ready3"
+fi
 
+# Bluetooth MIC config: idempotent, checked by FILE on every launch —
+# if it's already configured this is a no-op; if not, it gets written
+WP_LUA="$HOME/.config/wireplumber/bluetooth.lua.d/50-dose-bluez.lua"
+WP_CONF="$HOME/.config/wireplumber/wireplumber.conf.d/50-dose-bluez.conf"
+if [ ! -f "$WP_LUA" ] || [ ! -f "$WP_CONF" ]; then
     # ── The critical piece for Bluetooth MICROPHONES (AirPods): ──
     # WirePlumber only offers the hands-free (mic) profile when the
     # headset roles + mSBC codec are enabled. Without this config the
@@ -180,11 +190,7 @@ WPEOF
     systemctl --user enable --now pipewire pipewire-pulse wireplumber 2>/dev/null || true
     systemctl --user restart wireplumber pipewire pipewire-pulse 2>/dev/null || true
     wpctl settings --save bluetooth.autoswitch-to-headset-profile true 2>/dev/null || true
-
-    # Optional stronger command recognizer (Moonshine, offline ONNX)
-    python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
-        || python3 -m pip install useful-moonshine-onnx 2>/dev/null || true
-    touch "$VOICE_DIR/.bt_ready3"
+    echo "  Bluetooth microphone support configured."
 fi
 
 # If a Bluetooth device is connected but offers no headset (mic)

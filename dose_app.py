@@ -3411,7 +3411,67 @@ class DoseApp:
     # ══════════════════════════════════════════════════════════════════════
     #  VOICE ASSISTANT — "Hey Dose" (see dose_voice.py)
     # ══════════════════════════════════════════════════════════════════════
+    _WP_LUA = ("bluez_monitor.properties = {\n"
+               '  ["bluez5.enable-sbc-xq"] = true,\n'
+               '  ["bluez5.enable-msbc"] = true,\n'
+               '  ["bluez5.enable-hw-volume"] = true,\n'
+               '  ["bluez5.headset-roles"] = '
+               '"[ hsp_hs hsp_ag hfp_hf hfp_ag ]",\n'
+               '  ["bluez5.hfphsp-backend"] = "native",\n'
+               '  ["bluez5.roles"] = "[ a2dp_sink a2dp_source '
+               'hsp_hs hsp_ag hfp_hf hfp_ag ]",\n'
+               "}\n")
+    _WP_CONF = ("monitor.bluez.properties = {\n"
+                "  bluez5.enable-sbc-xq = true\n"
+                "  bluez5.enable-msbc = true\n"
+                "  bluez5.enable-hw-volume = true\n"
+                "  bluez5.headset-roles = "
+                "[ hsp_hs hsp_ag hfp_hf hfp_ag ]\n"
+                '  bluez5.hfphsp-backend = "native"\n'
+                "  bluez5.roles = [ a2dp_sink a2dp_source "
+                "hsp_hs hsp_ag hfp_hf hfp_ag ]\n"
+                "}\n")
+
+    def _ensure_bt_mic_config(self):
+        """Idempotent: if the Bluetooth-microphone (HFP) audio config
+        is already in place, do nothing; if missing, write it and
+        restart the user audio services. No sudo needed — user-level
+        files and services. Pi only."""
+        on_pi = (os.path.exists("/boot/config.txt")
+                 or os.path.exists("/boot/firmware/config.txt"))
+        if not on_pi or os.environ.get("DOSE_DISABLE_SELF_INSTALL"):
+            return
+        home = os.path.expanduser("~")
+        lua = os.path.join(home, ".config/wireplumber/"
+                                 "bluetooth.lua.d/50-dose-bluez.lua")
+        conf = os.path.join(home, ".config/wireplumber/"
+                                  "wireplumber.conf.d/"
+                                  "50-dose-bluez.conf")
+        if os.path.exists(lua) and os.path.exists(conf):
+            return   # already configured — just use it
+        try:
+            os.makedirs(os.path.dirname(lua), exist_ok=True)
+            os.makedirs(os.path.dirname(conf), exist_ok=True)
+            with open(lua, "w") as f:
+                f.write(self._WP_LUA)
+            with open(conf, "w") as f:
+                f.write(self._WP_CONF)
+            for svc_cmd in (
+                    ["systemctl", "--user", "restart", "wireplumber",
+                     "pipewire", "pipewire-pulse"],
+                    ["wpctl", "settings", "--save",
+                     "bluetooth.autoswitch-to-headset-profile",
+                     "true"]):
+                try:
+                    subprocess.run(svc_cmd, capture_output=True,
+                                   timeout=30)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _start_voice(self):
+        self._ensure_bt_mic_config()
         try:
             from dose_voice import DoseVoice
         except Exception:
