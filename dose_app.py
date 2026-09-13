@@ -3095,6 +3095,21 @@ class DoseApp:
         except Exception:
             pass
 
+        # a voice-engine-only change must also count as an update
+        if remote_hash == local_hash:
+            try:
+                vremote = hashlib.md5(
+                    self._fetch_repo_file("dose_voice.py")).hexdigest()
+                vpath = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "dose_voice.py")
+                with open(vpath, "rb") as f:
+                    vlocal = hashlib.md5(f.read()).hexdigest()
+                if vremote != vlocal:
+                    local_hash = "voice-outdated"
+            except Exception:
+                pass
+
         if remote_hash == local_hash:
             if not silent:
                 self.root.after(0, self._update_result,
