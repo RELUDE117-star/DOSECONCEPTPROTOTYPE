@@ -1017,7 +1017,8 @@ class DoseApp:
             c.create_image(0, 0, image=veils[i], anchor="nw",
                            tags="fx_veil")
 
-        seq = [0, 1, 2, None, 2, 1, 0]
+        # near-instant: one soft frame in, switch, one soft frame out
+        seq = [2, None, 0]
 
         def step(i):
             if i >= len(seq):
@@ -1026,10 +1027,10 @@ class DoseApp:
             if seq[i] is None:
                 self.mode = mode_key
                 self._draw_frame()
-                veil(len(veils) - 1)
+                veil(1)
             else:
                 veil(seq[i])
-            self.root.after(26, lambda: step(i + 1))
+            self.root.after(18, lambda: step(i + 1))
 
         step(0)
 
@@ -3405,8 +3406,69 @@ class DoseApp:
             self.voice = DoseVoice(self)
             if self.voice.available:
                 self.voice.start()
+            elif self.voice.reason in ("audio library not installed",
+                                       "vosk not installed",
+                                       "piper not installed"):
+                self._voice_self_install()
         except Exception:
             self.voice = None
+
+    def _voice_self_install(self):
+        """The audio libraries are missing even though the voice files
+        are present (a past DOSE.sh run marked itself done while pip
+        silently failed). Install them ourselves, once per boot, in
+        the background — Pi only."""
+        if getattr(self, "_voice_installing", False):
+            return
+        on_pi = (os.path.exists("/boot/config.txt")
+                 or os.path.exists("/boot/firmware/config.txt"))
+        if not on_pi or os.environ.get("DOSE_DISABLE_SELF_INSTALL"):
+            return
+        self._voice_installing = True
+
+        def worker():
+            try:
+                subprocess.run(["sudo", "-n", "apt-get", "install",
+                                "-y", "libportaudio2", "python3-srt",
+                                "alsa-utils"],
+                               capture_output=True, timeout=300)
+            except Exception:
+                pass
+            for extra_env in (None, {"SETUPTOOLS_USE_DISTUTILS":
+                                     "stdlib"}):
+                env = dict(os.environ)
+                if extra_env:
+                    env.update(extra_env)
+                try:
+                    r = subprocess.run(
+                        [sys.executable, "-m", "pip", "install",
+                         "--break-system-packages", "sounddevice",
+                         "vosk", "piper-tts"],
+                        capture_output=True, timeout=900, env=env)
+                    if r.returncode != 0:
+                        subprocess.run(
+                            [sys.executable, "-m", "pip", "install",
+                             "sounddevice", "vosk", "piper-tts"],
+                            capture_output=True, timeout=900, env=env)
+                except Exception:
+                    pass
+                try:
+                    __import__("importlib").invalidate_caches()
+                    import sounddevice, vosk, piper  # noqa
+                    break
+                except Exception:
+                    continue
+
+            def finish():
+                self._voice_installing = False
+                self._start_voice()
+                self._draw_frame()
+            try:
+                self.root.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     _VOICE_HINTS = {
         "audio library not installed": "run DOSE.sh to finish setup",
@@ -3419,6 +3481,8 @@ class DoseApp:
     }
 
     def _voice_status_text(self):
+        if getattr(self, "_voice_installing", False):
+            return "Voice: installing audio components…"
         if self.voice is None:
             return "Voice: run DOSE.sh to finish setup"
         if not self.voice.available:

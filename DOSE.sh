@@ -100,21 +100,42 @@ touch "$APP_DIR/.ready"
 VOICE_DIR="$APP_DIR/voice"
 mkdir -p "$VOICE_DIR"
 
-if [ ! -f "$VOICE_DIR/.voice_ready" ]; then
-    echo "  Setting up the voice assistant (one time, ~120 MB)..."
+# Probe with the SAME python the app runs on — a ready-flag alone
+# proved unreliable (models could download while pip silently failed,
+# and setup was then never retried)
+VOICE_LIBS_OK=false
+if python3 -c "import sounddevice, vosk, piper" 2>/dev/null; then
+    VOICE_LIBS_OK=true
+fi
+
+if [ "$VOICE_LIBS_OK" = "false" ] || [ ! -f "$VOICE_DIR/.voice_ready" ]; then
+    echo "  Setting up the voice assistant..."
     sudo apt install -y libportaudio2 alsa-utils python3-srt 2>/dev/null || true
     # Bluetooth audio (AirPods etc.): PipeWire routes BT mics and
     # speakers to the ALSA default the app uses
     sudo apt install -y pipewire pipewire-alsa wireplumber \
         libspa-0.2-bluez5 bluez 2>/dev/null || true
     systemctl --user enable --now pipewire wireplumber 2>/dev/null || true
-    pip install --break-system-packages vosk sounddevice piper-tts 2>/dev/null \
-        || pip install vosk sounddevice piper-tts 2>/dev/null || true
+    # ALWAYS the app's own interpreter — bare "pip" can belong to a
+    # different python and was the cause of silent install failures
+    python3 -m pip install --break-system-packages vosk sounddevice piper-tts \
+        || python3 -m pip install vosk sounddevice piper-tts \
+        || SETUPTOOLS_USE_DISTUTILS=stdlib python3 -m pip install --break-system-packages vosk sounddevice piper-tts \
+        || true
+    if python3 -c "import sounddevice, vosk, piper" 2>/dev/null; then
+        echo "  Audio libraries: OK"
+    else
+        echo "  ┌────────────────────────────────────────────────┐"
+        echo "  │  Audio libraries FAILED to install — the voice  │"
+        echo "  │  assistant will stay off. Check the pip output  │"
+        echo "  │  above (network?) and run DOSE.sh again.        │"
+        echo "  └────────────────────────────────────────────────┘"
+    fi
     # Optional stronger command recognizer (Moonshine, offline ONNX).
     # If it installs, dictation accuracy improves automatically;
     # everything still works without it.
-    pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
-        || pip install useful-moonshine-onnx 2>/dev/null || true
+    python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
+        || python3 -m pip install useful-moonshine-onnx 2>/dev/null || true
     python3 - <<'PYEOF2' 2>/dev/null || true
 try:
     import moonshine_onnx, numpy as np, tempfile, wave, os
