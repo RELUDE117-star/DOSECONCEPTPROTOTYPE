@@ -3029,13 +3029,32 @@ class DoseApp:
         self._draw_frame()
         threading.Thread(target=self._do_update_check, daemon=True).start()
 
+    @staticmethod
+    def _fetch_repo_file(fname, timeout=20):
+        """Fetch a repo file, freshest source first.
+
+        1. GitHub API (application/vnd.github.raw) — authoritative,
+           never CDN-stale, so the UPDATE button always sees the
+           newest push immediately.
+        2. raw.githubusercontent with a cache-busting query string.
+        """
+        from urllib.request import Request
+        api = ("https://api.github.com/repos/relude117-star/"
+               "doseconceptprototype/contents/%s"
+               "?ref=claude/quirky-brown-vkHwi" % fname)
+        try:
+            req = Request(api, headers={
+                "Accept": "application/vnd.github.raw",
+                "User-Agent": "dose-home-station"})
+            return urlopen(req, timeout=timeout).read()
+        except Exception:
+            pass
+        url = RAW_URL + "/" + fname + "?nocache=%d" % int(time.time())
+        return urlopen(url, timeout=timeout).read()
+
     def _do_update_check(self, silent=False):
         try:
-            # cache-buster: raw.githubusercontent's CDN caches for up
-            # to ~5 minutes; a unique query string skips the stale copy
-            url = (RAW_URL + "/dose_app.py?nocache=%d" % int(time.time()))
-            resp = urlopen(url, timeout=15)
-            remote_data = resp.read()
+            remote_data = self._fetch_repo_file("dose_app.py")
         except Exception:
             if not silent:
                 self.root.after(0, self._update_result, "No internet — try later")
@@ -3079,10 +3098,7 @@ class DoseApp:
                 with open(local_path, "wb") as f:
                     f.write(remote_data)
                 try:
-                    resp_v = urlopen(RAW_URL + "/dose_voice.py"
-                                     + "?nocache=%d" % int(time.time()),
-                                     timeout=15)
-                    vdata = resp_v.read()
+                    vdata = self._fetch_repo_file("dose_voice.py")
                     vpath = os.path.join(os.path.dirname(local_path),
                                          "dose_voice.py")
                     with open(vpath, "wb") as f:
@@ -3095,10 +3111,7 @@ class DoseApp:
                 for fname in ["DOSE.sh", "dose_voice.py",
                               "dose_logo.png", "demo_qr.png"]:
                     try:
-                        resp = urlopen(RAW_URL + "/" + fname
-                                       + "?nocache=%d" % int(time.time()),
-                                       timeout=15)
-                        fdata = resp.read()
+                        fdata = self._fetch_repo_file(fname)
                         fpath = os.path.join(APP_DIR, fname)
                         with open(fpath, "wb") as f:
                             f.write(fdata)
@@ -3397,14 +3410,12 @@ class DoseApp:
             # Self-heal: older updaters didn't know about
             # dose_voice.py — fetch it next to the app and retry once
             try:
-                resp = urlopen(RAW_URL + "/dose_voice.py"
-                               + "?nocache=%d" % int(time.time()),
-                               timeout=15)
+                vdata = self._fetch_repo_file("dose_voice.py")
                 vpath = os.path.join(
                     os.path.dirname(os.path.abspath(__file__)),
                     "dose_voice.py")
                 with open(vpath, "wb") as f:
-                    f.write(resp.read())
+                    f.write(vdata)
                 from dose_voice import DoseVoice
             except Exception:
                 self.voice = None

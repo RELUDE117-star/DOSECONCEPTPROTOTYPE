@@ -14,16 +14,57 @@ clear
 echo "  DOSE Home Station"
 echo ""
 
-# ── First run: install dependencies ──
-if [ ! -f "$APP_DIR/.ready" ]; then
-    echo "  First-time setup (takes a few minutes)..."
-    echo "  You may be asked for your password."
+# ── Preflight: EVERY launch, verify every component the station
+#    needs and install whatever is missing. Libraries are crucial on
+#    this device — nothing is trusted to a one-time flag. ──
+probe() { python3 -c "import $1" >/dev/null 2>&1; }
+
+echo "  Checking components..."
+APT_PKGS=""
+PIP_PKGS=""
+
+probe "tkinter"            || APT_PKGS="$APT_PKGS python3-tk"
+probe "PIL, PIL.ImageTk"   || APT_PKGS="$APT_PKGS python3-pil python3-pil.imagetk"
+probe "pyzbar.pyzbar"      || { APT_PKGS="$APT_PKGS libzbar0"; PIP_PKGS="$PIP_PKGS pyzbar"; }
+probe "qrcode"             || PIP_PKGS="$PIP_PKGS qrcode[pil]"
+probe "picamera2"          || APT_PKGS="$APT_PKGS python3-picamera2"
+probe "sounddevice"        || { APT_PKGS="$APT_PKGS libportaudio2 alsa-utils"; PIP_PKGS="$PIP_PKGS sounddevice"; }
+probe "vosk"               || { APT_PKGS="$APT_PKGS python3-srt"; PIP_PKGS="$PIP_PKGS vosk"; }
+probe "piper"              || PIP_PKGS="$PIP_PKGS piper-tts"
+command -v pip3 >/dev/null 2>&1 || APT_PKGS="$APT_PKGS python3-pip"
+
+if [ -n "$APT_PKGS$PIP_PKGS" ]; then
+    echo "  Installing missing components:$APT_PKGS$PIP_PKGS"
+    echo "  (you may be asked for your password)"
+    sudo apt update -y 2>/dev/null || true
+    [ -n "$APT_PKGS" ] && sudo apt install -y $APT_PKGS \
+        fonts-inter fonts-nunito curl 2>/dev/null || true
+    if [ -n "$PIP_PKGS" ]; then
+        python3 -m pip install --break-system-packages $PIP_PKGS \
+            || python3 -m pip install $PIP_PKGS \
+            || SETUPTOOLS_USE_DISTUTILS=stdlib python3 -m pip install --break-system-packages $PIP_PKGS \
+            || true
+    fi
+fi
+
+# Status table — the truth of what the station has right now
+status() { if probe "$1"; then echo "  [ OK ] $2"; else echo "  [MISS] $2  <- $3"; fi; }
+status "tkinter"          "Display (Tk)"        "sudo apt install python3-tk"
+status "PIL, PIL.ImageTk" "Imaging (Pillow)"    "sudo apt install python3-pil python3-pil.imagetk"
+status "pyzbar.pyzbar"    "QR scanning"         "sudo apt install libzbar0; python3 -m pip install pyzbar"
+status "picamera2"        "Camera"              "sudo apt install python3-picamera2"
+status "sounddevice"      "Voice: audio"        "sudo apt install libportaudio2; python3 -m pip install sounddevice"
+status "vosk"             "Voice: recognition"  "python3 -m pip install vosk"
+status "piper"            "Voice: speech"       "python3 -m pip install piper-tts"
+
+# Hard requirements to run at all
+if ! probe "tkinter" || ! probe "PIL, PIL.ImageTk"; then
     echo ""
-    sudo apt update -y
-    sudo apt install -y python3-tk python3-pil python3-pil.imagetk libzbar0 python3-pip fonts-inter fonts-nunito curl python3-smbus i2c-tools 2>/dev/null || true
-    sudo apt install -y python3-picamera2 2>/dev/null || true
-    pip install --break-system-packages pyzbar Pillow adafruit-circuitpython-mpr121 "qrcode[pil]" 2>/dev/null \
-        || pip install pyzbar Pillow adafruit-circuitpython-mpr121 "qrcode[pil]" 2>/dev/null || true
+    echo "  Core display components are missing — cannot start."
+    echo "  Run the commands shown above, then run DOSE.sh again."
+    echo "  Press any key to close..."
+    read -n 1 -s
+    exit 1
 fi
 
 # ── Touch sensor (MPR121) — set to true to re-enable I2C setup ──
@@ -103,39 +144,21 @@ mkdir -p "$VOICE_DIR"
 # Probe with the SAME python the app runs on — a ready-flag alone
 # proved unreliable (models could download while pip silently failed,
 # and setup was then never retried)
-VOICE_LIBS_OK=false
-if python3 -c "import sounddevice, vosk, piper" 2>/dev/null; then
-    VOICE_LIBS_OK=true
-fi
-
-if [ "$VOICE_LIBS_OK" = "false" ] || [ ! -f "$VOICE_DIR/.voice_ready" ]; then
-    echo "  Setting up the voice assistant..."
-    sudo apt install -y libportaudio2 alsa-utils python3-srt 2>/dev/null || true
-    # Bluetooth audio (AirPods etc.): PipeWire routes BT mics and
-    # speakers to the ALSA default the app uses
+# Bluetooth audio (AirPods etc.) + optional Moonshine — once
+if [ ! -f "$VOICE_DIR/.bt_ready" ]; then
     sudo apt install -y pipewire pipewire-alsa wireplumber \
         libspa-0.2-bluez5 bluez 2>/dev/null || true
     systemctl --user enable --now pipewire wireplumber 2>/dev/null || true
-    # ALWAYS the app's own interpreter — bare "pip" can belong to a
-    # different python and was the cause of silent install failures
-    python3 -m pip install --break-system-packages vosk sounddevice piper-tts \
-        || python3 -m pip install vosk sounddevice piper-tts \
-        || SETUPTOOLS_USE_DISTUTILS=stdlib python3 -m pip install --break-system-packages vosk sounddevice piper-tts \
-        || true
-    if python3 -c "import sounddevice, vosk, piper" 2>/dev/null; then
-        echo "  Audio libraries: OK"
-    else
-        echo "  ┌────────────────────────────────────────────────┐"
-        echo "  │  Audio libraries FAILED to install — the voice  │"
-        echo "  │  assistant will stay off. Check the pip output  │"
-        echo "  │  above (network?) and run DOSE.sh again.        │"
-        echo "  └────────────────────────────────────────────────┘"
-    fi
-    # Optional stronger command recognizer (Moonshine, offline ONNX).
-    # If it installs, dictation accuracy improves automatically;
-    # everything still works without it.
+    # Optional stronger command recognizer (Moonshine, offline ONNX)
     python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
         || python3 -m pip install useful-moonshine-onnx 2>/dev/null || true
+    touch "$VOICE_DIR/.bt_ready"
+fi
+
+# Voice models: keyed on the actual files, never on a flag
+if ! ls -d "$VOICE_DIR"/vosk-model* >/dev/null 2>&1 \
+        || ! ls "$VOICE_DIR"/*.onnx >/dev/null 2>&1; then
+    echo "  Downloading voice models (one time, ~120 MB)..."
     python3 - <<'PYEOF2' 2>/dev/null || true
 try:
     import moonshine_onnx, numpy as np, tempfile, wave, os
