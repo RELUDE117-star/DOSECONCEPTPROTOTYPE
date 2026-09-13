@@ -3426,6 +3426,21 @@ class DoseApp:
             self.voice = DoseVoice(self)
             if self.voice.available:
                 self.voice.start()
+            elif "microphone" in self.voice.reason:
+                # no mic yet — watch for one being connected (USB or
+                # Bluetooth) and start automatically when it appears
+                if not getattr(self, "_voice_mic_watch", False):
+                    self._voice_mic_watch = True
+
+                    def re_probe():
+                        self._voice_mic_watch = False
+                        if (self.voice and not self.voice.available
+                                and "microphone" in self.voice.reason
+                                and self.settings.get("voice_enabled",
+                                                      True)):
+                            self._start_voice()
+                            self._draw_frame()
+                    self.root.after(15000, re_probe)
             elif self.voice.reason in ("audio library not installed",
                                        "vosk not installed",
                                        "piper not installed"):

@@ -537,13 +537,34 @@ class DoseVoice:
             self._piper_voice = PiperVoice.load(self._piper_path)
         return self._piper_voice
 
-    def _chime(self):
+    def _play_wav(self, path):
+        """Play a wav on whatever speaker the system has right now —
+        ALSA/PipeWire default first (covers USB and Bluetooth sinks),
+        then PortAudio's default output. Returns True on success."""
         try:
-            subprocess.Popen(
-                ["aplay", "-q", "/usr/share/sounds/alsa/Front_Center.wav"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            r = subprocess.run(["aplay", "-q", path],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=120)
+            if r.returncode == 0:
+                return True
         except Exception:
             pass
+        try:
+            with wave.open(path) as w:
+                rate = w.getframerate()
+                ch = w.getnchannels()
+                data = w.readframes(w.getnframes())
+            with self._sd.RawOutputStream(samplerate=rate, channels=ch,
+                                          dtype="int16") as out:
+                out.write(data)
+            return True
+        except Exception:
+            return False
+
+    def _chime(self):
+        def go():
+            self._play_wav("/usr/share/sounds/alsa/Front_Center.wav")
+        threading.Thread(target=go, daemon=True).start()
 
     def _speak(self, text, user_text=""):
         """Synthesize with Piper and play. Blocks until done."""
@@ -556,9 +577,7 @@ class DoseVoice:
             os.close(fd)
             with wave.open(path, "wb") as w:
                 voice.synthesize_wav(text, w)
-            subprocess.run(["aplay", "-q", path],
-                           stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=60)
+            self._play_wav(path)
             os.unlink(path)
         except Exception:
             pass
