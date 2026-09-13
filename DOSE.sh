@@ -200,7 +200,7 @@ fi
 # ── Check for updates ──
 echo "  Checking for updates..."
 TEMP_FILE=$(mktemp)
-if curl -sL "$RAW_URL/dose_app.py" -o "$TEMP_FILE" 2>/dev/null; then
+if curl -sL "$RAW_URL/dose_app.py?nocache=$(date +%s)" -o "$TEMP_FILE" 2>/dev/null; then
     # Compare downloaded file with current
     LOCAL_HASH=$(md5sum "$APP_DIR/dose_app.py" 2>/dev/null | cut -d' ' -f1)
     REMOTE_HASH=$(md5sum "$TEMP_FILE" 2>/dev/null | cut -d' ' -f1)
@@ -215,10 +215,10 @@ if curl -sL "$RAW_URL/dose_app.py" -o "$TEMP_FILE" 2>/dev/null; then
         if [ "$ANSWER" = "y" ] || [ "$ANSWER" = "Y" ]; then
             cp "$TEMP_FILE" "$APP_DIR/dose_app.py"
             # Also update DOSE.sh, the voice assistant, and logo
-            curl -sL "$RAW_URL/DOSE.sh" -o "$APP_DIR/DOSE.sh" 2>/dev/null || true
-            curl -sL "$RAW_URL/dose_voice.py" -o "$APP_DIR/dose_voice.py" 2>/dev/null || true
-            curl -sL "$RAW_URL/dose_logo.png" -o "$APP_DIR/dose_logo.png" 2>/dev/null || true
-            curl -sL "$RAW_URL/demo_qr.png" -o "$APP_DIR/demo_qr.png" 2>/dev/null || true
+            curl -sL "$RAW_URL/DOSE.sh?nocache=$(date +%s)" -o "$APP_DIR/DOSE.sh" 2>/dev/null || true
+            curl -sL "$RAW_URL/dose_voice.py?nocache=$(date +%s)" -o "$APP_DIR/dose_voice.py" 2>/dev/null || true
+            curl -sL "$RAW_URL/dose_logo.png?nocache=$(date +%s)" -o "$APP_DIR/dose_logo.png" 2>/dev/null || true
+            curl -sL "$RAW_URL/demo_qr.png?nocache=$(date +%s)" -o "$APP_DIR/demo_qr.png" 2>/dev/null || true
             chmod +x "$APP_DIR"/*.py "$APP_DIR"/*.sh 2>/dev/null || true
             echo "  Updated!"
         else

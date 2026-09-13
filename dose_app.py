@@ -3031,7 +3031,9 @@ class DoseApp:
 
     def _do_update_check(self, silent=False):
         try:
-            url = RAW_URL + "/dose_app.py"
+            # cache-buster: raw.githubusercontent's CDN caches for up
+            # to ~5 minutes; a unique query string skips the stale copy
+            url = (RAW_URL + "/dose_app.py?nocache=%d" % int(time.time()))
             resp = urlopen(url, timeout=15)
             remote_data = resp.read()
         except Exception:
@@ -3077,7 +3079,8 @@ class DoseApp:
                 with open(local_path, "wb") as f:
                     f.write(remote_data)
                 try:
-                    resp_v = urlopen(RAW_URL + "/dose_voice.py",
+                    resp_v = urlopen(RAW_URL + "/dose_voice.py"
+                                     + "?nocache=%d" % int(time.time()),
                                      timeout=15)
                     vdata = resp_v.read()
                     vpath = os.path.join(os.path.dirname(local_path),
@@ -3092,7 +3095,9 @@ class DoseApp:
                 for fname in ["DOSE.sh", "dose_voice.py",
                               "dose_logo.png", "demo_qr.png"]:
                     try:
-                        resp = urlopen(RAW_URL + "/" + fname, timeout=15)
+                        resp = urlopen(RAW_URL + "/" + fname
+                                       + "?nocache=%d" % int(time.time()),
+                                       timeout=15)
                         fdata = resp.read()
                         fpath = os.path.join(APP_DIR, fname)
                         with open(fpath, "wb") as f:
@@ -3392,7 +3397,9 @@ class DoseApp:
             # Self-heal: older updaters didn't know about
             # dose_voice.py — fetch it next to the app and retry once
             try:
-                resp = urlopen(RAW_URL + "/dose_voice.py", timeout=15)
+                resp = urlopen(RAW_URL + "/dose_voice.py"
+                               + "?nocache=%d" % int(time.time()),
+                               timeout=15)
                 vpath = os.path.join(
                     os.path.dirname(os.path.abspath(__file__)),
                     "dose_voice.py")
