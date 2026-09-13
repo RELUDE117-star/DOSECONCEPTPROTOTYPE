@@ -337,6 +337,35 @@ class DoseVoice:
             return rms, rate
         return None
 
+    def _unmute_alsa_inputs(self):
+        """USB microphones frequently arrive with their ALSA capture
+        volume at zero or muted — raise and unmute every capture
+        control on every card. Harmless if already fine."""
+        for card in range(6):
+            try:
+                out = subprocess.run(
+                    ["amixer", "-c", str(card), "scontrols"],
+                    capture_output=True, text=True, timeout=5).stdout
+            except Exception:
+                break
+            if not out:
+                continue
+            for line in out.splitlines():
+                m = re.search(r"'([^']+)'", line)
+                if not m:
+                    continue
+                name = m.group(1)
+                if not any(k in name.lower() for k in
+                           ("mic", "capture", "input")):
+                    continue
+                try:
+                    subprocess.run(
+                        ["amixer", "-c", str(card), "sset", name,
+                         "90%", "on", "cap"],
+                        capture_output=True, timeout=5)
+                except Exception:
+                    pass
+
     def _pick_input_device(self):
         """Choose the input whose audio actually FLOWS. Bluetooth
         headsets (AirPods) often expose a dead input until the
@@ -443,6 +472,7 @@ class DoseVoice:
         and return a one-line human verdict. Called when a mic test
         reads silence, so we can see exactly what the audio system
         is exposing."""
+        self._unmute_alsa_inputs()
         lines = ["DOSE mic report", time.ctime(), ""]
         lines.append("chosen backend: %s (rms %s)"
                      % (self.mic_name, self.mic_rms))
@@ -463,6 +493,9 @@ class DoseVoice:
                                    text=True, timeout=8)
                 lines.append("$ " + " ".join(cmd))
                 lines.append((r.stdout or r.stderr).strip()[:800])
+            except FileNotFoundError:
+                lines.append("$ %s -> (not installed)"
+                             % " ".join(cmd))
             except Exception as e:
                 lines.append("$ %s -> %r" % (" ".join(cmd), e))
         report = "\n".join(lines)
@@ -475,6 +508,10 @@ class DoseVoice:
             pass
 
         low = report.lower()
+        if "usb" in (self.mic_name or "").lower():
+            return ("USB mic selected but silent — capture volume "
+                    "was probably muted; I've unmuted it, tap "
+                    "RETEST while speaking")
         if "bluez" not in low:
             return ("Bluetooth mic not visible to the audio system "
                     "— re-pair, or use a USB mic")
@@ -746,6 +783,7 @@ class DoseVoice:
         def open_capture():
             """Selection honors the user's choice in Settings first,
             then falls back to LIVENESS-based automatic picking."""
+            self._unmute_alsa_inputs()
             pref = self._mic_pref()
             if pref == "pipewire":
                 cap = open_pipewire()
