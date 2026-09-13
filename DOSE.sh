@@ -39,8 +39,12 @@ if [ -n "$APT_PKGS$PIP_PKGS" ]; then
     echo "  Installing missing components:$APT_PKGS$PIP_PKGS"
     echo "  (you may be asked for your password)"
     sudo apt update -y 2>/dev/null || true
-    [ -n "$APT_PKGS" ] && sudo apt install -y $APT_PKGS \
-        fonts-inter fonts-nunito curl 2>/dev/null || true
+    # one package at a time: apt is all-or-nothing per command, so a
+    # single unavailable package must never abort the rest
+    for PKG in $APT_PKGS fonts-inter fonts-nunito curl; do
+        sudo apt install -y "$PKG" 2>/dev/null \
+            || echo "  (could not install $PKG — continuing)"
+    done
     if [ -n "$PIP_PKGS" ]; then
         python3 -m pip install --break-system-packages $PIP_PKGS \
             || python3 -m pip install $PIP_PKGS \
@@ -149,8 +153,12 @@ mkdir -p "$VOICE_DIR"
 # and setup was then never retried)
 # Bluetooth audio packages + optional Moonshine — once
 if [ ! -f "$VOICE_DIR/.bt_ready3" ]; then
-    sudo apt install -y pipewire pipewire-alsa pipewire-pulse wireplumber \
-        libspa-0.2-bluez5 bluez pulseaudio-utils 2>/dev/null || true
+    sudo apt update -y 2>/dev/null || true
+    for PKG in pipewire pipewire-alsa pipewire-pulse wireplumber \
+            libspa-0.2-bluez5 bluez pulseaudio-utils; do
+        sudo apt install -y "$PKG" 2>/dev/null \
+            || echo "  (could not install $PKG — continuing)"
+    done
     # Optional stronger command recognizer (Moonshine, offline ONNX)
     python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
         || python3 -m pip install useful-moonshine-onnx 2>/dev/null || true
