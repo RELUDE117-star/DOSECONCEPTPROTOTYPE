@@ -631,7 +631,9 @@ class DoseApp:
         self._voice_anim_running = False
         self._voice_imgs = {}
         self._voice_ov_t0 = 0.0
-        self._fx_enabled = True
+        # Screen changes are INSTANT. The fade code stays available —
+        # flip this to True to bring the soft transition back.
+        self._fx_enabled = False
         self.camera = None
         self.camera_running = False
         self.mpr = None
