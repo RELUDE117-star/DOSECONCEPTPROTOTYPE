@@ -145,14 +145,62 @@ mkdir -p "$VOICE_DIR"
 # proved unreliable (models could download while pip silently failed,
 # and setup was then never retried)
 # Bluetooth audio (AirPods etc.) + optional Moonshine — once
-if [ ! -f "$VOICE_DIR/.bt_ready" ]; then
-    sudo apt install -y pipewire pipewire-alsa wireplumber \
+if [ ! -f "$VOICE_DIR/.bt_ready3" ]; then
+    sudo apt install -y pipewire pipewire-alsa pipewire-pulse wireplumber \
         libspa-0.2-bluez5 bluez pulseaudio-utils 2>/dev/null || true
-    systemctl --user enable --now pipewire wireplumber 2>/dev/null || true
+
+    # ── The critical piece for Bluetooth MICROPHONES (AirPods): ──
+    # WirePlumber only offers the hands-free (mic) profile when the
+    # headset roles + mSBC codec are enabled. Without this config the
+    # AirPods pair as playback-only and their mic is invisible.
+    # WirePlumber 0.4 (Pi OS Bookworm) — Lua config:
+    mkdir -p "$HOME/.config/wireplumber/bluetooth.lua.d"
+    cat > "$HOME/.config/wireplumber/bluetooth.lua.d/50-dose-bluez.lua" <<'WPEOF'
+bluez_monitor.properties = {
+  ["bluez5.enable-sbc-xq"] = true,
+  ["bluez5.enable-msbc"] = true,
+  ["bluez5.enable-hw-volume"] = true,
+  ["bluez5.headset-roles"] = "[ hsp_hs hsp_ag hfp_hf hfp_ag ]",
+  ["bluez5.hfphsp-backend"] = "native",
+  ["bluez5.roles"] = "[ a2dp_sink a2dp_source hsp_hs hsp_ag hfp_hf hfp_ag ]",
+}
+WPEOF
+    # WirePlumber 0.5+ — SPA-JSON config (harmless on 0.4):
+    mkdir -p "$HOME/.config/wireplumber/wireplumber.conf.d"
+    cat > "$HOME/.config/wireplumber/wireplumber.conf.d/50-dose-bluez.conf" <<'WPEOF'
+monitor.bluez.properties = {
+  bluez5.enable-sbc-xq = true
+  bluez5.enable-msbc = true
+  bluez5.enable-hw-volume = true
+  bluez5.headset-roles = [ hsp_hs hsp_ag hfp_hf hfp_ag ]
+  bluez5.hfphsp-backend = "native"
+  bluez5.roles = [ a2dp_sink a2dp_source hsp_hs hsp_ag hfp_hf hfp_ag ]
+}
+WPEOF
+    systemctl --user enable --now pipewire pipewire-pulse wireplumber 2>/dev/null || true
+    systemctl --user restart wireplumber pipewire pipewire-pulse 2>/dev/null || true
+    wpctl settings --save bluetooth.autoswitch-to-headset-profile true 2>/dev/null || true
+
     # Optional stronger command recognizer (Moonshine, offline ONNX)
     python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
         || python3 -m pip install useful-moonshine-onnx 2>/dev/null || true
-    touch "$VOICE_DIR/.bt_ready"
+    touch "$VOICE_DIR/.bt_ready3"
+fi
+
+# If a Bluetooth device is connected but offers no headset (mic)
+# profile, the pairing predates the config above and must be redone
+if pactl list cards short 2>/dev/null | grep -q bluez; then
+    if ! pactl list cards 2>/dev/null | grep -qiE "headset.head.unit|handsfree"; then
+        echo ""
+        echo "  ┌──────────────────────────────────────────────────┐"
+        echo "  │  Bluetooth headset found, but its MICROPHONE      │"
+        echo "  │  profile is missing (pairing predates mic setup). │"
+        echo "  │  Fix: Bluetooth menu -> Forget the AirPods, then  │"
+        echo "  │  pair them again. Then tap the mic test in        │"
+        echo "  │  Settings -> Voice Assistant.                     │"
+        echo "  └──────────────────────────────────────────────────┘"
+        echo ""
+    fi
 fi
 
 # Voice models: keyed on the actual files, never on a flag
