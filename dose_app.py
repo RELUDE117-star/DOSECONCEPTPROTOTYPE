@@ -3477,7 +3477,48 @@ class DoseApp:
         except Exception:
             pass
 
+    def _ensure_audio_packages(self):
+        """The Bluetooth mic pipeline needs pipewire-pulse and
+        pulseaudio-utils (pactl/parec). If they're missing on a Pi,
+        install them ourselves — passwordless sudo is standard on
+        Pi OS — then restart audio services and retry the voice."""
+        import shutil as _sh
+        if _sh.which("pactl"):
+            return
+        on_pi = (os.path.exists("/boot/config.txt")
+                 or os.path.exists("/boot/firmware/config.txt"))
+        if (not on_pi or os.environ.get("DOSE_DISABLE_SELF_INSTALL")
+                or getattr(self, "_audio_pkg_attempted", False)):
+            return
+        self._audio_pkg_attempted = True
+
+        def worker():
+            try:
+                subprocess.run(
+                    ["sudo", "-n", "apt-get", "install", "-y",
+                     "pipewire", "pipewire-pulse", "pipewire-alsa",
+                     "wireplumber", "libspa-0.2-bluez5",
+                     "pulseaudio-utils", "alsa-utils"],
+                    capture_output=True, timeout=600)
+                subprocess.run(
+                    ["systemctl", "--user", "restart", "wireplumber",
+                     "pipewire", "pipewire-pulse"],
+                    capture_output=True, timeout=30)
+            except Exception:
+                pass
+
+            def done():
+                if self.voice:
+                    self.voice.request_reopen()
+                self._draw_frame()
+            try:
+                self.root.after(0, done)
+            except Exception:
+                pass
+        threading.Thread(target=worker, daemon=True).start()
+
     def _start_voice(self):
+        self._ensure_audio_packages()
         self._ensure_bt_mic_config()
         try:
             from dose_voice import DoseVoice

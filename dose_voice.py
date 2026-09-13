@@ -526,6 +526,10 @@ class DoseVoice:
             pass
 
         low = report.lower()
+        if "pactl -> (not installed)" in low \
+                or "pactl' ->" in low:
+            return ("Bluetooth audio tools are still installing — "
+                    "restart the app in a minute, or run DOSE.sh")
         if "usb" in (self.mic_name or "").lower():
             return ("USB mic selected but silent — capture volume "
                     "was probably muted; I've unmuted it, tap "
