@@ -987,15 +987,28 @@ class DoseVoice:
         return self._piper_voice
 
     def _play_wav(self, path):
-        """Play a wav on whatever speaker the system has right now —
-        ALSA/PipeWire default first (covers USB and Bluetooth sinks),
-        then PortAudio's default output. Returns True on success."""
+        """Play a wav on whatever the system's ACTIVE output is.
+        Order matters: pw-play/paplay follow PipeWire's current sink
+        (AirPods, USB — the same route YouTube uses). aplay goes to
+        the legacy ALSA default, which on a Pi is often the silent
+        HDMI port while still reporting success — so it is only a
+        fallback. PortAudio last."""
+        for cmd, label in ((["pw-play", path], "PipeWire (pw-play)"),
+                           (["paplay", path], "Pulse (paplay)")):
+            try:
+                r = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL,
+                                   timeout=120)
+                if r.returncode == 0:
+                    return label
+            except Exception:
+                continue
         try:
             r = subprocess.run(["aplay", "-q", path],
                                stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, timeout=120)
             if r.returncode == 0:
-                return "system default (aplay)"
+                return "legacy ALSA (aplay) — may be routed to HDMI"
         except Exception:
             pass
         try:
