@@ -28,7 +28,11 @@ import time
 import wave
 from datetime import datetime
 
-VOICE_DIR = os.path.expanduser("~/dose-home-station/voice")
+VOICE_DIR = os.environ.get(
+    "DOSE_VOICE_DIR", os.path.expanduser("~/dose-home-station/voice"))
+LEARN_PATH = os.path.join(VOICE_DIR, "learning.json")
+LEARN_FUZZ = 0.87          # similarity for a learned phrase to fire
+MAX_LEARNED = 300
 SAMPLE_RATE = 16000
 BLOCK_SIZE = 4000          # 0.25 s of audio per block
 COMMAND_TIMEOUT = 9.0      # seconds of silence before giving up
@@ -202,6 +206,8 @@ class DoseVoice:
         self._audio_q = queue.Queue()
         self._muted = False
         self._last_reply = ""
+        self._last_exchange = None   # {"text","intent","arg"} of last turn
+        self._learn = self._learn_load()
 
         self._vosk_model = None
         self._piper_voice = None
@@ -476,11 +482,194 @@ class DoseVoice:
         self._set_ui_state("idle")
 
     # ══════════════════════════════════════════════════════════════════
+    #  LEARNING — corrections teach phrase→intent mappings and
+    #  medication-name aliases; instance-based, persisted, offline
+    # ══════════════════════════════════════════════════════════════════
+    def _learn_load(self):
+        try:
+            with open(LEARN_PATH) as f:
+                data = json.load(f)
+            data.setdefault("phrases", {})
+            data.setdefault("aliases", {})
+            data.setdefault("stats", {"corrections": 0, "praise": 0})
+            return data
+        except Exception:
+            return {"phrases": {}, "aliases": {},
+                    "stats": {"corrections": 0, "praise": 0}}
+
+    def _learn_save(self):
+        try:
+            os.makedirs(VOICE_DIR, exist_ok=True)
+            with open(LEARN_PATH, "w") as f:
+                json.dump(self._learn, f, indent=1)
+        except Exception:
+            pass
+
+    def _learn_phrase(self, text, intent_id, arg):
+        phrases = self._learn["phrases"]
+        phrases[text.strip()] = {"intent": intent_id, "arg": arg}
+        while len(phrases) > MAX_LEARNED:
+            phrases.pop(next(iter(phrases)))
+        self._learn["stats"]["corrections"] += 1
+        self._learn_save()
+
+    def _learn_alias(self, heard, canonical):
+        heard = (heard or "").strip()
+        if heard and canonical and heard.lower() != canonical.lower():
+            self._learn["aliases"][heard.lower()] = canonical
+            self._learn_save()
+
+    def _learned_lookup(self, t):
+        """Fuzzy match against everything the user has taught us."""
+        text = t.strip()
+        phrases = self._learn.get("phrases", {})
+        if text in phrases:
+            e = phrases[text]
+            return e["intent"], e.get("arg")
+        best, best_score = None, 0.0
+        for known, e in phrases.items():
+            score = difflib.SequenceMatcher(None, text, known).ratio()
+            if score > best_score:
+                best, best_score = e, score
+        if best and best_score >= LEARN_FUZZ:
+            return best["intent"], best.get("arg")
+        return None
+
+    # ── dispatcher: every functional intent has a stable id, so both
+    #    the built-in matcher and learned phrases route the same way ──
+    def _dispatch(self, intent_id, arg=None):
+        if intent_id == "remaining_today":
+            return self._intent_remaining_today()
+        if intent_id == "next_dose":
+            return self._intent_next_dose()
+        if intent_id == "count":
+            return self._intent_count(arg)
+        if intent_id == "schedule":
+            return self._intent_schedule(arg)
+        if intent_id == "med_info":
+            return self._intent_med_info(arg)
+        if intent_id == "adherence":
+            return self._intent_adherence()
+        if intent_id == "taken_check":
+            return self._intent_taken_check(arg)
+        if intent_id == "dispense":
+            return self._intent_dispense(arg)
+        if intent_id == "addmed":
+            return self._flow_start_addmed()
+        if intent_id == "time":
+            ts = self._fmt_now(datetime.now())
+            return f"The time is {time_to_speech(ts)}.", False
+        if intent_id == "date":
+            now = datetime.now()
+            return ("Today is %s, %s %d." % (
+                now.strftime("%A"), now.strftime("%B"), now.day)), False
+        if intent_id.startswith("nav:"):
+            target = intent_id.split(":", 1)[1]
+            self._ui(lambda: self.app._nav(target))
+            return {"home": "Home screen, Pilot.",
+                    "storage": "Opening storage.",
+                    "settings": "Opening settings.",
+                    "user": "Here is your record, Pilot."}.get(
+                        target, "Done."), False
+        return "Instruction unclear. Standing by.", False
+
+    def _match_builtin(self, t):
+        """Match functional intents only. Returns (intent_id, arg)."""
+        def has(*phrases):
+            return any(p in t for p in phrases)
+
+        if has(" add a new medication", " add new medication",
+               " add a medication", " add medication", " new medication ",
+               " add a new pill", " add a prescription",
+               " register a medication", " add a med ", " add a new med "):
+            return ("addmed", None)
+
+        m = re.search(r"(?:dispense|give me)(?: my| the| some)? (.+)", t)
+        if m and not has(" do not ", " don't "):
+            return ("dispense", m.group(1))
+
+        if has(" adherence ", " my score ", " how am i doing ",
+               " doing this week ", " how have i been ",
+               " have i been taking ", " track record ", " performance "):
+            return ("adherence", None)
+
+        m = re.search(r"did i (?:already )?take (?:my |the )?([a-z ]+?)"
+                      r"(?: today| yet| already)? $", t)
+        if m:
+            return ("taken_check", m.group(1))
+
+        m = re.search(r"how many (?:pills? |tablets? )?(?:of )?"
+                      r"([a-z ]+?)(?: pills| tablets)?"
+                      r"(?: do i have| are)? (?:left|remaining) ?", t)
+        if not m:
+            m = re.search(r"how (?:many|much) ([a-z ]+?) "
+                          r"(?:do i have|is left|left) ", t)
+        if m:
+            return ("count", m.group(1))
+        if has(" how many pills ", " pill count ", " how many do i have "):
+            return ("count", None)
+
+        if has(" left today ", " still have today ", " remaining today ",
+               " still need to take ", " still have to take ",
+               " left for today ", " remain today ",
+               " what pills do i still ", " more today "):
+            return ("remaining_today", None)
+
+        if has(" take next ", " next dose ", " next medication ",
+               " next pill ", " whats next ", " what's next ",
+               " what do i need to take ", " what do i take ",
+               " what medication do i need ", " what should i take ",
+               " due now ", " anything due ", " what is next "):
+            return ("next_dose", None)
+
+        m = re.search(r"when (?:do|should|will) i take "
+                      r"(?:my |the )?([a-z ]+?) $", t)
+        if m:
+            return ("schedule", m.group(1))
+
+        m = re.search(r"(?:how (?:do|should) i take|tell me about|"
+                      r"what is|whats|what's) (?:my |the )?([a-z ]+?) $", t)
+        if m:
+            return ("med_info", m.group(1))
+
+        if has(" what time is it ", " what time ", " the time "):
+            return ("time", None)
+        if has(" what day is it ", " what day ", " the date ",
+               " todays date ", " today's date "):
+            return ("date", None)
+
+        if has(" go home ", " home screen ", " show home "):
+            return ("nav:home", None)
+        if has(" storage ", " my medications ", " my meds "):
+            return ("nav:storage", None)
+        if has(" settings "):
+            return ("nav:settings", None)
+        if has(" my stats ", " user screen ", " show my adherence "):
+            return ("nav:user", None)
+        return None
+
+    # ══════════════════════════════════════════════════════════════════
     #  THE BRAIN — intent engine with BT-7274's personality
     # ══════════════════════════════════════════════════════════════════
     def respond(self, text):
-        """(reply_text, keep_listening). Pure logic — fully testable."""
+        """(reply_text, keep_listening). Pure logic — fully testable.
+
+        SAFETY INVARIANTS (do not weaken):
+        - The assistant can NEVER dispense, decrement a count, or log
+          a dose. Only the physical on-screen flow can. Voice guides.
+        - Medical-advice questions get a hard referral to a
+          pharmacist/doctor — checked FIRST, before learning, so no
+          learned phrase can ever shadow it.
+        - Learning only remaps phrases to the same safe intents.
+        """
         t = " " + re.sub(r"[^a-z0-9' ]", " ", text.lower()).strip() + " "
+
+        # ── SAFETY GATE — always first ──
+        if self._is_medical_question(t):
+            return ("Safety protocol, Pilot: I cannot give medical "
+                    "advice. Never change a dose on your own — "
+                    "please contact your pharmacist or doctor. "
+                    "Protocol three: protect the patient."), False
 
         if self._flow:
             return self._flow_step(text, t)
@@ -496,7 +685,58 @@ class DoseVoice:
                 "Understood, Pilot.",
                 "Cancelling. I will be here."]), False
 
-        # identity / personality
+        # ── corrections: the Pilot teaches, the model learns ──
+        if has(" that's wrong ", " thats wrong ", " that is wrong ",
+               " you're wrong ", " youre wrong ", " not right ",
+               " that's not what i ", " thats not what i ",
+               " you got that wrong ", " incorrect ", " wrong answer ",
+               " you misunderstood ", " misheard "):
+            if not self._last_exchange:
+                return ("I have nothing to correct yet, Pilot. "
+                        "Give me an instruction first."), False
+            self._flow = {"name": "correct",
+                          "prev": dict(self._last_exchange)}
+            return random.choice([
+                "Understood. Corrections improve my model. "
+                "What did you mean?",
+                "Copy. I will learn from this. Say it the way "
+                "you meant it, Pilot.",
+                "Recalibrating. What was the correct "
+                "instruction?"]), True
+
+        if has(" good job ", " well done ", " that's right ",
+               " thats right ", " correct ", " good work ",
+               " nice work ", " exactly "):
+            self._learn["stats"]["praise"] = \
+                self._learn["stats"].get("praise", 0) + 1
+            self._learn_save()
+            return random.choice([
+                "Acknowledged. Reinforcement logged.",
+                "Thank you, Pilot. I aim for precision.",
+                "Good. My confidence in that pathway just "
+                "went up."]), False
+
+        if has(" what have you learned ", " how much have you learned ",
+               " what did you learn ", " your training "):
+            st = self._learn.get("stats", {})
+            n = len(self._learn.get("phrases", {}))
+            a = len(self._learn.get("aliases", {}))
+            return (f"Training report: {n} learned phrase"
+                    f"{'s' if n != 1 else ''}, {a} vocabulary "
+                    f"alias{'es' if a != 1 else ''}, "
+                    f"{st.get('corrections', 0)} corrections "
+                    "absorbed. Every one made me better, "
+                    "Pilot."), False
+
+        # ── learned phrases fire before the built-in matcher ──
+        learned = self._learned_lookup(t)
+        if learned:
+            intent_id, arg = learned
+            self._last_exchange = {"text": t, "intent": intent_id,
+                                   "arg": arg}
+            return self._dispatch(intent_id, arg)
+
+        # ── personality / small talk ──
         if has(" who are you ", " what are you ", " your name ",
                " what is your name ", " whats your name ",
                " what's your name ", " introduce yourself "):
@@ -551,104 +791,42 @@ class DoseVoice:
                " commands "):
             return ("I can report which doses remain today, what to "
                     "take next, pill counts, schedules, and your "
-                    "adherence score. I can also add a new medication. "
-                    "Say: add a new medication. Or ask: what do I "
-                    "take next?"), False
+                    "adherence score. I can add a new medication by "
+                    "voice, and if I get something wrong, say: that "
+                    "is wrong — and I will learn. I never dispense: "
+                    "that is always your hands, Pilot."), False
 
-        # time & date
-        if has(" what time is it ", " what time ", " the time "):
-            now = datetime.now()
-            ts = self._fmt_now(now)
-            return f"The time is {time_to_speech(ts)}.", False
-        if has(" what day is it ", " what day ", " the date ",
-               " todays date ", " today's date "):
-            now = datetime.now()
-            return ("Today is %s, %s %d." % (
-                now.strftime("%A"), now.strftime("%B"), now.day)), False
-
-        # add medication — voice-guided flow
-        if has(" add a new medication", " add new medication",
-               " add a medication", " add medication", " new medication ",
-               " add a new pill", " add a prescription",
-               " register a medication", " add a med ", " add a new med "):
-            return self._flow_start_addmed()
-
-        # dispense
-        m = re.search(r"(?:dispense|give me)(?: my| the| some)? (.+)", t)
-        if m and not has(" do not ", " don't "):
-            return self._intent_dispense(m.group(1))
-
-        # adherence
-        if has(" adherence ", " my score ", " how am i doing ",
-               " doing this week ", " how have i been ",
-               " have i been taking ", " track record ", " performance "):
-            return self._intent_adherence()
-
-        # did I take X?
-        m = re.search(r"did i (?:already )?take (?:my |the )?([a-z ]+?)"
-                      r"(?: today| yet| already)? $", t)
-        if m:
-            return self._intent_taken_check(m.group(1))
-
-        # how many X left
-        m = re.search(r"how many (?:pills? |tablets? )?(?:of )?"
-                      r"([a-z ]+?)(?: pills| tablets)?"
-                      r"(?: do i have| are)? (?:left|remaining) ?", t)
-        if not m:
-            m = re.search(r"how (?:many|much) ([a-z ]+?) "
-                          r"(?:do i have|is left|left) ", t)
-        if m:
-            return self._intent_count(m.group(1))
-        if has(" how many pills ", " pill count ", " how many do i have "):
-            return self._intent_count(None)
-
-        # what's left / remaining today
-        if has(" left today ", " still have today ", " remaining today ",
-               " still need to take ", " still have to take ",
-               " left for today ", " remain today ",
-               " what pills do i still ", " more today "):
-            return self._intent_remaining_today()
-
-        # what / when next
-        if has(" take next ", " next dose ", " next medication ",
-               " next pill ", " whats next ", " what's next ",
-               " what do i need to take ", " what do i take ",
-               " what medication do i need ", " what should i take ",
-               " due now ", " anything due ", " what is next "):
-            return self._intent_next_dose()
-
-        # when do I take X
-        m = re.search(r"when (?:do|should|will) i take "
-                      r"(?:my |the )?([a-z ]+?) $", t)
-        if m:
-            return self._intent_schedule(m.group(1))
-
-        # med info: how do I take X / tell me about X
-        m = re.search(r"(?:how (?:do|should) i take|tell me about|"
-                      r"what is|whats|what's) (?:my |the )?([a-z ]+?) $", t)
-        if m:
-            return self._intent_med_info(m.group(1))
-
-        # navigation
-        if has(" go home ", " home screen ", " show home "):
-            self._ui(lambda: self.app._nav("home"))
-            return "Home screen, Pilot.", False
-        if has(" storage ", " my medications ", " my meds "):
-            self._ui(lambda: self.app._nav("storage"))
-            return "Opening storage.", False
-        if has(" settings "):
-            self._ui(lambda: self.app._nav("settings"))
-            return "Opening settings.", False
-        if has(" my stats ", " user screen ", " show my adherence "):
-            self._ui(lambda: self.app._nav("user"))
-            return "Here is your record, Pilot.", False
+        # ── functional intents via the shared matcher ──
+        route = self._match_builtin(t)
+        if route:
+            intent_id, arg = route
+            self._last_exchange = {"text": t, "intent": intent_id,
+                                   "arg": arg}
+            return self._dispatch(intent_id, arg)
 
         # fallback — BT never pretends to understand
+        self._last_exchange = {"text": t, "intent": "fallback",
+                               "arg": None}
         return random.choice([
-            "I did not copy that, Pilot. Please rephrase.",
+            "I did not copy that, Pilot. If I misheard, say: "
+            "that is wrong — and teach me.",
             "Insufficient data. Try: what do I take next?",
             "That instruction is unclear. Say help, for what I "
             "can do."]), False
+
+    def _is_medical_question(self, t):
+        """Dose-change / interaction / medical-advice questions.
+        Hard-checked before everything else."""
+        risky = ("double dose", "double the", "extra pill",
+                 "extra dose", "take more", "take two", "twice the",
+                 "overdose", "skip my", "skip a dose", "skip tonight",
+                 "stop taking", "quit taking", "alcohol", "drink with",
+                 "mix with", "mixing", "pregnant", "pregnancy",
+                 "side effect", "is it safe to", "can i take more",
+                 "increase my dose", "decrease my dose", "half a pill",
+                 "crush", "expired")
+        return any(p in t for p in risky)
+
 
     # ── shared helpers ────────────────────────────────────────────────
     def _fmt_now(self, now):
@@ -671,6 +849,12 @@ class DoseVoice:
                         r"|the|my)\b", "", spoken).strip()
         if not spoken:
             return None, None
+        # learned vocabulary first ("happy pills" -> Sertraline)
+        for alias, canonical in self._learn.get("aliases", {}).items():
+            if alias and (alias in spoken or difflib.SequenceMatcher(
+                    None, spoken, alias).ratio() >= 0.8):
+                spoken = canonical.lower()
+                break
         best, best_score = None, 0.0
         for key, md in self._loaded_meds():
             name = md.get("name", "").lower()
@@ -831,6 +1015,10 @@ class DoseVoice:
                 "dispensed today."), False
 
     def _intent_dispense(self, spoken):
+        """SAFETY: the voice assistant never dispenses and never
+        starts the dispense flow. It brings up the home screen and
+        tells the Pilot where to press — every transaction requires
+        the physical hold, spin, and confirm."""
         key, md = self._find_med(spoken)
         if not md:
             return (f"I could not find {spoken.strip()} in the "
@@ -838,10 +1026,12 @@ class DoseVoice:
         if md.get("count", 0) <= 0:
             return (f"{md['name']} is empty. Please reload the "
                     "storage first."), False
-        self._flow = {"name": "dispense", "key": key,
-                      "med": md["name"]}
-        return (f"Confirm: dispense one {md['name']} now? "
-                "Say yes or no."), True
+        self._ui(lambda: self.app._nav("home"))
+        return (f"Safety protocol: I never dispense medication "
+                f"myself. {md['name']} is on the home screen — "
+                "tap its card, hold to confirm, and spin. Your "
+                "hands, your call, Pilot."), False
+
 
     # ── multi-turn flows ──────────────────────────────────────────────
     def _flow_start_addmed(self):
@@ -862,17 +1052,33 @@ class DoseVoice:
             self._flow = None
             return "Intake cancelled. Standing by, Pilot.", False
 
-        if flow["name"] == "dispense":
+        if flow["name"] == "correct":
             self._flow = None
-            if any(p in t for p in (" yes ", " yeah ", " yep ",
-                                    " confirm ", " affirmative ",
-                                    " do it ", " sure ")):
-                key = flow["key"]
-                self._ui(lambda: self.app._start_dispense(key))
-                return (f"Dispensing {flow['med']}. Follow the "
-                        "screen, Pilot: hold to confirm, then spin "
-                        "the spindle."), False
-            return "Cancelled. The medication stays put.", False
+            route = self._match_builtin(t)
+            if route is None:
+                return ("I still do not recognize that instruction, "
+                        "Pilot. No changes made — we will try "
+                        "again another time."), False
+            intent_id, arg = route
+            prev = flow.get("prev") or {}
+            prev_text = prev.get("text", "").strip()
+            if prev_text:
+                self._learn_phrase(prev_text, intent_id, arg)
+            # vocabulary: if the old attempt had a med name I could
+            # not resolve and the correction resolves one, alias it
+            prev_arg = prev.get("arg")
+            if prev_arg and arg:
+                _, old_md = self._find_med(prev_arg)
+                _, new_md = self._find_med(arg)
+                if old_md is None and new_md is not None:
+                    cleaned = re.sub(r"\b(pills?|tablets?|medications?"
+                                     r"|meds?|the|my)\b", "",
+                                     prev_arg).strip()
+                    self._learn_alias(cleaned, new_md["name"])
+            self._last_exchange = {"text": t, "intent": intent_id,
+                                   "arg": arg}
+            reply, keep = self._dispatch(intent_id, arg)
+            return "Correction stored. " + reply, keep
 
         if flow["name"] != "addmed":
             self._flow = None
