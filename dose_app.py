@@ -3653,9 +3653,13 @@ class DoseApp:
             return "Testing mic — say something…"
         r = getattr(self, "_mic_test_result", None)
         if r is not None:
-            verdict = ("mic is LIVE" if r > 60 else
-                       "very quiet — speak louder / check mic"
-                       if r > 5 else "NO SIGNAL — mic not working")
+            if r > 60:
+                verdict = "mic is LIVE"
+            elif r > 5:
+                verdict = "very quiet — speak louder / check mic"
+            else:
+                verdict = getattr(self, "_mic_diag",
+                                  "NO SIGNAL — mic not working")
             return f"Mic level: {r} — {verdict} (tap to retest)"
         if self.voice and self.voice.available:
             return f"Mic: {self.voice.mic_name} · tap row to test"
@@ -3673,6 +3677,12 @@ class DoseApp:
 
         def worker():
             level = self.voice.mic_level(2.0)
+            self._mic_diag = None
+            if level <= 5:
+                try:
+                    self._mic_diag = self.voice.mic_report()
+                except Exception:
+                    pass
 
             def done():
                 self._mic_testing = False

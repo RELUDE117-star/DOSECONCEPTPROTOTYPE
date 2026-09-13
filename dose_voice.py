@@ -412,6 +412,52 @@ class DoseVoice:
                 except Exception:
                     continue
 
+    def mic_report(self):
+        """Write a full microphone diagnostic to voice/mic_report.txt
+        and return a one-line human verdict. Called when a mic test
+        reads silence, so we can see exactly what the audio system
+        is exposing."""
+        lines = ["DOSE mic report", time.ctime(), ""]
+        lines.append("chosen backend: %s (rms %s)"
+                     % (self.mic_name, self.mic_rms))
+        try:
+            for i, d in enumerate(self._sd.query_devices()):
+                if d.get("max_input_channels", 0) > 0:
+                    lines.append("portaudio input %d: %s (%s Hz)"
+                                 % (i, d.get("name"),
+                                    d.get("default_samplerate")))
+        except Exception as e:
+            lines.append("portaudio query failed: %r" % (e,))
+        for cmd in (["pactl", "list", "cards", "short"],
+                    ["pactl", "list", "sources", "short"],
+                    ["pw-record", "--version"],
+                    ["parec", "--version"]):
+            try:
+                r = subprocess.run(cmd, capture_output=True,
+                                   text=True, timeout=8)
+                lines.append("$ " + " ".join(cmd))
+                lines.append((r.stdout or r.stderr).strip()[:800])
+            except Exception as e:
+                lines.append("$ %s -> %r" % (" ".join(cmd), e))
+        report = "\n".join(lines)
+        try:
+            os.makedirs(VOICE_DIR, exist_ok=True)
+            with open(os.path.join(VOICE_DIR, "mic_report.txt"),
+                      "w") as f:
+                f.write(report)
+        except Exception:
+            pass
+
+        low = report.lower()
+        if "bluez" not in low:
+            return ("Bluetooth mic not visible to the audio system "
+                    "— re-pair, or use a USB mic")
+        if "pw-record" in low or "parec" in low:
+            return ("Bluetooth source exists but is silent — AirPods "
+                    "mic support on Pi is unreliable; a USB mic "
+                    "always works")
+        return "see voice/mic_report.txt"
+
     def mic_level(self, seconds=2.0):
         """Live mic test for the Settings screen: taps the RUNNING
         capture backend (whatever is actually feeding recognition)
@@ -583,10 +629,10 @@ class DoseVoice:
             PortAudio alone often sees only a dead route."""
             self._engage_bt_mic()
             cmds = (
-                ["parec", "--rate=16000", "--format=s16le",
-                 "--channels=1", "--latency-msec=50"],
                 ["pw-record", "--rate", "16000", "--channels", "1",
                  "--format", "s16", "-"],
+                ["parec", "--rate=16000", "--format=s16le",
+                 "--channels=1", "--latency-msec=50"],
             )
             for cmd in cmds:
                 try:
