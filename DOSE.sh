@@ -105,6 +105,24 @@ if [ ! -f "$VOICE_DIR/.voice_ready" ]; then
     sudo apt install -y libportaudio2 alsa-utils python3-srt 2>/dev/null || true
     pip install --break-system-packages vosk sounddevice piper-tts 2>/dev/null \
         || pip install vosk sounddevice piper-tts 2>/dev/null || true
+    # Optional stronger command recognizer (Moonshine, offline ONNX).
+    # If it installs, dictation accuracy improves automatically;
+    # everything still works without it.
+    pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
+        || pip install useful-moonshine-onnx 2>/dev/null || true
+    python3 - <<'PYEOF2' 2>/dev/null || true
+try:
+    import moonshine_onnx, numpy as np, tempfile, wave, os
+    fd, p = tempfile.mkstemp(suffix=".wav"); os.close(fd)
+    with wave.open(p, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+        w.writeframes(b"\x00\x00" * 16000)
+    moonshine_onnx.transcribe(p, "moonshine/base")   # warms the model
+    os.unlink(p)
+    print("  Moonshine command recognizer ready.")
+except Exception:
+    pass
+PYEOF2
 
     # Speech recognition model (Vosk small English, ~40 MB)
     if ! ls -d "$VOICE_DIR"/vosk-model* >/dev/null 2>&1; then

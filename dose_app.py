@@ -630,6 +630,8 @@ class DoseApp:
         self._voice_reply = ""
         self._voice_anim_running = False
         self._voice_imgs = {}
+        self._voice_ov_t0 = 0.0
+        self._fx_enabled = True
         self.camera = None
         self.camera_running = False
         self.mpr = None
@@ -992,9 +994,45 @@ class DoseApp:
         self._hide_keyboard(save=True)
         if self.mode == "timeedit":
             self._te_commit()  # rail nav keeps schedule edits, like keyboard
+        if mode_key == self.mode:
+            self._draw_frame()
+            return
         self._prev_mode = self.mode
-        self.mode = mode_key
-        self._draw_frame()
+        if not self._fx_enabled:
+            self.mode = mode_key
+            self._draw_frame()
+            return
+        self._fx_to(mode_key)
+
+    def _fx_to(self, mode_key):
+        """Soft fade-through-background transition between screens —
+        stippled veil in the theme background over the content area,
+        in three steps down and three steps up (~170 ms total). The
+        first frame appears instantly, so taps feel immediate."""
+        c = self.canvas
+
+        def veil(stipple):
+            c.delete("fx_veil")
+            c.create_rectangle(0, 0, CONTENT_W, SCREEN_H,
+                               fill=self.theme["bg"], outline="",
+                               stipple=stipple, tags="fx_veil")
+
+        seq = ["gray25", "gray50", "gray75", None,
+               "gray75", "gray50", "gray25"]
+
+        def step(i):
+            if i >= len(seq):
+                c.delete("fx_veil")
+                return
+            if seq[i] is None:
+                self.mode = mode_key
+                self._draw_frame()
+                veil("gray75")
+            else:
+                veil(seq[i])
+            self.root.after(28, lambda: step(i + 1))
+
+        step(0)
 
     # ══════════════════════════════════════════════════════════════════════
     #  HOME SCREEN
@@ -1265,15 +1303,21 @@ class DoseApp:
             line_h = 26
         for line in info_lines[:3]:
             txt = "·  " + line
-            c.create_text(px, ly, text=txt,
-                          font=self.font_body, fill=t["fg"], anchor="nw",
-                          width=354)
-            # advance by however many rows the text actually wraps to,
-            # so wrapped lines never draw over the next one
             try:
                 rows = max(1, math.ceil(self.font_body.measure(txt) / 354))
             except Exception:
                 rows = 1
+            # never run into the DISPENSE button: truncate to what fits
+            if ly + rows * line_h > 384:
+                fit_rows = max(0, (384 - ly) // line_h)
+                if fit_rows == 0:
+                    break
+                txt = self._fit_text(txt, self.font_body,
+                                     354 * fit_rows - 24)
+                rows = fit_rows
+            c.create_text(px, ly, text=txt,
+                          font=self.font_body, fill=t["fg"], anchor="nw",
+                          width=354)
             ly += rows * line_h + 8
 
         # DISPENSE button — pinned to the bottom of the card
@@ -2013,9 +2057,11 @@ class DoseApp:
         dts = self._draft_dose_times()
         times_txt = " & ".join(dts) if len(dts) <= 2 else \
             ", ".join(dts[:-1]) + " & " + dts[-1]
-        c.create_text(pad + 415, qy + 48, text=times_txt,
-                      font=self.font_medium, fill=t["fg"], anchor="center",
-                      width=190)
+        c.create_text(pad + 415, qy + 48,
+                      text=self._fit_text(times_txt,
+                                          self.font_medium, 185),
+                      font=self.font_medium, fill=t["fg"],
+                      anchor="center")
 
         clk_bg = _pil_rounded_rect(40, 40, 12, t["card_bg"])
         tk_clkb = self._get_tk_image("addmed_clk_bg", clk_bg)
@@ -2579,7 +2625,9 @@ class DoseApp:
 
         c.create_text(80, 94, text="MEDICATION LOADED",
                       font=self.font_label, fill=t["muted"], anchor="nw")
-        c.create_text(80, 118, text=self._qty_name,
+        c.create_text(80, 118,
+                      text=self._fit_text(self._qty_name,
+                                          self.font_name_lg, 500),
                       font=self.font_name_lg, fill=accent, anchor="nw")
         c.create_text(80, 190, text="HOW MANY PILLS?",
                       font=self.font_label, fill=t["muted"], anchor="nw")
@@ -2729,8 +2777,11 @@ class DoseApp:
                 and self.mode in ("home", "storage", "settings", "user")):
             self._alert_key = sorted(newly_due)[0]
             self._alert_return = self.mode
-            self.mode = "dosealert"
-            self._draw_frame()
+            if self._fx_enabled:
+                self._fx_to("dosealert")
+            else:
+                self.mode = "dosealert"
+                self._draw_frame()
             return
 
         # if the due dose was taken while the alert is up, close it
@@ -3231,12 +3282,23 @@ class DoseApp:
                 time.sleep(1)
 
     def _parse_qr_payload(self, raw_text):
-        """Parse a QR code and return (slot, med_name) or None."""
+        """Parse a QR code and return (slot, med_name) or None.
+        Input boundary: QR content is untrusted data — the name is
+        sanitized (printable characters only) and length-capped so a
+        crafted code cannot inject junk into the UI, storage, or the
+        voice assistant's speech."""
         text = raw_text.strip()
+        if len(text) > 500:
+            return None
         try:
             payload = json.loads(text)
             slot = payload.get("slot", "")
             med = payload.get("med", "")
+            if not (isinstance(slot, str) and isinstance(med, str)):
+                return None
+            slot = slot.strip()[:20]
+            med = "".join(ch for ch in med if ch.isprintable())
+            med = " ".join(med.split())[:40]
             if slot and med:
                 return (slot, med)
         except (json.JSONDecodeError, AttributeError, TypeError):
@@ -3350,6 +3412,7 @@ class DoseApp:
             return
         if not self._voice_anim_running:
             self._voice_anim_running = True
+            self._voice_ov_t0 = time.time()
             self._voice_anim_tick()
 
     def _voice_anim_tick(self):
@@ -3362,8 +3425,17 @@ class DoseApp:
         c.delete("voice_ov")
         t = self.theme
 
-        bar_w, bar_h = 620, 94
-        bx, by = 26, SCREEN_H - bar_h - 14
+        # During a conversation (add-med, corrections) the panel grows
+        # and shows the dictation in big type so the user can verify
+        # every word they said
+        in_convo = bool(getattr(self.voice, "_flow", None))
+        bar_w = 620
+        bar_h = 168 if in_convo else 94
+        # eased slide-up entrance (250 ms, cubic ease-out)
+        p = min(1.0, (time.time() - self._voice_ov_t0) / 0.25)
+        ease = 1 - (1 - p) ** 3
+        rise = int((1 - ease) * (bar_h + 14))
+        bx, by = 26, SCREEN_H - bar_h - 14 + rise
         bar_img = _pil_rounded_rect(bar_w, bar_h, 20, t["card_bg"],
                                     outline=DOSE_BLUE, outline_w=2)
         tk_bar = ImageTk.PhotoImage(bar_img)
@@ -3375,26 +3447,45 @@ class DoseApp:
         phase = time.time() * 5.0
         amp = {"listening": 1.0, "thinking": 0.3}.get(
             self._voice_state, 0.45 + 0.45 * abs(math.sin(phase * 1.7)))
-        wave_img = _pil_voice_wave(bar_w - 48, 34, phase, amp)
+        wave_img = _pil_voice_wave(bar_w - 48, 30, phase, amp)
         tk_wave = ImageTk.PhotoImage(wave_img)
         self._voice_imgs["wave"] = tk_wave
-        c.create_image(bx + 24, by + 10, image=tk_wave, anchor="nw",
-                       tags="voice_ov")
+        c.create_image(bx + 24, by + bar_h - 38, image=tk_wave,
+                       anchor="nw", tags="voice_ov")
 
-        if self._voice_state == "speaking" and self._voice_reply:
-            text = self._fit_text(self._voice_reply,
-                                  self.font_small, 1120)
-            color = t["fg"]
-        elif self._voice_state == "listening":
-            text = self._voice_user_text or "Listening…"
-            text = self._fit_text(text, self.font_small, 560)
-            color = DOSE_BLUE_LT
+        if in_convo:
+            # assistant's question (small, muted) + big dictation
+            if self._voice_reply:
+                q = self._fit_text(self._voice_reply,
+                                   self.font_small, 1120)
+                c.create_text(bx + bar_w // 2, by + 14, text=q,
+                              font=self.font_small, fill=t["muted"],
+                              anchor="n", width=568, tags="voice_ov")
+            big = self._voice_user_text or ("Listening…" if
+                  self._voice_state == "listening" else "…")
+            big = self._fit_text(big, self.font_name, 1100)
+            c.create_text(bx + bar_w // 2, by + 62, text=big,
+                          font=self.font_name, fill=DOSE_BLUE_LT,
+                          anchor="n", width=580, tags="voice_ov")
         else:
-            text = "…"
-            color = t["muted"]
-        c.create_text(bx + bar_w // 2, by + 46, text=text,
-                      font=self.font_small, fill=color, anchor="n",
-                      width=568, tags="voice_ov")
+            if self._voice_state == "speaking" and self._voice_reply:
+                text = self._fit_text(self._voice_reply,
+                                      self.font_small, 1120)
+                color = t["fg"]
+            elif self._voice_state == "listening":
+                text = self._voice_user_text or "Listening…"
+                text = self._fit_text(text, self.font_title, 560)
+                c.create_text(bx + bar_w // 2, by + 14, text=text,
+                              font=self.font_title, fill=DOSE_BLUE_LT,
+                              anchor="n", width=580, tags="voice_ov")
+                text = None
+            else:
+                text = "…"
+                color = t["muted"]
+            if text:
+                c.create_text(bx + bar_w // 2, by + 14, text=text,
+                              font=self.font_small, fill=color,
+                              anchor="n", width=568, tags="voice_ov")
 
         self.root.after(50, self._voice_anim_tick)
 

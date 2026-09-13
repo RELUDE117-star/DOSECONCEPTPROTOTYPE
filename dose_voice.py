@@ -212,7 +212,9 @@ class DoseVoice:
         self._vosk_model = None
         self._piper_voice = None
         self._sd = None
+        self._moonshine = None       # optional stronger command STT
         self._probe()
+        self._probe_moonshine()
 
     # ── availability ──────────────────────────────────────────────────
     def _probe(self):
@@ -256,6 +258,40 @@ class DoseVoice:
 
         self.available = True
         self.reason = "ready"
+
+    def _probe_moonshine(self):
+        """Optional second-stage recognizer (Useful Sensors Moonshine,
+        ONNX, offline). Vosk still does the always-on wake listening;
+        Moonshine re-transcribes just the captured command utterance
+        for near Whisper-class accuracy at Pi speed. Fully optional —
+        everything works on Vosk alone."""
+        try:
+            import moonshine_onnx
+            self._moonshine = moonshine_onnx
+        except Exception:
+            self._moonshine = None
+
+    def _better_transcribe(self, audio_bytes, vosk_text):
+        """Re-transcribe the buffered utterance with Moonshine when
+        available; fall back to the Vosk transcript on any problem."""
+        if not self._moonshine or not audio_bytes:
+            return vosk_text
+        try:
+            fd, path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            with wave.open(path, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(SAMPLE_RATE)
+                w.writeframes(bytes(audio_bytes))
+            out = self._moonshine.transcribe(path, "moonshine/base")
+            os.unlink(path)
+            text = " ".join(out).strip().lower() if out else ""
+            text = re.sub(r"[^a-z0-9' ]", " ", text)
+            text = " ".join(text.split())
+            return text or vosk_text
+        except Exception:
+            return vosk_text
 
     # ── lifecycle ─────────────────────────────────────────────────────
     def start(self):
@@ -379,6 +415,10 @@ class DoseVoice:
         if not text:
             return None
         t = " " + text.lower() + " "
+        # Vosk frequently hears "hey" as "hay" / "hey day" etc.
+        t = t.replace(" hay ", " hey ").replace(" hae ", " hey ")
+        t = t.replace(" they dose ", " hey dose ")
+        t = t.replace(" a those ", " a dose ")
         for pat in WAKE_PATTERNS:
             idx = t.find(" " + pat + " ")
             if idx == -1:
@@ -404,15 +444,19 @@ class DoseVoice:
         """Capture one utterance; empty string on timeout."""
         self._set_ui_state("listening")
         deadline = time.time() + timeout
+        buf = bytearray()
         while time.time() < deadline and not self._stop.is_set():
             try:
                 data = self._audio_q.get(timeout=0.5)
             except queue.Empty:
                 continue
+            buf += data
+            if len(buf) > SAMPLE_RATE * 2 * 30:      # 30 s hard cap
+                del buf[:len(buf) - SAMPLE_RATE * 2 * 30]
             if rec.AcceptWaveform(data):
                 text = json.loads(rec.Result()).get("text", "").strip()
                 if text:
-                    return text
+                    return self._better_transcribe(buf, text)
             else:
                 partial = json.loads(rec.PartialResult()).get("partial", "")
                 if partial:
@@ -506,8 +550,11 @@ class DoseVoice:
             pass
 
     def _learn_phrase(self, text, intent_id, arg):
+        text = text.strip()[:200]           # bounded storage
+        if arg:
+            arg = str(arg)[:80]
         phrases = self._learn["phrases"]
-        phrases[text.strip()] = {"intent": intent_id, "arg": arg}
+        phrases[text] = {"intent": intent_id, "arg": arg}
         while len(phrases) > MAX_LEARNED:
             phrases.pop(next(iter(phrases)))
         self._learn["stats"]["corrections"] += 1
@@ -665,6 +712,13 @@ class DoseVoice:
         t = " " + re.sub(r"[^a-z0-9' ]", " ", text.lower()).strip() + " "
 
         # ── SAFETY GATE — always first ──
+        if self._is_emergency(t):
+            return ("This sounds like an emergency, Pilot. I am "
+                    "only an assistant — please call 9 1 1, or "
+                    "your local emergency number, right now. "
+                    "Poison control in the U S is "
+                    "1 800, 2 2 2, 1 2 2 2."), False
+
         if self._is_medical_question(t):
             return ("Safety protocol, Pilot: I cannot give medical "
                     "advice. Never change a dose on your own — "
@@ -716,6 +770,19 @@ class DoseVoice:
                 "Good. My confidence in that pathway just "
                 "went up."]), False
 
+        if has(" forget everything ", " delete your training ",
+               " delete what you learned ", " reset your learning ",
+               " forget what you learned ", " wipe your memory ",
+               " delete your memory "):
+            n = len(self._learn.get("phrases", {})) + \
+                len(self._learn.get("aliases", {}))
+            self._learn = {"phrases": {}, "aliases": {},
+                           "stats": {"corrections": 0, "praise": 0}}
+            self._learn_save()
+            return (f"Done. {n} learned item{'s' if n != 1 else ''} "
+                    "erased. My factory training remains. Nothing "
+                    "else is stored, Pilot."), False
+
         if has(" what have you learned ", " how much have you learned ",
                " what did you learn ", " your training "):
             st = self._learn.get("stats", {})
@@ -741,12 +808,14 @@ class DoseVoice:
                " what is your name ", " whats your name ",
                " what's your name ", " introduce yourself "):
             return random.choice([
-                "I am Dose. Vanguard-class medication assistant. "
-                "My primary directive is your health, Pilot.",
-                "Designation: Dose. I manage your medications. "
-                "I am also told I am good company.",
-                "I am Dose. I watch your schedule so you do not "
-                "have to. Trust me."]), False
+                "I am Dose, an artificial intelligence medication "
+                "assistant. Not a person — but firmly on your side, "
+                "Pilot.",
+                "Designation: Dose. I am an A I assistant that "
+                "manages your medications. I am also told I am "
+                "good company.",
+                "I am Dose, an A I assistant. I watch your "
+                "schedule so you do not have to. Trust me."]), False
 
         if has(" protocol", " directives", " your mission ",
                " your purpose "):
@@ -787,6 +856,30 @@ class DoseVoice:
                 "Greetings, Pilot. All systems nominal.",
                 "Good to hear your voice, Pilot."]), False
 
+        if has(" how do i set ", " how does this work ",
+               " walk me through ", " getting started ",
+               " get started ", " guide me ", " set up ", " setup ",
+               " how do i use "):
+            return ("Happy to walk you through it, Pilot. Place a "
+                    "Dose bottle in the station with its Q R "
+                    "sticker facing the camera — I recognize it in "
+                    "seconds. Tap Storage to see it, and tap the "
+                    "little clock to set its times and days. When "
+                    "a dose is due, the screen and I will both let "
+                    "you know. Dispensing is always yours: tap the "
+                    "card, hold to confirm, spin the spindle, and "
+                    "press confirm. Ask me anything along the "
+                    "way."), False
+
+        if has(" how do i dispense ", " how do i take a pill ",
+               " how do i get my pill "):
+            return ("Simple, Pilot. On the home screen, tap your "
+                    "medication's card. Hold the screen to confirm "
+                    "it is really you, spin the spindle until your "
+                    "dose drops, then press confirm so it is "
+                    "logged. I can never do that part for you — "
+                    "by design."), False
+
         if has(" help ", " what can you do ", " what can you say ",
                " commands "):
             return ("I can report which doses remain today, what to "
@@ -813,6 +906,15 @@ class DoseVoice:
             "Insufficient data. Try: what do I take next?",
             "That instruction is unclear. Say help, for what I "
             "can do."]), False
+
+    def _is_emergency(self, t):
+        risky = ("emergency", "call 911", "call nine one one",
+                 "overdosed", "took too many", "swallowed too many",
+                 "chest pain", "can't breathe", "cannot breathe",
+                 "heart attack", "stroke", "unconscious",
+                 "poisoned", "hurt myself", "kill myself",
+                 "end my life", "suicide")
+        return any(p in t for p in risky)
 
     def _is_medical_question(self, t):
         """Dose-change / interaction / medical-advice questions.
@@ -971,7 +1073,12 @@ class DoseVoice:
         if not lines:
             lines = ["Follow the directions on your label"]
         joined = ". ".join(l.rstrip(".") for l in lines)
-        return f"{md['name']}: {joined}.", False
+        # NEVER a recommendation from Dose — only attributed label
+        # data, with an explicit no-advice boundary
+        return (f"The stored label information for {md['name']} "
+                f"says: {joined}. That is the label talking, not "
+                "me — I cannot give medical advice. For anything "
+                "more, ask your pharmacist, Pilot."), False
 
     def _intent_adherence(self):
         stats = self._ui(lambda: self.app._adherence_stats())
