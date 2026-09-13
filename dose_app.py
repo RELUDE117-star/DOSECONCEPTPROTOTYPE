@@ -3508,7 +3508,9 @@ class DoseApp:
                 except Exception:
                     pass
 
-            if not _glob.glob(os.path.join(vdir, "*.onnx")):
+            if not _glob.glob(os.path.join(vdir, "*amy-medium*.onnx")):
+                # hold Amy's highest quality — upgrade from the low
+                # fallback whenever medium becomes reachable
                 base = ("https://huggingface.co/rhasspy/piper-voices/"
                         "resolve/v1.0.0/en/en_US/amy/medium/")
                 got = (fetch(base + "en_US-amy-medium.onnx",
@@ -3525,6 +3527,8 @@ class DoseApp:
                             os.unlink(os.path.join(vdir, p))
                         except Exception:
                             pass
+                if not got and not _glob.glob(
+                        os.path.join(vdir, "*.onnx")):
                     fd, tpath = _tf.mkstemp(suffix=".tar.gz")
                     os.close(fd)
                     if fetch("https://github.com/rhasspy/piper/releases/"

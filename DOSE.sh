@@ -186,8 +186,10 @@ PYEOF2
         rm -f "$TMPZ"
     fi
 
-    # Neural voice (Piper "Amy" — soft human voice)
-    if ! ls "$VOICE_DIR"/*.onnx >/dev/null 2>&1; then
+    # Neural voice (Piper "Amy" — soft human voice). Always try to
+    # hold Amy's HIGHEST quality: if only the low fallback is present,
+    # attempt the medium upgrade too.
+    if ! ls "$VOICE_DIR"/*amy-medium*.onnx >/dev/null 2>&1; then
         echo "  Downloading the voice..."
         if curl -sSL -o "$VOICE_DIR/en_US-amy-medium.onnx" \
                 "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/amy/medium/en_US-amy-medium.onnx" \
