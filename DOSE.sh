@@ -32,6 +32,8 @@ probe "sounddevice"        || { APT_PKGS="$APT_PKGS libportaudio2 alsa-utils"; P
 probe "vosk"               || { APT_PKGS="$APT_PKGS python3-srt"; PIP_PKGS="$PIP_PKGS vosk"; }
 probe "piper"              || PIP_PKGS="$PIP_PKGS piper-tts"
 command -v pip3 >/dev/null 2>&1 || APT_PKGS="$APT_PKGS python3-pip"
+command -v pactl >/dev/null 2>&1 || APT_PKGS="$APT_PKGS pulseaudio-utils pipewire-pulse"
+command -v pw-record >/dev/null 2>&1 || APT_PKGS="$APT_PKGS pipewire"
 
 if [ -n "$APT_PKGS$PIP_PKGS" ]; then
     echo "  Installing missing components:$APT_PKGS$PIP_PKGS"
@@ -56,6 +58,7 @@ status "picamera2"        "Camera"              "sudo apt install python3-picame
 status "sounddevice"      "Voice: audio"        "sudo apt install libportaudio2; python3 -m pip install sounddevice"
 status "vosk"             "Voice: recognition"  "python3 -m pip install vosk"
 status "piper"            "Voice: speech"       "python3 -m pip install piper-tts"
+if command -v pactl >/dev/null 2>&1; then echo "  [ OK ] Bluetooth audio tools"; else echo "  [MISS] Bluetooth audio tools  <- sudo apt install pulseaudio-utils pipewire-pulse"; fi
 
 # Hard requirements to run at all
 if ! probe "tkinter" || ! probe "PIL, PIL.ImageTk"; then

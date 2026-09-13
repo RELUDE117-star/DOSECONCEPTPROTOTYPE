@@ -3508,36 +3508,59 @@ class DoseApp:
             pass
 
     def _ensure_audio_packages(self):
-        """The Bluetooth mic pipeline needs pipewire-pulse and
-        pulseaudio-utils (pactl/parec). If they're missing on a Pi,
-        install them ourselves — passwordless sudo is standard on
-        Pi OS — then restart audio services and retry the voice."""
+        """Install the Bluetooth audio tool packages, VISIBLY: the
+        outcome (or the exact reason it can't) is stored and shown
+        on the Voice & Bluetooth screen and in the mic report.
+        Retries whenever the audio screen is opened."""
         import shutil as _sh
-        if _sh.which("pactl"):
+        if _sh.which("pactl") and _sh.which("parec"):
+            self._audio_pkg_status = ""
             return
         on_pi = (os.path.exists("/boot/config.txt")
                  or os.path.exists("/boot/firmware/config.txt"))
-        if (not on_pi or os.environ.get("DOSE_DISABLE_SELF_INSTALL")
-                or getattr(self, "_audio_pkg_attempted", False)):
+        if not on_pi or os.environ.get("DOSE_DISABLE_SELF_INSTALL"):
             return
-        self._audio_pkg_attempted = True
+        if getattr(self, "_audio_pkg_busy", False):
+            return
+        if time.time() - getattr(self, "_audio_pkg_last", 0) < 60:
+            return
+        self._audio_pkg_busy = True
+        self._audio_pkg_last = time.time()
+        self._audio_pkg_status = "installing audio tools…"
 
         def worker():
+            status = ""
             try:
-                subprocess.run(
+                r = subprocess.run(
                     ["sudo", "-n", "apt-get", "install", "-y",
                      "pipewire", "pipewire-pulse", "pipewire-alsa",
                      "wireplumber", "libspa-0.2-bluez5",
                      "pulseaudio-utils", "alsa-utils"],
-                    capture_output=True, timeout=600)
-                subprocess.run(
-                    ["systemctl", "--user", "restart", "wireplumber",
-                     "pipewire", "pipewire-pulse"],
-                    capture_output=True, timeout=30)
-            except Exception:
-                pass
+                    capture_output=True, text=True, timeout=600)
+                err = (r.stderr or "").lower()
+                if r.returncode == 0:
+                    status = "audio tools installed ✓"
+                    subprocess.run(
+                        ["systemctl", "--user", "restart",
+                         "wireplumber", "pipewire",
+                         "pipewire-pulse"],
+                        capture_output=True, timeout=30)
+                elif "password is required" in err or "sudo:" in err:
+                    status = ("can't install: sudo needs a password "
+                              "— run DOSE.sh once to finish")
+                elif "lock" in err:
+                    status = ("apt is busy (system updates?) — "
+                              "will retry")
+                    self._audio_pkg_last = 0
+                else:
+                    status = ("install failed: "
+                              + (r.stderr or "unknown").strip()[-80:])
+            except Exception as e:
+                status = "install failed: %s" % e
 
             def done():
+                self._audio_pkg_busy = False
+                self._audio_pkg_status = status
                 if self.voice:
                     self.voice.request_reopen()
                 self._draw_frame()
@@ -3943,9 +3966,11 @@ class DoseApp:
                       text=self._fit_text(mic_line,
                                           self.font_small, 556),
                       font=self.font_small, fill=t["fg"], anchor="nw")
-        if bt["status"]:
+        status_line = bt["status"] or getattr(
+            self, "_audio_pkg_status", "")
+        if status_line:
             c.create_text(56, 86,
-                          text=self._fit_text(bt["status"],
+                          text=self._fit_text(status_line,
                                               self.font_small, 556),
                           font=self.font_small, fill=DOSE_BLUE_LT,
                           anchor="nw")
@@ -4114,6 +4139,13 @@ class DoseApp:
         c.create_text(56, 44, text="MICROPHONE REPORT",
                       font=self.font_label, fill=t["muted"],
                       anchor="nw")
+        pkg = getattr(self, "_audio_pkg_status", "")
+        if pkg:
+            c.create_text(616, 44,
+                          text=self._fit_text("tools: " + pkg,
+                                              self.font_small, 300),
+                          font=self.font_small, fill=DOSE_BLUE_LT,
+                          anchor="ne")
         lines = getattr(self, "_mic_report_lines", None) or             ["No report yet — run a mic test first."]
         y = 70
         for ln in lines[:24]:
@@ -4154,6 +4186,7 @@ class DoseApp:
     def _voice_row_tap(self):
         self._prev_mode = self.mode
         self.mode = "btaudio"
+        self._ensure_audio_packages()
         self._draw_frame()
         self._bt_refresh(scan=False)
 
