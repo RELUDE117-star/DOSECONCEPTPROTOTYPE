@@ -379,6 +379,30 @@ def _pil_status_icon(size, kind, scale=2):
     return img.resize((size, size), resample)
 
 
+def _pil_voice_wave(w, h, phase, amp, scale=2):
+    """Siri-like waveform: three overlapping sine ribbons in dose blue."""
+    sw, sh = w * scale, h * scale
+    img = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    mid = sh / 2
+    layers = [
+        (_hex_to_rgba(DOSE_BLUE)[:3] + (230,), 1.0, 1.0, 0.0),
+        (_hex_to_rgba(DOSE_BLUE_LT)[:3] + (170,), 0.72, 1.6, 1.9),
+        ((255, 255, 255, 90), 0.45, 2.3, 4.1),
+    ]
+    for color, a_mul, f_mul, p_off in layers:
+        pts = []
+        for x in range(0, sw + 1, 3 * scale):
+            u = x / sw
+            envelope = math.sin(math.pi * u) ** 1.5
+            y = mid + (mid - 3 * scale) * amp * a_mul * envelope * \
+                math.sin(2 * math.pi * (u * 2.1 * f_mul) + phase + p_off)
+            pts.append((x, y))
+        d.line(pts, fill=color, width=2 * scale, joint="curve")
+    resample = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
+    return img.resize((w, h), resample)
+
+
 def _pil_soft_check(size, scale=2):
     """Success mark: translucent circle + check in the signature blue."""
     ss = size * scale
@@ -579,7 +603,7 @@ class DoseApp:
         # ── State ──────────────────────────────────────────────────────────
         self.med_data = {}
         self.settings = {"night_mode": False, "alarm_sound": True,
-                         "constant_scan": False}
+                         "constant_scan": False, "voice_enabled": True}
         self.theme = dict(DARK_THEME)
         self.mode = "home"
         self.selected_pill = "blue"
@@ -600,6 +624,12 @@ class DoseApp:
         self._addmed_cancel_time = 0.0
         self._qty_cancel_time = 0.0
         self.qr_x_pos = {}   # last seen camera x-position per slot
+        self.voice = None
+        self._voice_state = "idle"
+        self._voice_user_text = ""
+        self._voice_reply = ""
+        self._voice_anim_running = False
+        self._voice_imgs = {}
         self.camera = None
         self.camera_running = False
         self.mpr = None
@@ -677,6 +707,10 @@ class DoseApp:
 
         if CAMERA_AVAILABLE:
             self._start_camera()
+
+        # ── Voice assistant ("Hey Dose") ───────────────────────────────
+        if self.settings.get("voice_enabled", True):
+            self._start_voice()
         if self.has_touch:
             self._poll_touch()
 
@@ -1061,6 +1095,9 @@ class DoseApp:
             hw.append("Camera not connected")
         if TOUCH_SENSOR_ENABLED and not self.has_touch:
             hw.append("Touch: " + (self.touch_error or "not detected"))
+        vs = self._voice_status_text()
+        if vs and "off" not in vs:
+            hw.append(vs)
         if hw:
             c.create_text(32, SCREEN_H - 20, text="  ·  ".join(hw),
                           font=self.font_small, fill="#444444", anchor="sw")
@@ -1548,19 +1585,22 @@ class DoseApp:
             ("Check for Updates", 2, "button", "update", None),
             ("Constant QR Scan", 3, "toggle", "constant_scan",
              self.settings.get("constant_scan", False)),
+            ("Voice Assistant", 4, "toggle", "voice_enabled",
+             self.settings.get("voice_enabled", True)),
         ]
 
-        row_h = card_h // 4
+        row_h = card_h // 5
         for label, idx, kind, key, val in items:
             y = card_y + idx * row_h
             px = 52
 
-            if idx < 3:
+            if idx < 4:
                 c.create_line(px, y + row_h, 622, y + row_h,
                               fill=t["divider"])
 
             # Bigger icon (48px)
-            icon_img = _pil_settings_icon(48, SETTINGS_ICON_COLORS[idx])
+            icon_img = _pil_settings_icon(
+                48, SETTINGS_ICON_COLORS[idx % len(SETTINGS_ICON_COLORS)])
             tk_icon = self._get_tk_image(f"set_icon_{idx}", icon_img)
             c.create_image(px, y + (row_h - 48) // 2, image=tk_icon, anchor="nw")
 
@@ -1578,6 +1618,12 @@ class DoseApp:
                 self._click_zones.append(
                     (tx, ty, tx + tw, ty + th,
                      lambda k=key: self._toggle_setting(k)))
+                if key == "voice_enabled":
+                    vs = self._voice_status_text()
+                    if vs:
+                        c.create_text(px + 64, y + row_h // 2 + 16,
+                                      text=vs, font=self.font_small,
+                                      fill=t["muted"], anchor="w")
 
             elif kind == "button":
                 bw, bh = 120, 44
@@ -1629,6 +1675,15 @@ class DoseApp:
         elif key == "constant_scan":
             self.settings["constant_scan"] = not self.settings.get("constant_scan", False)
             self._save_config()
+            self._draw_frame()
+        elif key == "voice_enabled":
+            on = not self.settings.get("voice_enabled", True)
+            self.settings["voice_enabled"] = on
+            self._save_config()
+            if on and self.voice is None:
+                self._start_voice()
+            if self.voice:
+                self.voice.set_muted(not on)
             self._draw_frame()
 
     # ══════════════════════════════════════════════════════════════════════
@@ -2955,10 +3010,21 @@ class DoseApp:
                 local_path = os.path.abspath(__file__)
                 with open(local_path, "wb") as f:
                     f.write(remote_data)
+                try:
+                    resp_v = urlopen(RAW_URL + "/dose_voice.py",
+                                     timeout=15)
+                    vdata = resp_v.read()
+                    vpath = os.path.join(os.path.dirname(local_path),
+                                         "dose_voice.py")
+                    with open(vpath, "wb") as f:
+                        f.write(vdata)
+                except Exception:
+                    pass
                 os.makedirs(APP_DIR, exist_ok=True)
                 with open(os.path.join(APP_DIR, "dose_app.py"), "wb") as f:
                     f.write(remote_data)
-                for fname in ["DOSE.sh", "dose_logo.png", "demo_qr.png"]:
+                for fname in ["DOSE.sh", "dose_voice.py",
+                              "dose_logo.png", "demo_qr.png"]:
                     try:
                         resp = urlopen(RAW_URL + "/" + fname, timeout=15)
                         fdata = resp.read()
@@ -3239,8 +3305,106 @@ class DoseApp:
                     md["loaded"] = True
                     md["count"] = DEFAULT_QTY
 
+    # ══════════════════════════════════════════════════════════════════════
+    #  VOICE ASSISTANT — "Hey Dose" (see dose_voice.py)
+    # ══════════════════════════════════════════════════════════════════════
+    def _start_voice(self):
+        try:
+            from dose_voice import DoseVoice
+        except Exception:
+            self.voice = None
+            return
+        try:
+            self.voice = DoseVoice(self)
+            if self.voice.available:
+                self.voice.start()
+        except Exception:
+            self.voice = None
+
+    def _voice_status_text(self):
+        if self.voice is None:
+            return "Voice: not installed"
+        if not self.voice.available:
+            return "Voice: " + self.voice.reason
+        if not self.settings.get("voice_enabled", True):
+            return "Voice: off"
+        return ""
+
+    def _med_info_for(self, name):
+        """Bridge for the voice assistant: guidance lines for a med."""
+        return MED_INFO.get((name or "").strip().lower(),
+                            MED_INFO_DEFAULT)
+
+    def _voice_overlay_update(self, state, user_text="", reply_text=""):
+        """Called (on the Tk thread) by the voice engine."""
+        self._voice_state = state
+        if user_text:
+            self._voice_user_text = user_text
+        if reply_text:
+            self._voice_reply = reply_text
+        if state == "idle":
+            self._voice_user_text = ""
+            self._voice_reply = ""
+            self.canvas.delete("voice_ov")
+            self._voice_imgs.clear()
+            return
+        if not self._voice_anim_running:
+            self._voice_anim_running = True
+            self._voice_anim_tick()
+
+    def _voice_anim_tick(self):
+        if self._voice_state == "idle":
+            self._voice_anim_running = False
+            self.canvas.delete("voice_ov")
+            self._voice_imgs.clear()
+            return
+        c = self.canvas
+        c.delete("voice_ov")
+        t = self.theme
+
+        bar_w, bar_h = 620, 94
+        bx, by = 26, SCREEN_H - bar_h - 14
+        bar_img = _pil_rounded_rect(bar_w, bar_h, 20, t["card_bg"],
+                                    outline=DOSE_BLUE, outline_w=2)
+        tk_bar = ImageTk.PhotoImage(bar_img)
+        self._voice_imgs["bar"] = tk_bar
+        c.create_image(bx, by, image=tk_bar, anchor="nw",
+                       tags="voice_ov")
+
+        # Siri-style animated wave
+        phase = time.time() * 5.0
+        amp = {"listening": 1.0, "thinking": 0.3}.get(
+            self._voice_state, 0.45 + 0.45 * abs(math.sin(phase * 1.7)))
+        wave_img = _pil_voice_wave(bar_w - 48, 34, phase, amp)
+        tk_wave = ImageTk.PhotoImage(wave_img)
+        self._voice_imgs["wave"] = tk_wave
+        c.create_image(bx + 24, by + 10, image=tk_wave, anchor="nw",
+                       tags="voice_ov")
+
+        if self._voice_state == "speaking" and self._voice_reply:
+            text = self._fit_text(self._voice_reply,
+                                  self.font_small, 1120)
+            color = t["fg"]
+        elif self._voice_state == "listening":
+            text = self._voice_user_text or "Listening…"
+            text = self._fit_text(text, self.font_small, 560)
+            color = DOSE_BLUE_LT
+        else:
+            text = "…"
+            color = t["muted"]
+        c.create_text(bx + bar_w // 2, by + 46, text=text,
+                      font=self.font_small, fill=color, anchor="n",
+                      width=568, tags="voice_ov")
+
+        self.root.after(50, self._voice_anim_tick)
+
     # ── Quit ───────────────────────────────────────────────────────────────
     def _quit(self):
+        try:
+            if self.voice:
+                self.voice.stop()
+        except Exception:
+            pass
         try:
             if self.camera and self.camera_running:
                 self.camera_running = False
