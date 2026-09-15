@@ -4044,11 +4044,11 @@ class DoseApp:
         c.create_text(56, mic_y, text="MICROPHONE",
                       font=self.font_label, fill=t["muted"],
                       anchor="nw")
-        options = [("Auto — picks the live mic", "auto"),
-                   ("Bluetooth via PipeWire", "pipewire")]
+        options = [("Auto — picks the live mic", "auto")]
         if self.voice:
-            for n in self.voice.list_inputs()[:1]:
+            for n in self.voice.list_inputs()[:1]:   # USB-first sorted
                 options.append((n, n))
+        options.append(("Bluetooth via PipeWire", "pipewire"))
         current = self.settings.get("mic_device", "auto")
         oy = mic_y + 20
         for label, value in options[:3]:

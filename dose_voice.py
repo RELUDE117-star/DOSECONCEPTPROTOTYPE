@@ -338,9 +338,9 @@ class DoseVoice:
         return None
 
     def _unmute_alsa_inputs(self):
-        """USB microphones frequently arrive with their ALSA capture
-        volume at zero or muted — raise and unmute every capture
-        control on every card. Harmless if already fine."""
+        """USB microphones AND speakers frequently arrive with their
+        ALSA volume at zero or muted — raise and unmute every capture
+        and playback control on every card. Harmless if already fine."""
         for card in range(6):
             try:
                 out = subprocess.run(
@@ -356,16 +356,55 @@ class DoseVoice:
                 if not m:
                     continue
                 name = m.group(1)
-                if not any(k in name.lower() for k in
-                           ("mic", "capture", "input")):
+                low = name.lower()
+                if any(k in low for k in ("mic", "capture", "input")):
+                    args = ["90%", "on", "cap"]
+                elif any(k in low for k in ("speaker", "master",
+                                            "pcm", "headphone")):
+                    args = ["90%", "on"]
+                else:
                     continue
                 try:
                     subprocess.run(
-                        ["amixer", "-c", str(card), "sset", name,
-                         "90%", "on", "cap"],
+                        ["amixer", "-c", str(card), "sset", name]
+                        + args,
                         capture_output=True, timeout=5)
                 except Exception:
                     pass
+
+    def _pa_refresh(self):
+        """Re-scan PortAudio's device list. PortAudio snapshots the
+        hardware once at startup, so a USB mic plugged in AFTER launch
+        stays invisible until this runs. Only safe to call when no
+        capture stream is open — open_capture calls it right after
+        closing the old stream."""
+        try:
+            self._sd._terminate()
+            self._sd._initialize()
+        except Exception:
+            pass
+
+    def _audio_sig(self):
+        """Fingerprint of the machine's audio devices. It changes the
+        moment a USB or Bluetooth mic/speaker is plugged in or pulled,
+        which is how the engine notices hot-plugs. Names only — state
+        columns flip constantly and would cause spurious reopens."""
+        names = []
+        env = self._audio_env()
+        for what in ("sources", "sinks"):
+            try:
+                r = subprocess.run(["pactl", "list", "short", what],
+                                   capture_output=True, text=True,
+                                   timeout=5, env=env)
+                if r.returncode != 0:
+                    return None
+                for ln in (r.stdout or "").splitlines():
+                    parts = ln.split()
+                    if len(parts) > 1:
+                        names.append(parts[1])
+            except Exception:
+                return None
+        return "|".join(sorted(names))
 
     def _pick_input_device(self):
         """Choose the input whose audio actually FLOWS. Bluetooth
@@ -382,10 +421,10 @@ class DoseVoice:
                 if d.get("max_input_channels", 0) < 1:
                     continue
                 n = (d.get("name") or "").lower()
-                if any(k in n for k in ("airpod", "bluez", "headset",
-                                        "hands-free", "hfp")):
+                if "usb" in n:
                     pri = 0
-                elif "usb" in n:
+                elif any(k in n for k in ("airpod", "bluez", "headset",
+                                          "hands-free", "hfp")):
                     pri = 1
                 elif n in ("default", "pipewire", "pulse",
                            "sysdefault"):
@@ -456,6 +495,69 @@ class DoseVoice:
                 continue
         return devices, sources
 
+    def _list_sinks(self):
+        """Names of the system's current audio OUTPUTS (sinks)."""
+        try:
+            out = subprocess.run(["pactl", "list", "short", "sinks"],
+                                 capture_output=True, text=True,
+                                 timeout=8,
+                                 env=self._audio_env()).stdout
+            sinks = [ln.split()[1] for ln in out.splitlines()
+                     if len(ln.split()) > 1]
+            if sinks:
+                return sinks
+        except Exception:
+            pass
+        # PipeWire-native fallback when pulseaudio-utils is absent
+        sinks = []
+        for obj in self._pw_dump():
+            try:
+                props = (obj.get("info") or {}).get("props") or {}
+                if props.get("media.class") == "Audio/Sink":
+                    n = props.get("node.name", "")
+                    if n:
+                        sinks.append(n)
+            except Exception:
+                continue
+        return sinks
+
+    def _pick_output_target(self):
+        """The sink Dose should speak through: a USB speaker the
+        moment it's plugged in, else Bluetooth, else anything that
+        isn't the Pi's (usually silent) HDMI port. Chosen fresh so a
+        speaker plugged in mid-session is used on the very next
+        sentence. None = trust the system default. Fully independent
+        of the microphone choice — separate USB units are fine."""
+        now = time.time()
+        cached = getattr(self, "_out_cache", None)
+        if cached and now - cached[0] < 5:
+            return cached[1]
+        target = None
+        sinks = self._list_sinks()
+        for want in ("usb", "bluez"):
+            for s in sinks:
+                if want in s.lower():
+                    target = s
+                    break
+            if target:
+                break
+        if target is None:
+            non_hdmi = [s for s in sinks if "hdmi" not in s.lower()]
+            if non_hdmi and len(non_hdmi) < len(sinks):
+                target = non_hdmi[0]
+        if target:
+            # make it the system default too, unmuted and audible
+            for cmd in (["pactl", "set-default-sink", target],
+                        ["pactl", "set-sink-mute", target, "0"],
+                        ["pactl", "set-sink-volume", target, "90%"]):
+                try:
+                    subprocess.run(cmd, capture_output=True, timeout=5,
+                                   env=self._audio_env())
+                except Exception:
+                    pass
+        self._out_cache = (now, target)
+        return target
+
     def _engage_bt_mic(self):
         """Force Bluetooth cards into their headset (mic-capable)
         profile — AirPods stay in playback-only A2DP until asked."""
@@ -512,7 +614,9 @@ class DoseVoice:
         return False
 
     def list_inputs(self):
-        """Names of all input-capable devices, for the mic selector."""
+        """Names of all input-capable devices for the mic selector,
+        USB microphones first (they're the ones people plug in on
+        purpose), then Bluetooth, then everything else."""
         out = []
         try:
             for d in self._sd.query_devices():
@@ -522,6 +626,11 @@ class DoseVoice:
                         out.append(n)
         except Exception:
             pass
+        out.sort(key=lambda n: (
+            0 if "usb" in n.lower() else
+            1 if any(k in n.lower() for k in
+                     ("airpod", "bluez", "headset")) else 2,
+            n.lower()))
         return out
 
     def request_reopen(self):
@@ -608,6 +717,10 @@ class DoseVoice:
                 d["name"], [p["name"] for p in d["profiles"]]))
         for s in sources:
             lines2.append("  audio source: %s" % s)
+        for s in self._list_sinks():
+            lines2.append("  audio output: %s" % s)
+        lines2.append("  speaker target: %s"
+                      % (self._pick_output_target() or "system default"))
         try:
             with open(os.path.join(VOICE_DIR, "mic_report.txt"),
                       "a") as f:
@@ -901,6 +1014,7 @@ class DoseVoice:
             then falls back to LIVENESS-based automatic picking."""
             self._kick_audio_services()
             self._unmute_alsa_inputs()
+            self._pa_refresh()   # see USB devices plugged in after launch
             pref = self._mic_pref()
             if pref == "pipewire":
                 cap = open_pipewire()
@@ -935,12 +1049,34 @@ class DoseVoice:
             return
 
         last_audio = time.time()
+        last_devscan = 0.0
+        last_reselect = time.time()
+        dev_sig = None
         while not self._stop.is_set():
+            # Hot-plug watch: a USB/Bluetooth mic or speaker appearing
+            # (or vanishing) changes the device fingerprint — redo
+            # selection immediately so new hardware just works.
+            now = time.time()
+            if now - last_devscan > 8 and self.state == "idle":
+                last_devscan = now
+                sig = self._audio_sig()
+                if (sig is not None and dev_sig is not None
+                        and sig != dev_sig):
+                    self._out_cache = None
+                    self._force_reopen = True
+                if sig is not None:
+                    dev_sig = sig
+                # a mic with no signal yet: keep re-trying — the live
+                # one may have just been plugged in
+                if ("(no signal" in (self.mic_name or "")
+                        and now - last_reselect > 20):
+                    self._force_reopen = True
             if self._force_reopen:
                 self._force_reopen = False
                 close_capture(stream)
                 stream = open_capture()
                 last_audio = time.time()
+                last_reselect = time.time()
                 if stream is None:
                     time.sleep(3)
                     continue
@@ -1109,9 +1245,19 @@ class DoseVoice:
         (AirPods, USB — the same route YouTube uses). aplay goes to
         the legacy ALSA default, which on a Pi is often the silent
         HDMI port while still reporting success — so it is only a
-        fallback. PortAudio last."""
-        for cmd, label in ((["pw-play", path], "PipeWire (pw-play)"),
-                           (["paplay", path], "Pulse (paplay)")):
+        fallback. PortAudio last. A concrete speaker (USB first) is
+        targeted explicitly when one exists, so plugging in a USB
+        speaker works instantly regardless of the mic."""
+        target = self._pick_output_target()
+        routes = []
+        if target:
+            routes += [(["pw-play", "--target", target, path],
+                        "PipeWire → " + target),
+                       (["paplay", "-d", target, path],
+                        "Pulse → " + target)]
+        routes += [(["pw-play", path], "PipeWire (pw-play)"),
+                   (["paplay", path], "Pulse (paplay)")]
+        for cmd, label in routes:
             try:
                 r = subprocess.run(cmd, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL,
