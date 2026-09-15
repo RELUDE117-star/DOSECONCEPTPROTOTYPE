@@ -4270,6 +4270,30 @@ class DoseApp:
                                               self.font_tiny, 556),
                           font=self.font_tiny, fill=t["muted"],
                           anchor="nw")
+        # plain-language diagnosis: mute (fixable) vs dead hardware
+        peak_now = getattr(self, "_meter_peak", 0)
+        diag = ""
+        if v and getattr(v, "available", False):
+            no_dev = (not getattr(v, "mic_card", None)
+                      and "arecord" not in str(route))
+            if no_dev:
+                diag = ("No USB microphone detected — plug one in "
+                        "(any USB mic).")
+            elif peak_now > 40:
+                diag = "Mic is working — you're good."
+            elif mix and ("[off]" in mix or "0%[" in mix):
+                diag = ("Capture is MUTED at the mixer — tap FULL TEST "
+                        "to force it on.")
+            elif mix:
+                diag = ("Mixer is OPEN but the mic sends no audio → the "
+                        "mic itself, its cable, or USB power. Try a "
+                        "powered USB hub or another mic.")
+        if diag:
+            c.create_text(56, 110,
+                          text=self._fit_text("Diagnosis: " + diag,
+                                              self.font_tiny, 556),
+                          font=self.font_tiny, fill=DOSE_BLUE_LT,
+                          anchor="nw", width=556)
 
         raw = getattr(self, "_meter_raw", 0)
         boost = getattr(self, "_meter_boost", 0)
