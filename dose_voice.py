@@ -624,10 +624,17 @@ class DoseVoice:
         names = []
         try:
             with open("/proc/asound/cards") as f:
+                cur = None
                 for ln in f:
+                    m = re.match(r"\s*(\d+)\s+\[", ln)
+                    if m:
+                        cur = m.group(1)
                     if "[" in ln and "]" in ln:
-                        names.append(
-                            ln.split("[")[1].split("]")[0].strip())
+                        # include the CARD NUMBER so a USB port swap
+                        # (which reassigns card numbers) changes the
+                        # fingerprint and triggers re-selection
+                        nm = ln.split("[")[1].split("]")[0].strip()
+                        names.append("%s:%s" % (cur, nm))
         except Exception:
             pass
         env = self._audio_env()
@@ -1691,15 +1698,21 @@ class DoseVoice:
             # endpoint — it is deprioritized so a real microphone on
             # another card always wins the tie.
             routes = []
+            cap_cards = self._alsa_capture_cards()
             # The full self-test may have found the exact card that
-            # actually hears — try it FIRST, above everything.
+            # hears — try it FIRST, but ONLY if it's still a present
+            # capture device (a USB port swap changes card numbers, so
+            # a stale pin must never be trusted).
             fc = self._forced_card
-            if fc:
+            if fc and any(c[0] == fc[0] and c[1] == fc[1]
+                          for c in cap_cards):
                 routes.append(
                     ("arecord FORCED card %d,%d" % (fc[0], fc[1]),
                      (lambda c=fc[0], d=fc[1]: open_arecord(c, d)),
                      False))
-            for card_num, dev_num, desc in self._alsa_capture_cards():
+            else:
+                self._forced_card = None
+            for card_num, dev_num, desc in cap_cards:
                 short = desc.split("[")[0].strip() or desc[:20]
                 tag = "card %d,%d %s" % (card_num, dev_num, short)
                 routes.append(
@@ -1806,7 +1819,11 @@ class DoseVoice:
                 sig = self._audio_sig()
                 if (sig is not None and dev_sig is not None
                         and sig != dev_sig):
+                    # devices changed (plug/unplug OR a USB port swap
+                    # that reassigns card numbers) — drop any pinned
+                    # card and re-find the mic wherever it now lives
                     self._out_cache = None
+                    self._forced_card = None
                     self._force_reopen = True
                 if sig is not None:
                     dev_sig = sig
