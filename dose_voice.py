@@ -2495,6 +2495,56 @@ class DoseVoice:
             self._piper_voice = PiperVoice.load(self._piper_path)
         return self._piper_voice
 
+    # ── Upgraded voice engine (moonshine-voice TTS, MIT, on-device).
+    #    kokoro_af_heart is the most human, calm female voice; it is
+    #    slower than real time on a Pi 4, which is fine because every
+    #    fixed reply is pre-rendered into the cache. Set DOSE_VOICE to
+    #    piper_en_US-hfc_female-medium for live-speed synthesis, or to
+    #    "" to force the built-in Piper voice. All models are free.
+    def _ms_tts(self):
+        if getattr(self, "_mstts", "unset") != "unset":
+            return self._mstts
+        self._mstts = None
+        name = os.environ.get("DOSE_VOICE", "kokoro_af_heart").strip()
+        if not name:
+            return None
+        try:
+            from moonshine_voice import TextToSpeech
+            tts = TextToSpeech().language("en_us").voice(name)
+            tts.load()
+            self._mstts = tts
+            self._mstts_name = name
+        except Exception:
+            self._mstts = None
+        return self._mstts
+
+    def _synth_moonshine(self, text, wav):
+        """Render with the upgraded voice into an open wave file.
+        Returns True on success."""
+        tts = self._ms_tts()
+        if tts is None:
+            return False
+        try:
+            import array
+            speed = float(os.environ.get("VOICE_SPEED", "1.0"))
+            try:
+                samples, sr = tts.synthesize(text, speed=speed)
+            except TypeError:
+                samples, sr = tts.synthesize(text)
+            pcm = array.array("h")
+            for f in samples:
+                v = int(max(-1.0, min(1.0, float(f))) * 32767)
+                pcm.append(v)
+            if not len(pcm):
+                return False
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(int(sr))
+            wav.writeframes(pcm.tobytes())
+            return True
+        except Exception:
+            return False
+
     def _synth(self, voice, text, wav):
         """Synthesize with an EXTREMELY COMFORTING delivery — a soft
         female guardian: calm and unhurried, smooth and even, gentle
@@ -2503,6 +2553,9 @@ class DoseVoice:
         character, not a copy of any specific game/film character or
         its voice actor. Falls back to the plain call on any Piper API
         difference."""
+        # Upgraded voice first (Kokoro/Piper via moonshine-voice)
+        if self._synth_moonshine(text, wav):
+            return
         # Newer piper-tts: SynthesisConfig(length_scale, noise_scale,...)
         try:
             from piper import SynthesisConfig
@@ -2601,7 +2654,8 @@ class DoseVoice:
         """Cache key includes the voice file and speed, so changing
         either regenerates the audio instead of playing a stale clip."""
         import hashlib
-        key = "%s|%s" % (os.path.basename(self._piper_path or ""), text)
+        key = "%s|%s|%s" % (os.environ.get("DOSE_VOICE", "kokoro_af_heart"),
+                            os.path.basename(self._piper_path or ""), text)
         h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
         d = os.path.join(VOICE_DIR, "cache")
         os.makedirs(d, exist_ok=True)

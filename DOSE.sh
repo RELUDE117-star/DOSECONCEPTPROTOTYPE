@@ -171,6 +171,24 @@ if [ ! -f "$VOICE_DIR/.bt_ready3" ]; then
     python3 -m pip install --break-system-packages --no-deps openwakeword==0.6.0 2>/dev/null \
         || python3 -m pip install --no-deps openwakeword==0.6.0 2>/dev/null || true
     python3 -m pip install --break-system-packages scipy scikit-learn tqdm 2>/dev/null || true
+    # Pre-download the free on-device models so first run is instant and
+    # fully offline afterwards: Moonshine STT + the Kokoro/Piper voice.
+    python3 - <<'PYEOF' 2>/dev/null || true
+try:
+    import moonshine_voice as mv
+    mv.get_model_for_language("en", mv.ModelArch.TINY_STREAMING)
+    print("  Moonshine speech model ready")
+except Exception as e:
+    print("  (Moonshine model will download on first run)")
+try:
+    import os
+    from moonshine_voice import TextToSpeech
+    TextToSpeech().language("en_us").voice(
+        os.environ.get("DOSE_VOICE", "kokoro_af_heart")).load()
+    print("  Voice model ready")
+except Exception:
+    print("  (voice model will download on first run)")
+PYEOF
     python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
         || python3 -m pip install useful-moonshine-onnx 2>/dev/null || true
     touch "$VOICE_DIR/.bt_ready3"
