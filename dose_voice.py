@@ -433,16 +433,19 @@ class DoseVoice:
     @staticmethod
     def _looks_like_mic(desc):
         """Does this card look like an actual MICROPHONE (as opposed
-        to a speaker's capture endpoint)? The SunFounder mini mic is a
-        C-Media 'USB PnP Sound Device'. Prefer these so we point at
-        the mic, never the speaker's input side."""
+        to a speaker's capture endpoint)? Known USB mic chips:
+        C-Media 'USB PnP Sound Device' (SunFounder), and the Texas
+        Instruments / Burr-Brown PCM2902 'USB Audio CODEC' used by
+        many cheap USB mics. Prefer these so we point at the mic,
+        never the speaker's input side."""
         d = (desc or "").lower()
         if DoseVoice._looks_like_speaker(desc):
             return False
-        return any(k in d for k in ("c-media", "cmedia", "cm108",
-                                    "cm106", "pnp", "sound device",
-                                    "microphone", " mic", "webcam",
-                                    "sunfounder"))
+        return any(k in d for k in (
+            "c-media", "cmedia", "cm108", "cm106", "pnp",
+            "sound device", "microphone", " mic", "webcam",
+            "sunfounder", "pcm2902", "texas instrument",
+            "burr-brown", "burr brown", "audio codec", "codec"))
 
     @staticmethod
     def _alsa_capture_cards():
@@ -485,14 +488,17 @@ class DoseVoice:
         # generic USB capture card, then a speaker's capture endpoint
         # (Jieli/UACDemo) LAST, then anything non-USB. This is what
         # makes us point at the MIC, not the speaker.
+        # A speaker's capture endpoint (Jieli/UACDemo) is ALWAYS last;
+        # any other capture card is a mic candidate. So even an
+        # unknown USB mic beats the speaker's silent input side.
         def rank(c):
             desc = c[1]
-            if DoseVoice._looks_like_mic(desc):
-                return 0
             if DoseVoice._looks_like_speaker(desc):
-                return 3
+                return 3          # speaker input endpoint — last
+            if DoseVoice._looks_like_mic(desc):
+                return 0          # known mic chip — first
             if DoseVoice._is_usb_name(desc):
-                return 1
+                return 1          # some other USB capture card
             return 2
         capture.sort(key=lambda c: (rank(c), c[0]))
         return capture
