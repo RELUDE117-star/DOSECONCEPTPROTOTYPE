@@ -220,6 +220,8 @@ class DoseVoice:
         self._level_probe = None
         self._force_reopen = False
         self._ptt_requested = False   # push-to-talk (hold Dose logo)
+        self._pause_capture = False   # full self-test holds the devices
+        self._forced_card = None      # (card, device) the self-test found
         self._probe()
         self._probe_moonshine()
 
@@ -924,6 +926,111 @@ class DoseVoice:
         self._ptt_requested = True
         return True
 
+    def _arecord_probe(self, card, device, seconds=2.5):
+        """Record DIRECTLY from one ALSA capture device with arecord
+        and return (rms, note). rms>0 means the hardware delivered
+        real audio; 0 means silence; -1 means arecord errored (note
+        holds the reason). Tries the device's native rates."""
+        for rate in (48000, 44100, 16000):
+            fd, path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            try:
+                r = subprocess.run(
+                    ["arecord", "-D", "plughw:%d,%d" % (card, device),
+                     "-f", "S16_LE", "-r", str(rate), "-c", "1",
+                     "-d", str(int(seconds)), path],
+                    capture_output=True, text=True,
+                    timeout=seconds + 6, env=self._audio_env())
+                if r.returncode != 0:
+                    note = (r.stderr or "").strip().splitlines()
+                    note = note[-1][:90] if note else "arecord failed"
+                    continue
+                import audioop
+                with wave.open(path) as w:
+                    data = w.readframes(w.getnframes())
+                rms = audioop.rms(data, 2) if data else 0
+                return (rms, "ok @%dHz" % rate)
+            except Exception as e:
+                note = str(e)[:90]
+            finally:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+        return (-1, note if 'note' in dir() else "no capture")
+
+    def full_mic_test(self, seconds=2.5):
+        """THE definitive test: pause our capture, then directly
+        arecord from EVERY capture device the system exposes, measure
+        the real signal on each, and pick the one that actually hears.
+        Writes a full report and, if a device produced sound, forces
+        it as the mic. Returns (best_summary, report_lines)."""
+        report = ["DOSE full mic test", time.ctime(), ""]
+        # 1) full device inventory
+        for cmd in (["lsusb"], ["arecord", "-l"]):
+            try:
+                out = subprocess.run(cmd, capture_output=True,
+                                     text=True, timeout=8,
+                                     env=self._audio_env())
+                report.append("$ " + " ".join(cmd))
+                report.append((out.stdout or out.stderr).strip()[:600])
+                report.append("")
+            except FileNotFoundError:
+                report.append("$ %s -> not installed" % " ".join(cmd))
+            except Exception as e:
+                report.append("$ %s -> %r" % (" ".join(cmd), e))
+        # 2) pause the live capture so devices are free to test
+        self._pause_capture = True
+        time.sleep(0.6)
+        best = None      # (rms, card, device, desc)
+        try:
+            cards = self._alsa_capture_cards()
+            report.append("Testing each capture device (speak now!):")
+            for card, device, desc in cards:
+                self._max_capture(card)
+                rms, note = self._arecord_probe(card, device, seconds)
+                kind = ("MIC" if self._looks_like_mic(desc) else
+                        "speaker-in" if self._looks_like_speaker(desc)
+                        else "capture")
+                report.append(
+                    "  card %d,%d [%s] %s -> level %s (%s)"
+                    % (card, device, kind, desc.split("[")[0][:34],
+                       rms, note))
+                if rms is not None and rms >= 0:
+                    if best is None or rms > best[0]:
+                        best = (rms, card, device, desc)
+        finally:
+            self._pause_capture = False
+        # 3) act on the result
+        if best and best[0] > 8:
+            self._forced_card = (best[1], best[2])
+            self.request_reopen()
+            summary = ("Found the working mic: card %d,%d (level %d). "
+                       "Using it now — tap MIC LEVEL and speak."
+                       % (best[1], best[2], best[0]))
+        elif best is not None:
+            # a device opened but was silent
+            self._forced_card = (best[1], best[2])
+            self.request_reopen()
+            summary = ("Every mic opened but stayed silent (best card "
+                       "%d,%d level %d). The mic isn't sending audio — "
+                       "check it's a MIC not line-in, reseat it, or try "
+                       "another USB port." % (best[1], best[2], best[0]))
+        else:
+            summary = ("No capture device could even be opened — see "
+                       "the report; arecord may be missing or the mic "
+                       "isn't detected.")
+        report.insert(3, "VERDICT: " + summary)
+        report.insert(4, "")
+        try:
+            os.makedirs(VOICE_DIR, exist_ok=True)
+            with open(os.path.join(VOICE_DIR, "full_mic_test.txt"),
+                      "w") as f:
+                f.write("\n".join(report))
+        except Exception:
+            pass
+        return summary, report
+
     def _mic_pref(self):
         # Selection is fully automatic now — whatever is physically
         # plugged in wins; stale saved choices are ignored.
@@ -937,7 +1044,8 @@ class DoseVoice:
             fd, path = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
             with wave.open(path, "wb") as w:
-                voice.synthesize_wav(
+                self._synth(
+                    voice,
                     "Speaker test. If you can hear me, Pilot, this "
                     "speaker is working.", w)
             method = self._play_wav(path)
@@ -1168,7 +1276,7 @@ class DoseVoice:
                 path = os.path.join(cache, "ack_%d.wav" % i)
                 if not os.path.exists(path):
                     with wave.open(path, "wb") as w:
-                        voice.synthesize_wav(line, w)
+                        self._synth(voice, line, w)
                 self._ack_files.append((line, path))
         except Exception:
             self._ack_files = []
@@ -1468,6 +1576,14 @@ class DoseVoice:
             # endpoint — it is deprioritized so a real microphone on
             # another card always wins the tie.
             routes = []
+            # The full self-test may have found the exact card that
+            # actually hears — try it FIRST, above everything.
+            fc = self._forced_card
+            if fc:
+                routes.append(
+                    ("arecord FORCED card %d,%d" % (fc[0], fc[1]),
+                     (lambda c=fc[0], d=fc[1]: open_arecord(c, d)),
+                     False))
             for card_num, dev_num, desc in self._alsa_capture_cards():
                 short = desc.split("[")[0].strip() or desc[:20]
                 tag = "card %d,%d %s" % (card_num, dev_num, short)
@@ -1551,6 +1667,21 @@ class DoseVoice:
         last_reselect = time.time()
         dev_sig = None
         while not self._stop.is_set():
+            # Pause: the full self-test needs exclusive access to every
+            # capture device, so it closes our stream and idles here
+            # until the test is done, then reopens.
+            if self._pause_capture:
+                if stream is not None:
+                    close_capture(stream)
+                    stream = None
+                time.sleep(0.2)
+                continue
+            if stream is None:
+                stream = open_capture()
+                last_audio = time.time()
+                if stream is None:
+                    time.sleep(1)
+                    continue
             # Hot-plug watch: a USB/Bluetooth mic or speaker appearing
             # (or vanishing) changes the device fingerprint — redo
             # selection immediately so new hardware just works.
@@ -1741,6 +1872,31 @@ class DoseVoice:
             self._piper_voice = PiperVoice.load(self._piper_path)
         return self._piper_voice
 
+    def _synth(self, voice, text, wav):
+        """Synthesize with a calm, measured, protective delivery — a
+        steady guardian-robot cadence (slightly slowed, even tone),
+        kept soft. This is an ORIGINAL voice character, not a copy of
+        any specific game/film character or its voice actor. Falls
+        back to the plain call on any Piper API difference."""
+        # Newer piper-tts: SynthesisConfig(length_scale, noise_scale,...)
+        try:
+            from piper import SynthesisConfig
+            cfg = SynthesisConfig(length_scale=1.12,   # a touch slower
+                                  noise_scale=0.60,
+                                  noise_w_scale=0.70)
+            voice.synthesize_wav(text, wav, syn_config=cfg)
+            return
+        except Exception:
+            pass
+        # Older piper-tts: keyword args
+        try:
+            voice.synthesize_wav(text, wav, length_scale=1.12,
+                                 noise_scale=0.60, noise_w=0.70)
+            return
+        except Exception:
+            pass
+        voice.synthesize_wav(text, wav)   # plain fallback
+
     @staticmethod
     def _audio_env():
         """Environment that reaches the user's PipeWire session —
@@ -1826,7 +1982,7 @@ class DoseVoice:
             fd, path = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
             with wave.open(path, "wb") as w:
-                voice.synthesize_wav(text, w)
+                self._synth(voice, text, w)
             self._play_wav(path)
             os.unlink(path)
         except Exception:

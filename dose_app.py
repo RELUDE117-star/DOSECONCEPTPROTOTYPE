@@ -916,12 +916,6 @@ class DoseApp:
             ly = y + 78
             c.create_text(lx, ly, text=label, font=self.font_rail,
                           fill=t["fg"], anchor="n")
-            # tiny hint that the logo doubles as push-to-talk
-            if mode_key == "home" and self.voice \
-                    and getattr(self.voice, "available", False):
-                c.create_text(lx, ly + 14, text="hold: talk",
-                              font=self.font_tiny,
-                              fill=t["muted"], anchor="n")
 
             self._click_zones.append((bx, y, bx + 72, y + 90,
                                       lambda mk=mode_key: self._nav(mk)))
@@ -4314,8 +4308,16 @@ class DoseApp:
                           font=self.font_tiny, fill=t["fg"], anchor="nw")
             y += 16
 
-        # buttons: RE-SCAN mic, RESET peak, DONE
-        for label, cb, x0 in (("RE-SCAN", self._meter_rescan, 56),
+        # status line from the last full self-test
+        ft = getattr(self, "_full_test_status", None)
+        if ft:
+            c.create_text(56, 360,
+                          text=self._fit_text(ft, self.font_small, 556),
+                          font=self.font_small_bold, fill=DOSE_BLUE_LT,
+                          anchor="nw", width=556)
+
+        # buttons: FULL TEST (records every device), RESET, DONE
+        for label, cb, x0 in (("FULL TEST", self._full_mic_test, 56),
                               ("RESET", self._meter_reset, 300),
                               ("DONE", self._close_mic_meter, 500)):
             b_img = _pil_rounded_rect(120, 46, 14,
@@ -4340,6 +4342,39 @@ class DoseApp:
         if self.voice:
             self.voice.request_reopen()
         self._draw_frame()
+
+    def _full_mic_test(self):
+        """Records directly from EVERY capture device, finds the one
+        that actually hears, and locks onto it. Runs in a worker so the
+        UI stays live; shows a countdown prompt to speak."""
+        if not self.voice or getattr(self, "_full_test_busy", False):
+            self._full_test_status = ("Voice engine not ready yet — "
+                                      "wait for setup to finish.")
+            self._draw_frame()
+            return
+        self._full_test_busy = True
+        self._meter_peak = 0
+        self._full_test_status = ("Testing every device — SPEAK NOW, "
+                                  "keep talking for ~10 seconds…")
+        self._draw_frame()
+
+        def worker():
+            summary = "test failed"
+            try:
+                summary, _ = self.voice.full_mic_test(2.5)
+            except Exception as e:
+                summary = "test error: %s" % e
+
+            def done():
+                self._full_test_busy = False
+                self._full_test_status = summary
+                if self.mode == "micmeter":
+                    self._draw_frame()
+            try:
+                self.root.after(0, done)
+            except Exception:
+                pass
+        threading.Thread(target=worker, daemon=True).start()
 
     def _open_mic_report(self):
         self._prev_mode = self.mode
