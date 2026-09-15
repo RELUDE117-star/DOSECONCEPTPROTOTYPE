@@ -31,6 +31,9 @@ probe "picamera2"          || APT_PKGS="$APT_PKGS python3-picamera2"
 probe "sounddevice"        || { APT_PKGS="$APT_PKGS libportaudio2 alsa-utils"; PIP_PKGS="$PIP_PKGS sounddevice"; }
 probe "vosk"               || { APT_PKGS="$APT_PKGS python3-srt"; PIP_PKGS="$PIP_PKGS vosk"; }
 probe "piper"              || PIP_PKGS="$PIP_PKGS piper-tts"
+probe "rapidfuzz"          || PIP_PKGS="$PIP_PKGS rapidfuzz"
+probe "jellyfish"          || PIP_PKGS="$PIP_PKGS jellyfish"
+probe "moonshine_voice"    || PIP_PKGS="$PIP_PKGS moonshine-voice"
 # Python 3.13 removed stdlib audioop; audioop-lts restores it
 python3 -c "import audioop" 2>/dev/null || PIP_PKGS="$PIP_PKGS audioop-lts"
 command -v pip3 >/dev/null 2>&1 || APT_PKGS="$APT_PKGS python3-pip"

@@ -366,6 +366,72 @@ class DoseVoice:
         self.available = True
         self.reason = "ready"
 
+    # ── Moonshine v2 (moonshine-voice): on-device recognizer with
+    #    KEY-TERM BIASING. Passing this device's medication names as
+    #    key terms is the measured fix for drug-name mishears
+    #    ("liz and opera" -> Lisinopril). Loaded lazily; if the model
+    #    can't be fetched we silently fall back to Whisper/Vosk.
+    _MS_ARCHS = {"tiny": "TINY_STREAMING", "base": "BASE_STREAMING",
+                 "small": "SMALL_STREAMING", "medium": "MEDIUM_STREAMING"}
+
+    def _moonshine_v2(self):
+        if getattr(self, "_ms_v2", "unset") != "unset":
+            return self._ms_v2
+        self._ms_v2 = None
+        try:
+            import moonshine_voice as mv
+            arch_name = self._MS_ARCHS.get(
+                os.environ.get("DOSE_STT_ARCH", "tiny"), "TINY_STREAMING")
+            path, arch = mv.get_model_for_language(
+                "en", getattr(mv.ModelArch, arch_name))
+            boost = float(os.environ.get("KEYTERM_BOOST", "5"))
+            boost = max(1.0, min(boost, 6.0))   # 7+ measured to hallucinate
+            tr = mv.Transcriber(
+                model_path=path, model_arch=arch,
+                update_interval=float(
+                    os.environ.get("STT_UPDATE_INTERVAL", "0.25")),
+                options={"keyterm_boost": boost,
+                         "vad_window_duration": float(
+                             os.environ.get("STT_VAD_WINDOW", "0.15"))})
+            self._ms_v2 = tr
+        except Exception:
+            self._ms_v2 = None
+        return self._ms_v2
+
+    def _moonshine_transcribe(self, audio_bytes):
+        """Transcribe one captured utterance with this device's drug
+        names as key terms. Returns cleaned text, or '' on any problem."""
+        tr = self._moonshine_v2()
+        if tr is None or not audio_bytes:
+            return ""
+        try:
+            import array
+            names = self._med_names()
+            try:
+                tr.set_keyterms([n.replace(",", " ") for n in names]
+                                or None)
+            except Exception:
+                pass
+            a = array.array("h")
+            a.frombytes(bytes(audio_bytes)[:len(audio_bytes) // 2 * 2])
+            audio = [x / 32768.0 for x in a]
+            res = tr.transcribe_without_streaming(audio, SAMPLE_RATE)
+            lines = getattr(res, "lines", None)
+            if lines is None:
+                lines = res if isinstance(res, (list, tuple)) else []
+            parts = []
+            for ln in lines:
+                txt = getattr(ln, "text", None)
+                if txt is None:
+                    words = getattr(ln, "words", None) or []
+                    txt = " ".join(getattr(w, "text", str(w))
+                                   for w in words)
+                if txt:
+                    parts.append(txt)
+            return self._clean_text(" ".join(parts))
+        except Exception:
+            return ""
+
     def _probe_moonshine(self):
         """Stronger offline command recognizers, best first:
         1. faster-whisper (OpenAI Whisper via CTranslate2) — the most
@@ -412,7 +478,12 @@ class DoseVoice:
         to the Vosk transcript on any problem."""
         if not audio_bytes:
             return vosk_text
-        # 1) faster-whisper (most accurate)
+        # 0) Moonshine v2 with THIS device's drug names as key terms —
+        #    the measured fix for medication-name mishears.
+        ms = self._moonshine_transcribe(audio_bytes)
+        if ms and not (_nlu_mod and _nlu_mod.looks_hallucinated(ms)):
+            return ms
+        # 1) faster-whisper (most accurate general model)
         if self._whisper is not None:
             path = None
             try:
