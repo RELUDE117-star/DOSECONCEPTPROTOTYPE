@@ -724,6 +724,10 @@ class DoseApp:
         # ── Voice assistant ("Hey Dose") ───────────────────────────────
         if self.settings.get("voice_enabled", True):
             self._start_voice()
+            # install any NEW voice packages an update introduced,
+            # and restore any companion module an old updater missed
+            self.root.after(1200, self.heal_missing_modules)
+            self.root.after(1500, self._ensure_python_deps)
         if self.has_touch:
             self._poll_touch()
 
@@ -860,6 +864,8 @@ class DoseApp:
             self._draw_mic_report(c)
         elif self.mode == "micmeter":
             self._draw_mic_meter(c)
+        elif self.mode == "sysinfo":
+            self._draw_sysinfo(c)
         elif self.mode == "btaudio":
             self._draw_bt_audio(c)
         elif self.mode == "dosealert":
@@ -885,7 +891,7 @@ class DoseApp:
             active = getattr(self, "_te_return", "storage")
         if active == "dosealert":
             active = getattr(self, "_alert_return", "home")
-        if active in ("micreport", "btaudio", "micmeter"):
+        if active in ("micreport", "btaudio", "micmeter", "sysinfo"):
             active = "settings"
         if active in ("hold", "spin", "confirmdisp", "dispensed",
                       "qtyconfirm", "addmed"):
@@ -1735,10 +1741,14 @@ class DoseApp:
                 if status:
                     ver += "  ·  " + status
                 c.create_text(px + 64, y + row_h // 2 + 16,
-                              text=self._fit_text(ver,
-                                                  self.font_small, 430),
+                              text=self._fit_text(
+                                  ver + "   ·  tap for details",
+                                  self.font_small, 430),
                               font=self.font_small, fill=t["muted"],
                               anchor="w")
+                # tap the row (left of the button) -> what's installed
+                self._click_zones.append(
+                    (px, y, bx - 8, y + row_h, self._open_sysinfo))
 
                 self._click_zones.append(
                     (bx, by, bx + bw, by + bh,
@@ -3732,6 +3742,281 @@ class DoseApp:
                 pass
         threading.Thread(target=worker, daemon=True).start()
 
+    # Python packages the upgraded voice needs. The UPDATE button only
+    # replaces .py files and restarts python directly (not DOSE.sh), so
+    # without this a new dependency would NEVER install on a device
+    # whose voice already works — the upgrade would silently do nothing.
+    VOICE_DEPS = (
+        ("rapidfuzz", "rapidfuzz"),          # phonetic drug matching
+        ("jellyfish", "jellyfish"),          # metaphone
+        ("audioop", "audioop-lts"),          # py3.13 removed audioop
+        ("moonshine_voice", "moonshine-voice"),   # STT + Kokoro voice
+        ("faster_whisper", "faster-whisper"),
+    )
+
+    def _open_sysinfo(self):
+        """What is actually installed and running on THIS device."""
+        self._prev_mode = self.mode
+        self.mode = "sysinfo"
+        self._draw_frame()
+        # refresh the "what's on GitHub" column in the background
+        if not getattr(self, "_sysinfo_busy", False):
+            self._sysinfo_busy = True
+
+            def work():
+                remote = {}
+                for f in ("dose_app.py",) + self.COMPANION_MODULES:
+                    try:
+                        remote[f] = hashlib.md5(
+                            self._fetch_repo_file(f)).hexdigest()[:7]
+                    except Exception:
+                        remote[f] = "?"
+
+                def done():
+                    self._sysinfo_remote = remote
+                    self._sysinfo_busy = False
+                    if self.mode == "sysinfo":
+                        self._draw_frame()
+                try:
+                    self.root.after(0, done)
+                except Exception:
+                    pass
+            threading.Thread(target=work, daemon=True).start()
+
+    def _close_sysinfo(self):
+        self.mode = "settings"
+        self._draw_frame()
+
+    def _draw_sysinfo(self, c):
+        t = self.theme
+        card = _pil_rounded_rect(620, 440, 22, t["card_bg"])
+        c.create_image(26, 20, image=self._get_tk_image("sys_card", card),
+                       anchor="nw")
+        c.create_text(56, 38, text="INSTALLED ON THIS DEVICE",
+                      font=self.font_label, fill=t["muted"], anchor="nw")
+        remote = getattr(self, "_sysinfo_remote", {})
+        y = 62
+
+        def line(txt, colour=None, dy=15, font=None):
+            nonlocal y
+            c.create_text(56, y,
+                          text=self._fit_text(txt, font or self.font_tiny,
+                                              556),
+                          font=font or self.font_tiny,
+                          fill=colour or t["fg"], anchor="nw")
+            y += dy
+
+        # ── program files: device build vs what GitHub is serving ──
+        line("PROGRAM FILES  (device  /  GitHub)", t["muted"])
+        here = os.path.dirname(os.path.abspath(__file__))
+        files = [("dose_app.py", getattr(self, "_build_id", "?"))]
+        for m, ok_, bid in self.module_report():
+            files.append((m, bid if ok_ else "MISSING"))
+        for name, local in files:
+            rem = remote.get(name, "…")
+            same = (local == rem)
+            mark = "same" if same else ("MISSING" if local == "MISSING"
+                                        else "differs")
+            colour = ("#2ECC71" if same else
+                      "#FF6B6B" if local == "MISSING" else "#F1C40F")
+            line("   %-15s %-9s %-9s %s" % (name, local, rem, mark),
+                 colour)
+
+        # ── voice models actually in use ──
+        y += 6
+        line("VOICE MODELS IN USE", t["muted"])
+        try:
+            rows = self.voice.model_status() if self.voice else []
+        except Exception:
+            rows = []
+        if not rows:
+            line("   (voice engine not started)", t["muted"])
+        for label, ok_, detail in rows:
+            colour = ("#2ECC71" if ok_ else
+                      "#F1C40F" if ok_ is None else "#FF6B6B")
+            line("   %-26s %s" % (label, detail or
+                                  ("ready" if ok_ else "not present")),
+                 colour)
+
+        # ── python libraries ──
+        y += 6
+        line("UPGRADE LIBRARIES", t["muted"])
+        try:
+            missing = dict(self.missing_voice_deps())
+        except Exception:
+            missing = {}
+        for mod, pkg in self.VOICE_DEPS:
+            present = mod not in missing
+            line("   %-22s %s" % (pkg, "installed" if present
+                                  else "MISSING — installing"),
+                 "#2ECC71" if present else "#F1C40F")
+        ds = getattr(self, "_deps_status", "")
+        if ds:
+            y += 4
+            line(ds, DOSE_BLUE_LT)
+
+        for label, x0, cb in (("CHECK NOW", 56, self._on_update_pressed),
+                              ("CLOSE", 466, self._close_sysinfo)):
+            b = _pil_rounded_rect(150, 44, 14,
+                                  DOSE_BLUE if label == "CLOSE"
+                                  else t["elevated_bg"])
+            c.create_image(x0, 400,
+                           image=self._get_tk_image("sys_%s" % label, b),
+                           anchor="nw")
+            c.create_text(x0 + 75, 422, text=label,
+                          font=self.font_small_bold,
+                          fill="#06101E" if label == "CLOSE" else t["fg"],
+                          anchor="center")
+            self._click_zones.append((x0, 400, x0 + 150, 444, cb))
+
+    def module_report(self):
+        """Ground truth about the companion modules ON THIS DEVICE:
+        [(name, present, build_id)]. Shown on screen so you never have
+        to guess whether an update actually delivered a new file."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        out = []
+        for mod in self.COMPANION_MODULES:
+            path = os.path.join(here, mod)
+            if os.path.exists(path):
+                try:
+                    with open(path, "rb") as f:
+                        bid = hashlib.md5(f.read()).hexdigest()[:7]
+                except Exception:
+                    bid = "?"
+                out.append((mod, True, bid))
+            else:
+                out.append((mod, False, "MISSING"))
+        return out
+
+    def heal_missing_modules(self):
+        """If a companion module isn't on the device (an older updater
+        never shipped it), fetch it now, then restart the voice engine
+        so it is actually used."""
+        if getattr(self, "_heal_busy", False):
+            return
+        gone = [m for m, ok_, _ in self.module_report() if not ok_]
+        if not gone:
+            return
+        self._heal_busy = True
+
+        def work():
+            here = os.path.dirname(os.path.abspath(__file__))
+            got = []
+            for mod in gone:
+                try:
+                    data = self._fetch_repo_file(mod)
+                    compile(data.decode("utf-8"), mod, "exec")
+                    tmp = os.path.join(here, mod + ".tmp")
+                    with open(tmp, "wb") as f:
+                        f.write(data)
+                    os.replace(tmp, os.path.join(here, mod))
+                    try:
+                        os.makedirs(APP_DIR, exist_ok=True)
+                        with open(os.path.join(APP_DIR, mod), "wb") as f:
+                            f.write(data)
+                    except Exception:
+                        pass
+                    got.append(mod)
+                except Exception:
+                    pass
+
+            def finish():
+                self._heal_busy = False
+                if got:
+                    self._deps_status = ("restored %s — restarting voice"
+                                         % ", ".join(got))
+                    try:
+                        if self.voice:
+                            self.voice.stop()
+                    except Exception:
+                        pass
+                    self.voice = None
+                    try:
+                        self._start_voice()
+                    except Exception:
+                        pass
+                self._draw_frame()
+            try:
+                self.root.after(0, finish)
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True,
+                         name="module-heal").start()
+
+    def missing_voice_deps(self):
+        out = []
+        for mod, pkg in self.VOICE_DEPS:
+            try:
+                __import__(mod)
+            except Exception:
+                out.append((mod, pkg))
+        return out
+
+    def _ensure_python_deps(self):
+        """Install any missing voice packages in the background, then
+        restart the voice engine so they take effect. Runs on every
+        launch; a no-op (and silent) once everything is present."""
+        if getattr(self, "_deps_busy", False):
+            return
+        missing = self.missing_voice_deps()
+        if not missing:
+            self._deps_status = ""
+            return
+        if os.environ.get("DOSE_DISABLE_SELF_INSTALL"):
+            return
+        self._deps_busy = True
+        self._deps_status = ("installing voice upgrades: %s"
+                             % ", ".join(p for _, p in missing))
+        self._draw_frame()
+
+        def worker():
+            done, failed = [], []
+            for mod, pkg in missing:
+                okpkg = False
+                for args in (["--break-system-packages", pkg], [pkg]):
+                    try:
+                        r = subprocess.run(
+                            [sys.executable, "-m", "pip", "install",
+                             "--no-input"] + args,
+                            capture_output=True, text=True, timeout=900)
+                        if r.returncode == 0:
+                            okpkg = True
+                            break
+                    except Exception:
+                        pass
+                (done if okpkg else failed).append(pkg)
+            try:
+                __import__("importlib").invalidate_caches()
+            except Exception:
+                pass
+
+            def finish():
+                self._deps_busy = False
+                if failed:
+                    self._deps_status = ("could not install: %s"
+                                         % ", ".join(failed[:3]))
+                else:
+                    self._deps_status = ("voice upgrades installed — "
+                                         "fetching models…")
+                # restart the engine so the new libraries are used
+                try:
+                    if self.voice:
+                        self.voice.stop()
+                except Exception:
+                    pass
+                self.voice = None
+                try:
+                    self._start_voice()
+                except Exception:
+                    pass
+                self._draw_frame()
+            try:
+                self.root.after(0, finish)
+            except Exception:
+                pass
+        threading.Thread(target=worker, daemon=True,
+                         name="voice-deps").start()
+
     def _start_voice(self):
         self._ensure_audio_packages()
         # Bluetooth audio is retired: USB mic + USB speaker only.
@@ -4179,6 +4464,37 @@ class DoseApp:
             rows = v.model_status() if v else []
         except Exception:
             rows = []
+        try:
+            mods = self.module_report()
+            mtxt = "  ·  ".join(
+                "%s %s" % (m.replace(".py", ""),
+                           b if ok_ else "MISSING")
+                for m, ok_, b in mods)
+            allmods = all(ok_ for _, ok_, _ in mods)
+            c.create_text(56, y,
+                          text=self._fit_text("FILES: " + mtxt,
+                                              self.font_tiny, 556),
+                          font=self.font_tiny,
+                          fill="#2ECC71" if allmods else "#FF6B6B",
+                          anchor="nw")
+            y += 16
+        except Exception:
+            pass
+        miss = []
+        try:
+            miss = self.missing_voice_deps()
+        except Exception:
+            miss = []
+        dstat = getattr(self, "_deps_status", "")
+        if miss or dstat:
+            msg = dstat or ("upgrade libraries missing: %s"
+                            % ", ".join(p for _, p in miss))
+            c.create_text(56, y, text=self._fit_text(msg,
+                                                     self.font_tiny, 556),
+                          font=self.font_tiny,
+                          fill="#F1C40F" if miss else "#2ECC71",
+                          anchor="nw")
+            y += 16
         if rows:
             parts = []
             for label, ok_, detail in rows[:4]:
