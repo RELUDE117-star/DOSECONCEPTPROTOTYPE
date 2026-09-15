@@ -3567,7 +3567,9 @@ class DoseApp:
         on the Voice & Bluetooth screen and in the mic report.
         Retries whenever the audio screen is opened."""
         import shutil as _sh
-        if _sh.which("pactl") and _sh.which("parec"):
+        # arecord (alsa-utils) is the PRIMARY capture path now, so it
+        # is the one that must be present; pactl/parec are secondary.
+        if _sh.which("arecord") and _sh.which("pactl"):
             self._audio_pkg_status = ""
             return
         on_pi = (os.path.exists("/boot/config.txt")
@@ -3594,9 +3596,9 @@ class DoseApp:
                 # install ONE BY ONE: apt is all-or-nothing per
                 # command, so a single unresolvable package must
                 # never sink the critical ones
-                pkgs = ["pulseaudio-utils", "pipewire-pulse",
-                        "pipewire", "pipewire-alsa", "wireplumber",
-                        "alsa-utils", "libspa-0.2-bluez5"]
+                pkgs = ["alsa-utils", "pulseaudio-utils",
+                        "pipewire-pulse", "pipewire", "pipewire-alsa",
+                        "wireplumber", "libspa-0.2-bluez5"]
                 failed = []
                 sudo_blocked = False
                 for pkg in pkgs:
@@ -3621,7 +3623,7 @@ class DoseApp:
                 if sudo_blocked:
                     status = ("can't install: sudo needs a password "
                               "— run DOSE.sh once to finish")
-                elif _sh.which("pactl"):
+                elif _sh.which("arecord"):
                     status = ("audio tools installed ✓"
                               + (" (optional missing: %s)"
                                  % ", ".join(failed) if failed

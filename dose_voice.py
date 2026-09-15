@@ -34,7 +34,7 @@ LEARN_PATH = os.path.join(VOICE_DIR, "learning.json")
 LEARN_FUZZ = 0.87          # similarity for a learned phrase to fire
 MAX_LEARNED = 300
 SAMPLE_RATE = 16000
-BLOCK_SIZE = 4000          # 0.25 s of audio per block
+BLOCK_SIZE = 2000          # 0.125 s per block — snappy wake response
 COMMAND_TIMEOUT = 9.0      # seconds of silence before giving up
 FLOW_TIMEOUT = 20.0        # per-question timeout in multi-turn flows
 
@@ -399,7 +399,48 @@ class DoseVoice:
         USB in the name PortAudio shows."""
         n = (name or "").lower()
         return any(k in n for k in ("usb", "pnp", "c-media", "cmedia",
-                                    "cm108", "cm106"))
+                                    "cm108", "cm106", "audio device"))
+
+    @staticmethod
+    def _alsa_capture_cards():
+        """ALSA card numbers that can CAPTURE, USB mic first. Read
+        straight from the kernel (/proc/asound) — no tools, no
+        PipeWire. The SunFounder / C-Media 'USB PnP Sound Device'
+        lands here as e.g. card 1, so arecord -D plughw:1,0 records
+        from it directly, bypassing PipeWire entirely. That is the
+        vendor's own documented method and the most reliable path
+        on a Raspberry Pi."""
+        cards = {}
+        try:
+            with open("/proc/asound/cards") as f:
+                text = f.read()
+        except Exception:
+            return []
+        cur = None
+        for line in text.splitlines():
+            m = re.match(r"\s*(\d+)\s+\[", line)
+            if m:
+                cur = int(m.group(1))
+                cards[cur] = line
+            elif cur is not None and cards.get(cur):
+                cards[cur] += " " + line.strip()
+        # keep only cards that actually expose a capture device
+        capture = []
+        for num, desc in cards.items():
+            pcm = "/proc/asound/card%d" % num
+            has_cap = False
+            try:
+                for entry in os.listdir(pcm):
+                    if entry.startswith("pcm") and entry.endswith("c"):
+                        has_cap = True
+                        break
+            except Exception:
+                has_cap = True   # can't tell — assume yes, arecord fails safe
+            if has_cap:
+                capture.append((num, desc))
+        capture.sort(key=lambda c: (
+            0 if DoseVoice._is_usb_name(c[1]) else 1, c[0]))
+        return capture
 
     def _pa_refresh(self):
         """Re-scan PortAudio's device list. PortAudio snapshots the
@@ -807,8 +848,17 @@ class DoseVoice:
         env = self._audio_env()
         lines.append("uid=%s XDG_RUNTIME_DIR=%s"
                      % (os.getuid(), env.get("XDG_RUNTIME_DIR")))
+        # ALSA capture cards straight from the kernel — the arecord
+        # path depends only on these, not on PipeWire
+        for num, desc in self._alsa_capture_cards():
+            lines.append("alsa capture card %d: %s%s"
+                         % (num, desc[:120],
+                            "  <-- USB" if self._is_usb_name(desc)
+                            else ""))
         for cmd in (["systemctl", "--user", "is-active", "pipewire",
                      "pipewire-pulse", "wireplumber"],
+                    ["arecord", "-l"],
+                    ["arecord", "--version"],
                     ["pactl", "info"],
                     ["pactl", "list", "cards", "short"],
                     ["pactl", "list", "sources", "short"],
@@ -1039,8 +1089,10 @@ class DoseVoice:
                     continue
             return None
 
-        def open_pipe_cmd(cmd, name):
-            """One PipeWire/Pulse recorder subprocess as a capture."""
+        def open_pipe_cmd(cmd, name, native_rate=SAMPLE_RATE):
+            """One recorder subprocess (arecord / pw-record / parec)
+            as a capture. native_rate tells ingest() what to resample
+            from when the recorder can't give us 16 kHz directly."""
             try:
                 p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL,
@@ -1050,7 +1102,7 @@ class DoseVoice:
             time.sleep(0.3)
             if p.poll() is not None:
                 return None
-            self._native_rate = SAMPLE_RATE
+            self._native_rate = native_rate
             self._ratecv_state = None
 
             def reader(proc=p):
@@ -1066,6 +1118,18 @@ class DoseVoice:
             threading.Thread(target=reader, daemon=True).start()
             self.mic_name = name
             return ("pipe", p)
+
+        def open_arecord(card):
+            """Record straight off an ALSA card with arecord, through
+            the 'plug' layer so rate/format are auto-converted. This
+            is the SunFounder / C-Media USB mic's documented method
+            and it does NOT go through PipeWire at all — the whole
+            layer that's been failing. Ships in alsa-utils."""
+            dev = "plughw:%d,0" % card
+            cmd = ["arecord", "-D", dev, "-f", "S16_LE",
+                   "-r", "16000", "-c", "1", "-t", "raw", "-q", "-"]
+            return open_pipe_cmd(cmd, "USB mic (arecord %s)" % dev,
+                                 native_rate=SAMPLE_RATE)
 
         def capture_is_live(seconds=1.4):
             """Drain the queue for a moment and measure real signal."""
@@ -1192,14 +1256,26 @@ class DoseVoice:
             self._unmute_alsa_inputs()
             self._pa_refresh()   # see USB devices plugged in after launch
             target = self._pick_input_target()   # unmute + boost USB
-            routes = [
+            # ARECORD FIRST: straight to the USB mic's ALSA card,
+            # zero PipeWire in the path — lowest latency, and the
+            # method the mic's own vendor documents. Every capture
+            # card the kernel sees, USB ahead of the built-ins.
+            routes = []
+            for card_num, desc in self._alsa_capture_cards():
+                tag = "card %d %s" % (
+                    card_num,
+                    "(USB)" if self._is_usb_name(desc) else "")
+                routes.append(
+                    ("arecord %s" % tag.strip(),
+                     lambda c=card_num: open_arecord(c)))
+            routes += [
                 ("system default (pw-record)", lambda: open_pipe_cmd(
                     ["pw-record", "--rate", "16000", "--channels",
                      "1", "--format", "s16", "-"],
                     "system default (pw-record)")),
                 ("system default (parec)", lambda: open_pipe_cmd(
                     ["parec", "--rate=16000", "--format=s16le",
-                     "--channels=1", "--latency-msec=50"],
+                     "--channels=1", "--latency-msec=20"],
                     "system default (parec)")),
                 ("USB hardware direct", open_usb_portaudio),
                 ("portaudio default", open_portaudio),

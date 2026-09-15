@@ -32,6 +32,7 @@ probe "sounddevice"        || { APT_PKGS="$APT_PKGS libportaudio2 alsa-utils"; P
 probe "vosk"               || { APT_PKGS="$APT_PKGS python3-srt"; PIP_PKGS="$PIP_PKGS vosk"; }
 probe "piper"              || PIP_PKGS="$PIP_PKGS piper-tts"
 command -v pip3 >/dev/null 2>&1 || APT_PKGS="$APT_PKGS python3-pip"
+command -v arecord >/dev/null 2>&1 || APT_PKGS="$APT_PKGS alsa-utils"
 command -v pactl >/dev/null 2>&1 || APT_PKGS="$APT_PKGS pulseaudio-utils pipewire-pulse"
 command -v pw-record >/dev/null 2>&1 || APT_PKGS="$APT_PKGS pipewire"
 
