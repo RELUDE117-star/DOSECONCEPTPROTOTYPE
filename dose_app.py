@@ -2522,12 +2522,20 @@ class DoseApp:
 
     def _voice_push_to_talk(self):
         """Start the voice assistant listening on demand (hold-logo)."""
-        if self.voice and self.voice.available:
-            started = self.voice.request_listen()
-            if started:
+        if self.voice and getattr(self.voice, "available", False):
+            if self.voice.request_listen():
                 return
-        # voice not ready — jump to the audio screen so the user can
-        # see why (models installing, mic issue, etc.)
+        # No live engine (first boot, or libraries still installing):
+        # bring one up right now rather than silently doing nothing.
+        try:
+            if self.voice is None:
+                self._start_voice()
+            if self.voice and getattr(self.voice, "available", False):
+                if self.voice.request_listen():
+                    return
+        except Exception:
+            pass
+        # still not ready — show why on the audio screen
         self._voice_row_tap()
 
     def _on_canvas_release(self, event):
@@ -3754,6 +3762,31 @@ class DoseApp:
         ("faster_whisper", "faster-whisper"),
     )
 
+    def _swap_voice_engine(self):
+        """Restart the voice engine to pick up newly installed
+        libraries WITHOUT ever leaving self.voice as None — hold-to-talk
+        and the mic picker both need a live engine, so the old one is
+        kept until a working replacement exists."""
+        old = self.voice
+        try:
+            import importlib
+            if "dose_voice" in sys.modules:
+                importlib.reload(sys.modules["dose_voice"])
+            from dose_voice import DoseVoice
+            new = DoseVoice(self)
+            if not getattr(new, "available", False):
+                return False          # keep the old engine running
+            try:
+                if old:
+                    old.stop()
+            except Exception:
+                pass
+            new.start()
+            self.voice = new
+            return True
+        except Exception:
+            return False
+
     def _open_sysinfo(self):
         """What is actually installed and running on THIS device."""
         self._prev_mode = self.mode
@@ -3938,13 +3971,7 @@ class DoseApp:
                     self._deps_status = ("restored %s — restarting voice"
                                          % ", ".join(got))
                     try:
-                        if self.voice:
-                            self.voice.stop()
-                    except Exception:
-                        pass
-                    self.voice = None
-                    try:
-                        self._start_voice()
+                        self._swap_voice_engine()
                     except Exception:
                         pass
                 self._draw_frame()
@@ -4034,13 +4061,7 @@ class DoseApp:
                                          "fetching models…")
                 # restart the engine so the new libraries are used
                 try:
-                    if self.voice:
-                        self.voice.stop()
-                except Exception:
-                    pass
-                self.voice = None
-                try:
-                    self._start_voice()
+                    self._swap_voice_engine()
                 except Exception:
                     pass
                 self._draw_frame()
@@ -4799,10 +4820,19 @@ class DoseApp:
         """User tapped a microphone in the list — use exactly it and
         watch the live meter to see if it works."""
         self._meter_peak = 0
-        self._full_test_status = ("Switched to card %d,%d — speak and "
-                                  "watch the bar." % (card, dev))
+        if self.voice is None:
+            try:
+                self._start_voice()
+            except Exception:
+                pass
         if self.voice:
             self.voice.force_card(card, dev)
+            self._full_test_status = (
+                "Switched to card %d,%d — speak and watch the bar."
+                % (card, dev))
+        else:
+            self._full_test_status = (
+                "Voice engine is still starting — try again in a moment.")
         self._draw_frame()
 
     def _meter_reset(self):
