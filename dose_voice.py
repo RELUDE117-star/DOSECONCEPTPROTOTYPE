@@ -852,19 +852,18 @@ class DoseVoice:
         except Exception:
             pass
 
-        # Every silent-mic verdict now ends the same way: force a
-        # full USB-first reselection and have the user retest.
+        # Every silent-mic verdict forces a full USB-first
+        # reselection and has the user retest. Verdicts are kept
+        # SHORT so they always fit on screen without truncating —
+        # the long story lives in the DETAILS report.
         usb_src = [s for s in self._list_sources()
                    if self._is_usb_name(s)]
         self._pick_input_target()
         self.request_reopen()
         if self._is_usb_name(self.mic_name):
-            return ("USB mic selected but silent — I unmuted it, "
-                    "boosted its gain, and reconnected; tap RETEST "
-                    "while speaking about 6 inches from it")
+            return "USB mic silent — gain boosted, RETEST + speak"
         if usb_src:
-            return ("USB microphone found — reconnecting to it now; "
-                    "wait 5 seconds, then tap RETEST while speaking")
+            return "reconnecting USB mic — RETEST in 5 sec"
         try:
             has_inputs = any(
                 d.get("max_input_channels", 0) > 0
@@ -873,11 +872,8 @@ class DoseVoice:
         except Exception:
             has_inputs = False
         if has_inputs:
-            return ("USB microphone found — reconnecting to it now; "
-                    "wait 5 seconds, then tap RETEST while speaking")
-        return ("No USB microphone is visible to the system — "
-                "reseat it in its USB port (or try another port), "
-                "wait 5 seconds, then tap RETEST")
+            return "reconnecting USB mic — RETEST in 5 sec"
+        return "no USB mic found — reseat the plug, RETEST"
 
     def mic_level(self, seconds=2.0):
         """Live mic test for the Settings screen: taps the RUNNING

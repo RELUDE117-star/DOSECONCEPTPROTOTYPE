@@ -3898,13 +3898,13 @@ class DoseApp:
         r = getattr(self, "_mic_test_result", None)
         if r is not None:
             if r > 60:
-                verdict = "mic is LIVE"
+                verdict = "mic is LIVE (tap to retest)"
             elif r > 5:
-                verdict = "very quiet — speak louder / check mic"
+                verdict = "quiet — speak louder, retest"
             else:
-                verdict = getattr(self, "_mic_diag",
-                                  "NO SIGNAL — mic not working")
-            return f"Mic level: {r} — {verdict} (tap to retest)"
+                verdict = (getattr(self, "_mic_diag", None)
+                           or "NO SIGNAL — mic not working")
+            return f"Mic {r}: {verdict}"
         if self.voice and self.voice.available:
             return f"Mic: {self.voice.mic_name} · tap row to test"
         return ""
@@ -4052,11 +4052,11 @@ class DoseApp:
         status_line = bt["status"] or getattr(
             self, "_audio_pkg_status", "")
         if status_line:
-            c.create_text(56, 86,
-                          text=self._fit_text(status_line,
-                                              self.font_small, 556),
+            # width= wraps instead of truncating — a verdict must
+            # never be cut off mid-sentence
+            c.create_text(56, 84, text=status_line,
                           font=self.font_small, fill=DOSE_BLUE_LT,
-                          anchor="nw")
+                          anchor="nw", width=556)
 
         # ── zero-setup: what's plugged in is what's used ──────────
         y = 122
@@ -4273,8 +4273,7 @@ class DoseApp:
             self._mic_report_lines = None
             if level <= 5:
                 try:
-                    self._mic_diag = (self.voice.mic_report()
-                                      + " — tap for details")
+                    self._mic_diag = self.voice.mic_report()
                     import dose_voice as _dv
                     rp = os.path.join(_dv.VOICE_DIR, "mic_report.txt")
                     with open(rp) as f:
