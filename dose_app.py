@@ -3605,6 +3605,16 @@ class DoseApp:
             import shutil as _sh
             status = ""
             try:
+                # Known USB-mic fix: make sure the user can access
+                # audio hardware (a PCM2902 records silence if the
+                # account isn't in the 'audio' group). Best-effort.
+                try:
+                    subprocess.run(
+                        ["sudo", "-n", "usermod", "-a", "-G", "audio",
+                         os.environ.get("USER", "")],
+                        capture_output=True, timeout=15)
+                except Exception:
+                    pass
                 # refresh the package index first — a stale index is
                 # the usual reason a package name fails to resolve
                 subprocess.run(["sudo", "-n", "apt-get", "update"],
@@ -4237,18 +4247,30 @@ class DoseApp:
         card_img = _pil_rounded_rect(620, 440, 22, t["card_bg"])
         tk_card = self._get_tk_image("meter_card", card_img)
         c.create_image(26, 20, image=tk_card, anchor="nw")
-        c.create_text(56, 44, text="LIVE MIC LEVEL",
+        c.create_text(56, 40, text="LIVE MIC LEVEL",
                       font=self.font_label, fill=t["muted"], anchor="nw")
-        c.create_text(56, 74,
-                      text="Speak now — the bar moves with your voice",
+
+        # ── engine + route diagnostics (so one screenshot explains it) ──
+        v = self.voice
+        if not v:
+            eng = "voice engine not started"
+        elif not getattr(v, "available", False):
+            eng = "NOT available: %s" % getattr(v, "reason", "?")
+        else:
+            eng = "ready"
+        c.create_text(56, 62, text="Engine: " + eng,
                       font=self.font_small, fill=t["fg"], anchor="nw")
+        route = getattr(v, "mic_name", "?") if v else "?"
+        c.create_text(56, 80,
+                      text=self._fit_text("Recording from: " + str(route),
+                                          self.font_small, 556),
+                      font=self.font_small, fill=DOSE_BLUE_LT, anchor="nw")
 
         raw = getattr(self, "_meter_raw", 0)
         boost = getattr(self, "_meter_boost", 0)
         peak = getattr(self, "_meter_peak", 0)
 
-        # scale: raw RMS ~0..4000 maps to the bar width
-        bar_x, bar_w, bar_h = 56, 560, 60
+        bar_x, bar_w, bar_h = 56, 560, 46
         full = 4000.0
 
         def bar(y, val, color, label):
@@ -4266,25 +4288,35 @@ class DoseApp:
                           font=self.font_small_bold, fill=t["fg"],
                           anchor="w")
 
-        # color by how strong the raw signal is
         raw_color = ("#2ECC71" if raw > 200 else
                      "#F1C40F" if raw > 40 else "#7F8C8D")
-        bar(120, raw, raw_color, "MIC")
-        bar(196, boost, DOSE_BLUE, "TO RECOGNIZER")
+        bar(104, raw, raw_color, "MIC")
+        bar(158, boost, DOSE_BLUE, "TO RECOGNIZER")
 
-        # peak-hold and a plain verdict
-        c.create_text(56, 286, text=f"Loudest so far: {int(peak)}",
-                      font=self.font_small, fill=t["muted"], anchor="nw")
         verdict = ("Great — it hears you clearly." if peak > 200 else
                    "Faint — speak closer / louder." if peak > 40 else
                    "No sound yet — say something.")
-        c.create_text(56, 312, text=verdict,
+        c.create_text(56, 216,
+                      text="Loudest so far: %d — %s" % (int(peak), verdict),
                       font=self.font_small_bold,
                       fill=(DOSE_BLUE_LT if peak > 40 else "#FF6B6B"),
                       anchor="nw")
 
-        # buttons: RESET peak, DONE
-        for label, cb, x0 in (("RESET", self._meter_reset, 56),
+        # route trail: exactly which capture devices were tried + heard
+        trail = getattr(v, "mic_trail", None) if v else None
+        c.create_text(56, 242, text="What it tried:",
+                      font=self.font_small, fill=t["muted"], anchor="nw")
+        y = 262
+        for ln in (trail or ["(no capture attempt recorded yet)"])[:6]:
+            c.create_text(64, y,
+                          text=self._fit_text("• " + ln,
+                                               self.font_tiny, 548),
+                          font=self.font_tiny, fill=t["fg"], anchor="nw")
+            y += 16
+
+        # buttons: RE-SCAN mic, RESET peak, DONE
+        for label, cb, x0 in (("RE-SCAN", self._meter_rescan, 56),
+                              ("RESET", self._meter_reset, 300),
                               ("DONE", self._close_mic_meter, 500)):
             b_img = _pil_rounded_rect(120, 46, 14,
                                       DOSE_BLUE if label == "DONE"
@@ -4299,6 +4331,14 @@ class DoseApp:
 
     def _meter_reset(self):
         self._meter_peak = 0
+        self._draw_frame()
+
+    def _meter_rescan(self):
+        """Force the engine to re-locate and reopen the mic now, and
+        clear the peak — so you can retry after re-seating the mic."""
+        self._meter_peak = 0
+        if self.voice:
+            self.voice.request_reopen()
         self._draw_frame()
 
     def _open_mic_report(self):

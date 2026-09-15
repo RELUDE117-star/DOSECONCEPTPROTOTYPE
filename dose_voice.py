@@ -384,11 +384,12 @@ class DoseVoice:
                 continue
             name = m.group(1)
             low = name.lower()
-            playbackish = any(k in low for k in (
+            capish = any(k in low for k in ("capture", "mic", "input",
+                                            "adc"))
+            playbackish = (not capish) and any(k in low for k in (
                 "speaker", "master", "headphone", "pcm", "output"))
-            # Try multiple forms; each is harmless if it doesn't apply.
-            # For anything that could be a capture control (i.e. not
-            # obviously a pure playback control) enable capture at 100%.
+            sourceish = any(k in low for k in ("source", "mux",
+                                               "input source"))
             attempts = []
             if not playbackish:
                 attempts += [
@@ -399,6 +400,14 @@ class DoseVoice:
                 ]
             else:
                 attempts += [["90%", "unmute", "on"]]
+            # An input-source/mux enum: try selecting a mic/line item
+            # (PCM2902 'PCM Capture Source' often defaults to the wrong
+            # input). Setting an enum to a name it doesn't have is a
+            # harmless error.
+            if sourceish:
+                for item in ("Mic", "Microphone", "Line", "Line In",
+                             "Input", "Capture"):
+                    attempts.append([item])
             for args in attempts:
                 try:
                     subprocess.run(
