@@ -295,6 +295,39 @@ for phrase, want in NAV:
     ok(went == want, "%-38r -> %s screen (got %s)"
        % (phrase, want, went))
 
+print("== 10b. navigation survives a MISHEARD screen name ==")
+# The station must act on what you MEANT, not only on phrases it was
+# given. These are what a far-field mic actually produces.
+MISHEARD_NAV = [
+    ("open storge", "storage"), ("open storidge", "storage"),
+    ("open store age", "storage"), ("open sturge", "storage"),
+    ("go to storge", "storage"), ("show me the storidge", "storage"),
+    ("open settens", "settings"), ("open sittings", "settings"),
+    ("go to setings", "settings"), ("open the setting page", "settings"),
+    ("go to use er", "user"), ("open my profil", "user"),
+    ("take me to my recerd", "user"), ("go to hoam", "home"),
+]
+for phrase, want in MISHEARD_NAV:
+    reply, went = says(phrase)
+    ok(went == want, "%-32r -> %s (got %s)" % (phrase, want, went))
+
+# ...but it must not fire on things that merely rhyme
+NOT_NAV = ["how many pills do i have left", "what time is it",
+           "did i take my sertraline", "i want to kill myself",
+           "chest pain", "what do i take today"]
+for phrase in NOT_NAV:
+    reply, went = says(phrase)
+    ok(went in (None, "home"),
+       "%-34r does not get read as a screen (got %s)" % (phrase, went))
+
+import dose_nlu as _nlu                                      # noqa: E402
+SCR = {"home": ("home", "main"), "storage": ("storage", "medication"),
+       "settings": ("settings", "options"), "user": ("user", "profile")}
+for noise in ("sink", "storm", "sausage", "garage", "water", "coffee",
+              "sertraline", "metformin"):
+    ok(_nlu.match_choice(noise, SCR) is None,
+       "%-12r is not matched to a screen" % noise)
+
 print("== 11. asking about today, however you phrase it ==")
 TODAY = ["what medication do i need to take today",
          "what medicine do i need to take today",

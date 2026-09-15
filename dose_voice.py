@@ -158,6 +158,12 @@ ENDPOINT_DANGLING = float(os.environ.get("DOSE_ENDPOINT_DANGLING", "2.20"))
 # Someone has to stop eventually — a television will not. Cut an
 # utterance that never ends rather than listening forever.
 ENDPOINT_MAX_UTTERANCE = float(os.environ.get("DOSE_MAX_UTTERANCE", "8.0"))
+
+# How far above the room's own noise a block must be to count as
+# speech. 3x is about 10 dB. Raising it rejects more noise but also
+# rejects a quiet voice from across the room, which is the trade a
+# far-field microphone exists to avoid.
+NOISE_GATE_RATIO = float(os.environ.get("DOSE_NOISE_GATE", "3.0"))
 # the shortest of the graces, used where a single number is needed
 ENDPOINT_SILENCE = ENDPOINT_STABLE
 
@@ -2030,11 +2036,30 @@ class DoseVoice:
              if TMP_AUDIO_DIR == "/dev/shm" else TMP_AUDIO_DIR,
              TMP_AUDIO_DIR == "/dev/shm"),
             ("Voice", os.path.basename(self._piper_path or "—"), True),
+            # What the room sounds like right now. When someone says
+            # "it can't hear me", this is the first thing to look at:
+            # a high floor means the room is the problem, not the
+            # software or even the microphone.
+            ("Room noise", self._room_note(), self._nfloor < 250),
             ("Endpoint", "%.2fs done · %.1fs mid-thought"
              % (ENDPOINT_STABLE, ENDPOINT_DANGLING),
              ENDPOINT_STABLE <= 0.5),
         ]
         return rows
+
+    def _room_note(self):
+        """Plain words for the ambient level, so the number means
+        something without knowing what an RMS is."""
+        nf = getattr(self, "_nfloor", 0.0)
+        if nf < 60:
+            word = "quiet"
+        elif nf < 150:
+            word = "some background"
+        elif nf < 300:
+            word = "noisy"
+        else:
+            word = "too loud — speak closer"
+        return "%s (%.0f)" % (word, nf)
 
     def warm_models(self):
         """Run one throwaway inference through each recogniser at
@@ -2272,8 +2297,15 @@ class DoseVoice:
         self._native_rate = SAMPLE_RATE
         self._ratecv_state = None
         self._gain = 1.0
-        self._max_gain = 20.0    # cap so noise never explodes
+        # Cap on the auto-gain. 20x was not enough for a voice a foot
+        # from a microphone rated for six inches, with part of the
+        # product in the way: a block at RMS 80 only reached 1600, well
+        # under the ~3000 the recogniser wants. This only ever applies
+        # to blocks that ALREADY cleared the noise gate, so raising it
+        # amplifies distant speech without amplifying the room.
+        self._max_gain = float(os.environ.get("DOSE_MAX_GAIN", "40"))
         self._nfloor = 50.0      # learned ambient noise floor (RMS)
+        self._snr = 0.0          # how far the last block stood above it
         self._last_voice_ts = 0.0  # last block that carried real speech
 
         def ingest(data):
@@ -2303,13 +2335,32 @@ class DoseVoice:
             try:
                 import audioop
                 rms = rms_raw = audioop.rms(data, 2)
+                # ── AMBIENT NOISE FLOOR ──────────────────────────────
+                # Both directions move as an average. This used to
+                # snap straight down to the quietest block seen and
+                # then climb back at 0.0005 per block — about four
+                # minutes. So one momentary dip left the gate pinned
+                # at its minimum, and anything continuous after that
+                # (a running tap, a fan, a television) sat above the
+                # gate and was treated as speech: amplified by the
+                # AGC, fed to the recogniser, and — because every
+                # block kept stamping "speech heard" — the turn never
+                # ended. It looked like the microphone had stopped
+                # understanding anything.
+                #
+                # Down over ~2 s so it follows a room going quiet;
+                # up over ~6 s so a burst of speech does not raise it,
+                # but a tap running does within seconds.
                 nf = self._nfloor
                 if rms < nf:
-                    nf = rms                       # track quietest fast
+                    nf = nf * 0.95 + rms * 0.05
                 else:
-                    nf = nf * 0.9995 + rms * 0.0005  # rise very slowly
+                    nf = nf * 0.98 + rms * 0.02
                 self._nfloor = max(1.0, nf)
-                gate = max(40.0, self._nfloor * 4.0)
+                # Speech has to stand clear of the room, not merely be
+                # audible in it.
+                gate = max(40.0, self._nfloor * NOISE_GATE_RATIO)
+                self._snr = rms / max(1.0, self._nfloor)
                 if rms > gate:                     # real signal, not hiss
                     # stamp the moment: the endpointer uses this to cut
                     # the instant the user stops talking
@@ -3685,6 +3736,21 @@ class DoseVoice:
             for screen, names in SCREENS:
                 if any(n in nav_word for n in names):
                     return ("nav:" + screen, None)
+            # Nothing matched letter for letter. Match on how it
+            # SOUNDS instead — "open storge", "open storidge", "open
+            # sturge" are all plainly "open storage", and the station
+            # should not need a perfect transcript to act on an
+            # unambiguous request. (Screens only; the medication
+            # matcher stays strict, because showing the wrong page is
+            # recoverable and acting on the wrong drug is not.)
+            if _nlu_mod is not None:
+                try:
+                    hit = _nlu_mod.match_choice(
+                        nav_word, {k: v for k, v in SCREENS})
+                    if hit:
+                        return ("nav:" + hit, None)
+                except Exception:
+                    pass
 
         if has(" go home ", " home screen ", " show home "):
             return ("nav:home", None)

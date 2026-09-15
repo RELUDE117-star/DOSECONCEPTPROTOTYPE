@@ -152,6 +152,44 @@ def _metaphone(s):
         return s
 
 
+# How close a spoken word has to be to a screen name. Lower than the
+# medication threshold on purpose: picking the wrong SCREEN shows you
+# the wrong page, which you fix by looking at it. Picking the wrong
+# MEDICATION is not recoverable that way, so that matcher stays strict
+# and refuses to guess. The cost of being wrong sets the threshold.
+SCREEN_MATCH_THRESHOLD = _env("SCREEN_MATCH_THRESHOLD", 76.0)
+
+
+def match_choice(text, options, threshold=SCREEN_MATCH_THRESHOLD):
+    """Phonetic + spelling match of a spoken phrase against a set of
+    labels: {key: (alias, alias, ...)}.
+
+    This is what stops the station from only answering to phrases it
+    was told about. "Open storage" heard as "open storge", "open
+    storidge" or "open sturge" is obviously the same request, and it
+    should not need the recogniser to be perfect to act on it.
+    Returns the best key, or None.
+    """
+    toks = normalize(text).replace("'", "").split()
+    if not toks:
+        return None
+    grams = {" ".join(toks[i:i + n]).replace(" ", "")
+             for n in (1, 2, 3) for i in range(len(toks) - n + 1)}
+    best_key, best_score = None, 0.0
+    for key, aliases in options.items():
+        for alias in aliases:
+            al = alias.lower().replace(" ", "")
+            am = _metaphone(al)
+            for g in grams:
+                if abs(len(g) - len(al)) > max(3, len(al) * 0.5):
+                    continue
+                sc = 0.5 * fuzz.ratio(g, al) + \
+                    0.5 * fuzz.ratio(_metaphone(g), am)
+                if sc > best_score:
+                    best_key, best_score = key, sc
+    return best_key if best_score >= threshold else None
+
+
 def match_med(text, names):
     """Phonetic + spelling similarity over 1-3 word windows (joined), so
     'lo sartan' and 'liz and oprah' still hit the right drug.
