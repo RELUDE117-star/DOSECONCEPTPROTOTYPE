@@ -936,13 +936,30 @@ class DoseVoice:
             return "reconnecting USB mic — RETEST in 5 sec"
         return "no USB mic found — reseat the plug, RETEST"
 
+    def mic_meter_sample(self, seconds=0.3):
+        """One short sample for the LIVE level meter: returns
+        (raw, boosted) peak RMS from the running capture. raw = what
+        the microphone physically delivers (0 = truly nothing);
+        boosted = what Vosk receives after auto-gain. Cheap and safe
+        to call repeatedly for a moving bar."""
+        if not self.available:
+            return (0, 0)
+        self._level_probe = {"until": time.time() + seconds,
+                             "max": 0, "raw": 0}
+        time.sleep(seconds + 0.1)
+        p = self._level_probe
+        self._level_probe = None
+        if not p:
+            return (0, 0)
+        return (int(p.get("raw", 0)), int(p.get("max", 0)))
+
     def mic_level(self, seconds=2.0):
         """Live mic test for the Settings screen: taps the RUNNING
         capture backend (whatever is actually feeding recognition)
         and returns the peak level heard. 0 = dead mic."""
         if self.available:
             self._level_probe = {"until": time.time() + seconds,
-                                 "max": 0}
+                                 "max": 0, "raw": 0}
             time.sleep(seconds + 0.4)
             probe = self._level_probe
             self._level_probe = None
@@ -1071,9 +1088,10 @@ class DoseVoice:
             # that rise clearly above that floor — toward a healthy RMS
             # for Vosk. This adapts to ANY mic quietness with no fixed
             # threshold a faint mic could never cross.
+            rms_raw = 0
             try:
                 import audioop
-                rms = audioop.rms(data, 2)
+                rms = rms_raw = audioop.rms(data, 2)
                 nf = self._nfloor
                 if rms < nf:
                     nf = rms                       # track quietest fast
@@ -1096,6 +1114,7 @@ class DoseVoice:
                 try:
                     import audioop
                     lp["max"] = max(lp["max"], audioop.rms(data, 2))
+                    lp["raw"] = max(lp.get("raw", 0), rms_raw)
                 except Exception:
                     pass
             self._audio_q.put(data)
@@ -1168,12 +1187,25 @@ class DoseVoice:
             the 'plug' layer so rate/format are auto-converted. This
             is the SunFounder / C-Media USB mic's documented method
             and it does NOT go through PipeWire at all — the whole
-            layer that's been failing. Ships in alsa-utils."""
+            layer that's been failing. Ships in alsa-utils.
+
+            Known Raspberry Pi issue: many cheap USB mics (C-Media
+            CM108) reject a 16 kHz capture rate ('cannot set hw
+            params'). So we record at the mic's native 48 kHz and
+            resample to 16 kHz in software (ingest handles it),
+            falling back to 44.1 kHz then a direct 16 kHz. The 'plug'
+            layer converts format/channels regardless."""
             dev = "plughw:%d,0" % card
-            cmd = ["arecord", "-D", dev, "-f", "S16_LE",
-                   "-r", "16000", "-c", "1", "-t", "raw", "-q", "-"]
-            return open_pipe_cmd(cmd, "USB mic (arecord %s)" % dev,
-                                 native_rate=SAMPLE_RATE)
+            for rate in (48000, 44100, 16000):
+                cmd = ["arecord", "-D", dev, "-f", "S16_LE",
+                       "-r", str(rate), "-c", "1", "-t", "raw",
+                       "-q", "-"]
+                cap = open_pipe_cmd(
+                    cmd, "USB mic (arecord %s @%d)" % (dev, rate),
+                    native_rate=rate)
+                if cap:
+                    return cap
+            return None
 
         def capture_is_live(seconds=1.4):
             """Drain the queue for a moment and measure real signal."""

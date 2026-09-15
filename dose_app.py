@@ -858,6 +858,8 @@ class DoseApp:
             self._draw_time_edit(c)
         elif self.mode == "micreport":
             self._draw_mic_report(c)
+        elif self.mode == "micmeter":
+            self._draw_mic_meter(c)
         elif self.mode == "btaudio":
             self._draw_bt_audio(c)
         elif self.mode == "dosealert":
@@ -883,7 +885,7 @@ class DoseApp:
             active = getattr(self, "_te_return", "storage")
         if active == "dosealert":
             active = getattr(self, "_alert_return", "home")
-        if active in ("micreport", "btaudio"):
+        if active in ("micreport", "btaudio", "micmeter"):
             active = "settings"
         if active in ("hold", "spin", "confirmdisp", "dispensed",
                       "qtyconfirm", "addmed"):
@@ -4059,7 +4061,7 @@ class DoseApp:
         r = getattr(self, "_mic_test_result", None)
         show_report = (r is not None and r <= 5
                        and getattr(self, "_mic_report_lines", None))
-        buttons = [("TEST MIC", self._voice_mic_test, False),
+        buttons = [("MIC LEVEL", self._open_mic_meter, False),
                    ("TEST SPKR", self._speaker_test, False),
                    ("RESCAN", self._audio_rescan, False)]
         if show_report:
@@ -4126,6 +4128,118 @@ class DoseApp:
         self._mic_test_result = None
         if self.voice:
             self.voice.request_reopen()
+        self._draw_frame()
+
+    # ── LIVE MIC LEVEL METER ────────────────────────────────────────────
+    def _open_mic_meter(self):
+        """Open a live, moving level meter so you can SEE, in real
+        time, exactly how much the microphone is picking up as you
+        speak. raw = the mic's physical signal (0 = it hears nothing);
+        boosted = what the recognizer receives after auto-gain."""
+        self._prev_mode = self.mode
+        self.mode = "micmeter"
+        self._meter_raw = 0
+        self._meter_boost = 0
+        self._meter_peak = 0
+        self._meter_run = True
+
+        # Worker thread ONLY samples and updates shared values (never
+        # touches tk). A main-thread `after` loop does all drawing —
+        # the thread-safe pattern.
+        def worker():
+            while (getattr(self, "_meter_run", False)
+                   and self.mode == "micmeter"):
+                raw, boost = (self.voice.mic_meter_sample(0.2)
+                              if self.voice else (0, 0))
+                self._meter_raw = raw
+                self._meter_boost = boost
+                self._meter_peak = max(getattr(self, "_meter_peak", 0),
+                                       raw)
+        threading.Thread(target=worker, daemon=True).start()
+        self._meter_tick()
+
+    def _meter_tick(self):
+        if not getattr(self, "_meter_run", False) \
+                or self.mode != "micmeter":
+            return
+        self._draw_frame()
+        try:
+            self.root.after(120, self._meter_tick)
+        except Exception:
+            pass
+
+    def _close_mic_meter(self):
+        self._meter_run = False
+        self.mode = "btaudio"
+        self._draw_frame()
+
+    def _draw_mic_meter(self, c):
+        t = self.theme
+        card_img = _pil_rounded_rect(620, 440, 22, t["card_bg"])
+        tk_card = self._get_tk_image("meter_card", card_img)
+        c.create_image(26, 20, image=tk_card, anchor="nw")
+        c.create_text(56, 44, text="LIVE MIC LEVEL",
+                      font=self.font_label, fill=t["muted"], anchor="nw")
+        c.create_text(56, 74,
+                      text="Speak now — the bar moves with your voice",
+                      font=self.font_small, fill=t["fg"], anchor="nw")
+
+        raw = getattr(self, "_meter_raw", 0)
+        boost = getattr(self, "_meter_boost", 0)
+        peak = getattr(self, "_meter_peak", 0)
+
+        # scale: raw RMS ~0..4000 maps to the bar width
+        bar_x, bar_w, bar_h = 56, 560, 60
+        full = 4000.0
+
+        def bar(y, val, color, label):
+            track = _pil_rounded_rect(bar_w, bar_h, 12, t["elevated_bg"])
+            tk_tr = self._get_tk_image(f"meter_tr_{label}", track)
+            c.create_image(bar_x, y, image=tk_tr, anchor="nw")
+            frac = max(0.0, min(val / full, 1.0))
+            fw = int(bar_w * frac)
+            if fw > 6:
+                fill = _pil_rounded_rect(fw, bar_h, 12, color)
+                tk_f = self._get_tk_image(f"meter_fill_{label}", fill)
+                c.create_image(bar_x, y, image=tk_f, anchor="nw")
+            c.create_text(bar_x + 12, y + bar_h // 2,
+                          text=f"{label}: {int(val)}",
+                          font=self.font_small_bold, fill=t["fg"],
+                          anchor="w")
+
+        # color by how strong the raw signal is
+        raw_color = ("#2ECC71" if raw > 200 else
+                     "#F1C40F" if raw > 40 else "#7F8C8D")
+        bar(120, raw, raw_color, "MIC")
+        bar(196, boost, DOSE_BLUE, "TO RECOGNIZER")
+
+        # peak-hold and a plain verdict
+        c.create_text(56, 286, text=f"Loudest so far: {int(peak)}",
+                      font=self.font_small, fill=t["muted"], anchor="nw")
+        verdict = ("Great — it hears you clearly." if peak > 200 else
+                   "Faint — speak closer / louder." if peak > 40 else
+                   "No sound yet — say something.")
+        c.create_text(56, 312, text=verdict,
+                      font=self.font_small_bold,
+                      fill=(DOSE_BLUE_LT if peak > 40 else "#FF6B6B"),
+                      anchor="nw")
+
+        # buttons: RESET peak, DONE
+        for label, cb, x0 in (("RESET", self._meter_reset, 56),
+                              ("DONE", self._close_mic_meter, 500)):
+            b_img = _pil_rounded_rect(120, 46, 14,
+                                      DOSE_BLUE if label == "DONE"
+                                      else t["elevated_bg"])
+            tk_b = self._get_tk_image(f"meter_btn_{label}", b_img)
+            c.create_image(x0, 398, image=tk_b, anchor="nw")
+            c.create_text(x0 + 60, 421, text=label,
+                          font=self.font_small_bold,
+                          fill="#06101E" if label == "DONE" else t["fg"],
+                          anchor="center")
+            self._click_zones.append((x0, 398, x0 + 120, 444, cb))
+
+    def _meter_reset(self):
+        self._meter_peak = 0
         self._draw_frame()
 
     def _open_mic_report(self):
