@@ -1734,6 +1734,67 @@ class DoseVoice:
         threading.Thread(target=work, daemon=True,
                          name="tts-prewarm").start()
 
+    # ── openWakeWord: a dedicated neural wake-word detector (~2.5 ms
+    #    per 80 ms frame). Far more reliable than matching "hey dose"
+    #    in a running transcript, and it leaves the CPU free.
+    #    OPT-IN: set DOSE_WAKE_MODEL to a trained model (e.g. a
+    #    hey_dose.onnx from openWakeWord's training notebook) or to a
+    #    built-in name. Without it we keep the Vosk phrase match, so
+    #    "Hey Dose" behaves exactly as before.
+    def _oww(self):
+        if getattr(self, "_oww_model", "unset") != "unset":
+            return self._oww_model
+        self._oww_model = None
+        want = os.environ.get("DOSE_WAKE_MODEL", "").strip()
+        if not want:
+            return None
+        try:
+            import openwakeword
+            from openwakeword.model import Model
+            if not os.path.exists(want):
+                try:
+                    openwakeword.utils.download_models(
+                        model_names=[want])
+                except Exception:
+                    pass
+            self._oww_model = Model(wakeword_models=[want],
+                                    inference_framework="onnx")
+            self._oww_buf = bytearray()
+            self._oww_cool = 0
+            self._oww_thresh = float(
+                os.environ.get("WAKE_THRESHOLD", "0.5"))
+        except Exception:
+            self._oww_model = None
+        return self._oww_model
+
+    def _oww_feed(self, data):
+        """Feed 16 kHz int16 audio; True when the wake word fires.
+        Buffers into the exact 80 ms (1280-sample) frames it expects."""
+        m = self._oww()
+        if m is None:
+            return False
+        try:
+            import numpy as np
+            self._oww_buf.extend(data)
+            fired = False
+            frame_bytes = 1280 * 2
+            while len(self._oww_buf) >= frame_bytes:
+                chunk = bytes(self._oww_buf[:frame_bytes])
+                del self._oww_buf[:frame_bytes]
+                arr = np.frombuffer(chunk, dtype=np.int16)
+                scores = m.predict(arr)
+                top = max(scores.values()) if scores else 0.0
+                if self._oww_cool > 0:
+                    self._oww_cool -= 1
+                    continue
+                if top >= self._oww_thresh:
+                    m.reset()
+                    self._oww_cool = 25      # ~2 s refractory
+                    fired = True
+            return fired
+        except Exception:
+            return False
+
     def _vosk_grammar(self):
         """Constrain recognition to the words Dose actually expects —
         wake word, command phrases, medication names, numbers, days.
@@ -2307,6 +2368,12 @@ class DoseVoice:
             except queue.Empty:
                 continue
             if self._muted:
+                continue
+
+            # dedicated wake-word detector (when a model is configured):
+            # a hit starts a listening session exactly like hold-to-talk
+            if self.state == "idle" and self._oww_feed(data):
+                self._ptt_requested = True
                 continue
 
             got_final = rec.AcceptWaveform(data)

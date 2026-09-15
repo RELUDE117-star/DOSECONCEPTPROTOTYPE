@@ -2425,6 +2425,12 @@ class DoseApp:
              self._cancel_hold))
 
     def _cancel_hold(self):
+        if getattr(self, "_dispensed_after_id", None):
+            try:
+                self.root.after_cancel(self._dispensed_after_id)
+            except Exception:
+                pass
+            self._dispensed_after_id = None
         self.dispense_state = 0
         self.dispense_pill = None
         self.hold_start = 0
@@ -2439,6 +2445,12 @@ class DoseApp:
         self._draw_frame()
 
     def _end_dispense(self):
+        """Auto-close the 'dispensed' screen. A QUEUED close must never
+        yank the user off a screen they moved to in the meantime — if
+        we're no longer on the dispensed screen, just clean up the
+        timers and leave the current screen alone."""
+        self._dispensed_after_id = None
+        restore = (self.mode == "dispensed")
         self.dispense_state = 0
         self.dispense_pill = None
         self.hold_start = 0
@@ -2449,6 +2461,8 @@ class DoseApp:
         if self.spin_after_id:
             self.root.after_cancel(self.spin_after_id)
             self.spin_after_id = None
+        if not restore:
+            return
         self.mode = self._prev_mode
         self._draw_frame()
 
@@ -2663,7 +2677,8 @@ class DoseApp:
         self._play_sound()
         self.mode = "dispensed"
         self._draw_frame()
-        self.root.after(int(DISPENSED_TIME * 1000), self._end_dispense)
+        self._dispensed_after_id = self.root.after(
+            int(DISPENSED_TIME * 1000), self._end_dispense)
 
     def _draw_dispensed(self, c):
         t = self.theme

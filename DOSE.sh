@@ -167,6 +167,10 @@ if [ ! -f "$VOICE_DIR/.bt_ready3" ]; then
     done
     # Optional stronger command recognizer (Moonshine, offline ONNX)
     python3 -m pip install --break-system-packages faster-whisper 2>/dev/null || python3 -m pip install faster-whisper 2>/dev/null || true
+    # openWakeWord: --no-deps skips tflite-runtime (we use onnxruntime)
+    python3 -m pip install --break-system-packages --no-deps openwakeword==0.6.0 2>/dev/null \
+        || python3 -m pip install --no-deps openwakeword==0.6.0 2>/dev/null || true
+    python3 -m pip install --break-system-packages scipy scikit-learn tqdm 2>/dev/null || true
     python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
         || python3 -m pip install useful-moonshine-onnx 2>/dev/null || true
     touch "$VOICE_DIR/.bt_ready3"
