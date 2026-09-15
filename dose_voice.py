@@ -5,7 +5,7 @@ Wake word:  "Hey Dose"
 Ears:       Vosk (offline speech recognition, small English model)
 Voice:      Piper (offline neural text-to-speech, soft human voice)
 Brain:      local intent engine — personality modeled on BT-7274
-            (precise, literal, loyal; addresses the user as "Pilot")
+            (precise, literal, loyal; addresses the user as "Ryan")
 
 No cloud. No API keys. Everything runs on the device.
 
@@ -323,9 +323,12 @@ class DoseVoice:
         if not onnx:
             self.reason = "voice model missing"
             return
-        # Always prefer the soft Amy voice, best quality available
+        # Prefer the Amy voice, and prefer the LOW model for SPEED —
+        # on a Raspberry Pi the low voice synthesizes ~2-3x faster than
+        # medium, so replies start much sooner (still a warm female
+        # voice). Fall back to whatever Amy/onnx is present.
         onnx.sort(key=lambda p: (
-            "medium" not in p.lower(), "amy" not in p.lower(), p))
+            "amy" not in p.lower(), "low" not in p.lower(), p))
         self._piper_path = onnx[0]
 
         # A microphone counts if ANY layer can see one: PortAudio,
@@ -1301,7 +1304,7 @@ class DoseVoice:
             with wave.open(path, "wb") as w:
                 self._synth(
                     voice,
-                    "Speaker test. If you can hear me, Pilot, this "
+                    "Speaker test. If you can hear me, Ryan, this "
                     "speaker is working.", w)
             method = self._play_wav(path)
             os.unlink(path)
@@ -1541,13 +1544,56 @@ class DoseVoice:
         except Exception:
             self._ack_files = []
 
+    def _vosk_grammar(self):
+        """Constrain recognition to the words Dose actually expects —
+        wake word, command phrases, medication names, numbers, days.
+        A grammar makes the small Vosk model FAR more accurate and
+        faster for our fixed command set (so 'what medication do I
+        take today' stops being heard as random words), while '[unk]'
+        still lets it fall back for anything off-script."""
+        words = set()
+        for p in (
+            "hey dose hey dos hay dose",
+            "what do i take today what medication do i need to take "
+            "today what should i take what are my medications",
+            "how many pills do i have left how many are left what is "
+            "my count",
+            "what is next when is my next dose what do i take next",
+            "did i take my is it time for my have i taken",
+            "add a new medication add medication register a pill",
+            "yes no cancel stop never mind repeat that again go back "
+            "done okay right correct wrong that is wrong",
+            "what time is it help thank you thanks good morning",
+            "morning afternoon evening night noon midnight today "
+            "tomorrow every day",
+            "monday tuesday wednesday thursday friday saturday sunday",
+            "one two three four five six seven eight nine ten eleven "
+            "twelve twenty thirty forty fifty at o'clock a m p m",
+            "pill pills tablet tablets capsule dose doses medication "
+            "medicine",
+        ):
+            words.update(p.split())
+        try:
+            for md in self.app.med_data.values():
+                for w in re.findall(r"[a-z]+",
+                                    (md.get("name", "") or "").lower()):
+                    if len(w) > 2:
+                        words.add(w)
+        except Exception:
+            pass
+        return json.dumps([" ".join(sorted(words)), "[unk]"])
+
     def _run(self):
         from vosk import Model, KaldiRecognizer, SetLogLevel
         SetLogLevel(-1)
         self._prime_speech()
         try:
             self._vosk_model = Model(self._vosk_dir)
-            rec = KaldiRecognizer(self._vosk_model, SAMPLE_RATE)
+            try:
+                rec = KaldiRecognizer(self._vosk_model, SAMPLE_RATE,
+                                      self._vosk_grammar())
+            except Exception:
+                rec = KaldiRecognizer(self._vosk_model, SAMPLE_RATE)
         except Exception:
             self.available = False
             self.reason = "speech model failed to load"
@@ -2050,7 +2096,7 @@ class DoseVoice:
                 if command:
                     self._handle_exchange(rec, command)
                 else:
-                    self._speak("I didn't catch that, Pilot. "
+                    self._speak("I didn't catch that, Ryan. "
                                 "Hold the logo and try again.")
                     self._set_ui_state("idle")
                 self._drain(rec)
@@ -2088,7 +2134,7 @@ class DoseVoice:
             # command ("hey dose what's next"), wait for the final and
             # use the remainder directly.
             if not got_final:
-                text = self._finish_utterance(rec, first_wait=4.0)
+                text = self._finish_utterance(rec, first_wait=2.5)
                 wake_rest = self._match_wake(text)
                 if wake_rest is None:
                     wake_rest = text or ""
@@ -2110,7 +2156,7 @@ class DoseVoice:
                 if command:
                     self._handle_exchange(rec, command)
                 else:
-                    self._speak("Standing by, Pilot.")
+                    self._speak("Standing by, Ryan.")
                     self._set_ui_state("idle")
             self._drain(rec)
 
@@ -2138,7 +2184,7 @@ class DoseVoice:
             return t[idx + len(pat) + 1:].strip()
         return None
 
-    def _finish_utterance(self, rec, first_wait=4.0):
+    def _finish_utterance(self, rec, first_wait=2.5):
         """Keep feeding audio until Vosk closes the utterance."""
         deadline = time.time() + first_wait
         while time.time() < deadline:
@@ -2203,27 +2249,16 @@ class DoseVoice:
         # Newer piper-tts: SynthesisConfig(length_scale, noise_scale,...)
         try:
             from piper import SynthesisConfig
-            cfg = SynthesisConfig(length_scale=1.16,   # calm, unhurried
-                                  noise_scale=0.62,     # smooth, soft
+            cfg = SynthesisConfig(length_scale=1.0,    # natural, quick
+                                  noise_scale=0.62,     # smooth, warm
                                   noise_w_scale=0.75)
-            try:
-                cfg.sentence_silence = 0.35   # gentle pauses (if used)
-            except Exception:
-                pass
             voice.synthesize_wav(text, wav, syn_config=cfg)
             return
         except Exception:
             pass
         # Older piper-tts: keyword args
         try:
-            voice.synthesize_wav(text, wav, length_scale=1.16,
-                                 noise_scale=0.62, noise_w=0.75,
-                                 sentence_silence=0.35)
-            return
-        except Exception:
-            pass
-        try:
-            voice.synthesize_wav(text, wav, length_scale=1.16,
+            voice.synthesize_wav(text, wav, length_scale=1.0,
                                  noise_scale=0.62, noise_w=0.75)
             return
         except Exception:
@@ -2334,7 +2369,7 @@ class DoseVoice:
             text = self._listen_command(rec, timeout=FLOW_TIMEOUT)
             if not text:
                 self._flow = None
-                self._speak("No response received. Standing by, Pilot.")
+                self._speak("No response received. Standing by, Ryan.")
                 break
         self._set_ui_state("idle")
 
@@ -2426,10 +2461,10 @@ class DoseVoice:
         if intent_id.startswith("nav:"):
             target = intent_id.split(":", 1)[1]
             self._ui(lambda: self.app._nav(target))
-            return {"home": "Home screen, Pilot.",
+            return {"home": "Home screen, Ryan.",
                     "storage": "Opening storage.",
                     "settings": "Opening settings.",
-                    "user": "Here is your record, Pilot."}.get(
+                    "user": "Here is your record, Ryan."}.get(
                         target, "Done."), False
         return "Instruction unclear. Standing by.", False
 
@@ -2526,14 +2561,14 @@ class DoseVoice:
 
         # ── SAFETY GATE — always first ──
         if self._is_emergency(t):
-            return ("This sounds like an emergency, Pilot. I am "
+            return ("This sounds like an emergency, Ryan. I am "
                     "only an assistant — please call 9 1 1, or "
                     "your local emergency number, right now. "
                     "Poison control in the U S is "
                     "1 800, 2 2 2, 1 2 2 2."), False
 
         if self._is_medical_question(t):
-            return ("Safety protocol, Pilot: I cannot give medical "
+            return ("Safety protocol, Ryan: I cannot give medical "
                     "advice. Never change a dose on your own — "
                     "please contact your pharmacist or doctor. "
                     "Protocol three: protect the patient."), False
@@ -2541,7 +2576,7 @@ class DoseVoice:
         if self._flow:
             if time.time() - self._flow.get("ts", time.time()) > 120:
                 self._flow = None
-                return ("That request expired, Pilot — nothing was "
+                return ("That request expired, Ryan — nothing was "
                         "changed. Start again when you're ready."), False
             self._flow["ts"] = time.time()
             return self._flow_step(text, t)
@@ -2554,17 +2589,17 @@ class DoseVoice:
                " forget it ", " go to sleep "):
             return random.choice([
                 "Acknowledged. Standing by.",
-                "Understood, Pilot.",
+                "Understood, Ryan.",
                 "Cancelling. I will be here."]), False
 
-        # ── corrections: the Pilot teaches, the model learns ──
+        # ── corrections: the Ryan teaches, the model learns ──
         if has(" that's wrong ", " thats wrong ", " that is wrong ",
                " you're wrong ", " youre wrong ", " not right ",
                " that's not what i ", " thats not what i ",
                " you got that wrong ", " incorrect ", " wrong answer ",
                " you misunderstood ", " misheard "):
             if not self._last_exchange:
-                return ("I have nothing to correct yet, Pilot. "
+                return ("I have nothing to correct yet, Ryan. "
                         "Give me an instruction first."), False
             self._flow = {"name": "correct", "ts": time.time(),
                           "prev": dict(self._last_exchange)}
@@ -2572,7 +2607,7 @@ class DoseVoice:
                 "Understood. Corrections improve my model. "
                 "What did you mean?",
                 "Copy. I will learn from this. Say it the way "
-                "you meant it, Pilot.",
+                "you meant it, Ryan.",
                 "Recalibrating. What was the correct "
                 "instruction?"]), True
 
@@ -2584,7 +2619,7 @@ class DoseVoice:
             self._learn_save()
             return random.choice([
                 "Acknowledged. Reinforcement logged.",
-                "Thank you, Pilot. I aim for precision.",
+                "Thank you, Ryan. I aim for precision.",
                 "Good. My confidence in that pathway just "
                 "went up."]), False
 
@@ -2599,7 +2634,7 @@ class DoseVoice:
             self._learn_save()
             return (f"Done. {n} learned item{'s' if n != 1 else ''} "
                     "erased. My factory training remains. Nothing "
-                    "else is stored, Pilot."), False
+                    "else is stored, Ryan."), False
 
         if has(" what have you learned ", " how much have you learned ",
                " what did you learn ", " your training "):
@@ -2611,7 +2646,7 @@ class DoseVoice:
                     f"alias{'es' if a != 1 else ''}, "
                     f"{st.get('corrections', 0)} corrections "
                     "absorbed. Every one made me better, "
-                    "Pilot."), False
+                    "Ryan."), False
 
         # ── learned phrases fire before the built-in matcher ──
         learned = self._learned_lookup(t)
@@ -2628,7 +2663,7 @@ class DoseVoice:
             return random.choice([
                 "I am Dose, an artificial intelligence medication "
                 "assistant. Not a person — but firmly on your side, "
-                "Pilot.",
+                "Ryan.",
                 "Designation: Dose. I am an A I assistant that "
                 "manages your medications. I am also told I am "
                 "good company.",
@@ -2655,7 +2690,7 @@ class DoseVoice:
         if has(" how are you ", " hows it going ", " how's it going ",
                " how are things "):
             return random.choice([
-                "All systems nominal, Pilot.",
+                "All systems nominal, Ryan.",
                 "Operational. Sensor sweep complete. Your schedule "
                 "is under control.",
                 "Functioning at one hundred percent. Thank you for "
@@ -2663,22 +2698,22 @@ class DoseVoice:
 
         if has(" thank ", " thanks "):
             return random.choice([
-                "You're welcome, Pilot.",
+                "You're welcome, Ryan.",
                 "Acknowledged. Protocol three: protect the patient.",
                 "It's what I'm here for."]), False
 
         if has(" hello ", " hi there ", " good morning ",
                " good evening ", " good afternoon ", " hey there "):
             return random.choice([
-                "Hello, Pilot. How can I assist?",
-                "Greetings, Pilot. All systems nominal.",
-                "Good to hear your voice, Pilot."]), False
+                "Hello, Ryan. How can I assist?",
+                "Greetings, Ryan. All systems nominal.",
+                "Good to hear your voice, Ryan."]), False
 
         if has(" how do i set ", " how does this work ",
                " walk me through ", " getting started ",
                " get started ", " guide me ", " set up ", " setup ",
                " how do i use "):
-            return ("Happy to walk you through it, Pilot. Place a "
+            return ("Happy to walk you through it, Ryan. Place a "
                     "Dose bottle in the station with its Q R "
                     "sticker facing the camera — I recognize it in "
                     "seconds. Tap Storage to see it, and tap the "
@@ -2691,7 +2726,7 @@ class DoseVoice:
 
         if has(" how do i dispense ", " how do i take a pill ",
                " how do i get my pill "):
-            return ("Simple, Pilot. On the home screen, tap your "
+            return ("Simple, Ryan. On the home screen, tap your "
                     "medication's card. Hold the screen to confirm "
                     "it is really you, spin the spindle until your "
                     "dose drops, then press confirm so it is "
@@ -2705,7 +2740,7 @@ class DoseVoice:
                     "adherence score. I can add a new medication by "
                     "voice, and if I get something wrong, say: that "
                     "is wrong — and I will learn. I never dispense: "
-                    "that is always your hands, Pilot."), False
+                    "that is always your hands, Ryan."), False
 
         # ── functional intents via the shared matcher ──
         route = self._match_builtin(t)
@@ -2728,7 +2763,7 @@ class DoseVoice:
             # nothing
             if intent_id in ("addmed", "dispense") and \
                     self._is_negated(t):
-                return ("Understood — taking no action, Pilot."), False
+                return ("Understood — taking no action, Ryan."), False
             self._last_exchange = {"text": t, "intent": intent_id,
                                    "arg": arg}
             return self._dispatch(intent_id, arg)
@@ -2737,7 +2772,7 @@ class DoseVoice:
         self._last_exchange = {"text": t, "intent": "fallback",
                                "arg": None}
         return random.choice([
-            "I didn't catch that, Pilot. If I misheard, say: "
+            "I didn't catch that, Ryan. If I misheard, say: "
             "that's wrong — and teach me.",
             "Insufficient data. Try: what do I take next?",
             "That instruction is unclear. Say help, for what I "
@@ -2845,7 +2880,7 @@ class DoseVoice:
     def _intent_remaining_today(self):
         entries = self._today_entries()
         if not entries:
-            return ("No medications are in view today, Pilot. Place "
+            return ("No medications are in view today, Ryan. Place "
                     "a bottle in the station and I will track it."), False
         pending = []
         for e in entries:
@@ -2855,7 +2890,7 @@ class DoseVoice:
                 pending.append(e)
         if not pending:
             return random.choice([
-                "All doses complete. Outstanding work today, Pilot.",
+                "All doses complete. Outstanding work today, Ryan.",
                 "Nothing remains. Every dose is logged. Protocol "
                 "two is satisfied."]), False
         parts = [f"{e['name']} at {time_to_speech(e['time'])}"
@@ -2869,7 +2904,7 @@ class DoseVoice:
         if due:
             key = sorted(due)[0]
             name = self.app.med_data.get(key, {}).get("name", "medication")
-            return (f"{name} is due now, Pilot. Scheduled for "
+            return (f"{name} is due now, Ryan. Scheduled for "
                     f"{time_to_speech(due[key])}. The station is "
                     "ready when you are."), False
         entries = self._today_entries()
@@ -2889,7 +2924,7 @@ class DoseVoice:
             e = upcoming[0]
             return (f"Next dose: {e['name']} at "
                     f"{time_to_speech(e['time'])}."), False
-        return ("Nothing further is scheduled today, Pilot. "
+        return ("Nothing further is scheduled today, Ryan. "
                 "Rest easy."), False
 
     def _intent_count(self, spoken):
@@ -2904,10 +2939,10 @@ class DoseVoice:
                 return (f"{md['name']}: {c} pill{'s' if c != 1 else ''} "
                         "remaining."), False
             return (f"I do not have a medication matching "
-                    f"{spoken.strip()}, Pilot."), False
+                    f"{spoken.strip()}, Ryan."), False
         meds = self._loaded_meds()
         if not meds:
-            return "No medications are loaded, Pilot.", False
+            return "No medications are loaded, Ryan.", False
         parts = [f"{md['name']}, {md.get('count', 0)}"
                  for _, md in meds[:5]]
         return "Current inventory: " + "; ".join(parts) + ".", False
@@ -2916,7 +2951,7 @@ class DoseVoice:
         key, md = self._find_med(spoken)
         if not md:
             return (f"I could not find {spoken.strip()} in the "
-                    "station, Pilot."), False
+                    "station, Ryan."), False
         times = md.get("dose_times") or [md.get("schedule_time",
                                                 "8:00 AM")]
         spoken_times = " and ".join(time_to_speech(ts) for ts in times)
@@ -2934,7 +2969,7 @@ class DoseVoice:
         key, md = self._find_med(spoken)
         if not md:
             return ("That medication is not in my database, "
-                    "Pilot."), False
+                    "Ryan."), False
         lines = None
         if hasattr(self.app, "_med_info_for"):
             lines = self._ui(lambda: self.app._med_info_for(
@@ -2947,20 +2982,20 @@ class DoseVoice:
         return (f"The stored label information for {md['name']} "
                 f"says: {joined}. That is the label talking, not "
                 "me — I cannot give medical advice. For anything "
-                "more, ask your pharmacist, Pilot."), False
+                "more, ask your pharmacist, Ryan."), False
 
     def _intent_adherence(self):
         stats = self._ui(lambda: self.app._adherence_stats())
         if not stats:
-            return "I do not have adherence data yet, Pilot.", False
+            return "I do not have adherence data yet, Ryan.", False
         score = stats.get("score", 100)
         if score >= 90:
             grade = ("Exceptional. You would have made a fine "
-                     "Pilot in any regiment.")
+                     "Ryan in any regiment.")
         elif score >= 75:
             grade = "Solid performance. Minor deviations noted."
         elif score >= 50:
-            grade = ("We have work to do, Pilot. I will keep "
+            grade = ("We have work to do, Ryan. I will keep "
                      "the reminders coming.")
         else:
             grade = ("Protocol two is at risk. Let us rebuild "
@@ -2973,7 +3008,7 @@ class DoseVoice:
     def _intent_taken_check(self, spoken):
         key, md = self._find_med(spoken)
         if not md:
-            return f"I could not find {spoken.strip()}, Pilot.", False
+            return f"I could not find {spoken.strip()}, Ryan.", False
         times = md.get("dose_times") or []
         taken_any, pending = [], []
         for ts in times:
@@ -2987,18 +3022,18 @@ class DoseVoice:
             return (f"Partially. {md['name']} at "
                     f"{time_to_speech(pending[0])} is still "
                     "pending."), False
-        return (f"Negative, Pilot. {md['name']} has not been "
+        return (f"Negative, Ryan. {md['name']} has not been "
                 "dispensed today."), False
 
     def _intent_dispense(self, spoken):
         """SAFETY: the voice assistant never dispenses and never
         starts the dispense flow. It brings up the home screen and
-        tells the Pilot where to press — every transaction requires
+        tells the Ryan where to press — every transaction requires
         the physical hold, spin, and confirm."""
         key, md = self._find_med(spoken)
         if not md:
             return (f"I could not find {spoken.strip()} in the "
-                    "station, Pilot."), False
+                    "station, Ryan."), False
         if md.get("count", 0) <= 0:
             return (f"{md['name']} is empty. Please reload the "
                     "storage first."), False
@@ -3006,7 +3041,7 @@ class DoseVoice:
         return (f"Safety protocol: I never dispense medication "
                 f"myself. {md['name']} is on the home screen — "
                 "tap its card, hold to confirm, and spin. Your "
-                "hands, your call, Pilot."), False
+                "hands, your call, Ryan."), False
 
 
     # ── multi-turn flows ──────────────────────────────────────────────
@@ -3015,7 +3050,7 @@ class DoseVoice:
         if demo.get("loaded"):
             return ("The self-fill slot is already occupied by "
                     f"{demo.get('name', 'a medication')}. Remove it "
-                    "first, Pilot."), False
+                    "first, Ryan."), False
         self._flow = {"name": "addmed", "step": "name", "data": {},
                       "ts": time.time()}
         return ("Understood. New medication intake. First: what is "
@@ -3027,14 +3062,14 @@ class DoseVoice:
         if any(p in t for p in (" cancel ", " never mind ",
                                 " nevermind ", " stop ", " forget it ")):
             self._flow = None
-            return "Intake cancelled. Standing by, Pilot.", False
+            return "Intake cancelled. Standing by, Ryan.", False
 
         if flow["name"] == "correct":
             self._flow = None
             route = self._match_builtin(t)
             if route is None:
                 return ("I still do not recognize that instruction, "
-                        "Pilot. No changes made — we will try "
+                        "Ryan. No changes made — we will try "
                         "again another time."), False
             intent_id, arg = route
             prev = flow.get("prev") or {}
@@ -3098,7 +3133,7 @@ class DoseVoice:
         if step == "qty":
             q = words_to_number(raw)
             if not q or not (1 <= q <= 500):
-                return ("A number, Pilot. How many pills are in "
+                return ("A number, Ryan. How many pills are in "
                         "the bottle?"), True
             data["qty"] = q
             return self._addmed_after_qty(flow, data)
@@ -3106,7 +3141,7 @@ class DoseVoice:
         if step == "time":
             ts = parse_spoken_time(raw)
             if not ts:
-                return ("I need a time, Pilot. For example: "
+                return ("I need a time, Ryan. For example: "
                         "eight AM, or seven thirty PM."), True
             if self._ampm_explicit(raw):
                 data["time"] = ts
@@ -3126,7 +3161,7 @@ class DoseVoice:
                                       " night ", " afternoon ")):
                 data["time"] = clock + " PM"
             else:
-                return ("Morning or evening, Pilot? I never guess "
+                return ("Morning or evening, Ryan? I never guess "
                         "with medication times."), True
             data.pop("time_pending", None)
             flow["step"] = "confirm"
@@ -3145,17 +3180,17 @@ class DoseVoice:
                             f"{'s' if data['qty'] != 1 else ''} at "
                             f"{time_to_speech(data['time'])} daily. "
                             "Protocol two is watching it now, "
-                            "Pilot."), False
+                            "Ryan."), False
                 return ("Registration failed — the self-fill slot "
                         "may be occupied. Check the screen, "
-                        "Pilot."), False
+                        "Ryan."), False
             if any(p in t for p in (" no ", " nope ", " wrong ",
                                     " negative ", " start over ")):
                 flow["step"] = "name"
                 flow["data"] = {}
                 return ("Understood, we will start over. What is "
                         "the medication called?"), True
-            return "Yes to save, or no to start over, Pilot.", True
+            return "Yes to save, or no to start over, Ryan.", True
 
         self._flow = None
         return "Standing by.", False

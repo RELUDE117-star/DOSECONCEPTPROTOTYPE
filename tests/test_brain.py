@@ -91,7 +91,7 @@ ask("who are you", ("dose",))
 ask("what are your protocols", "protocol one", "protocol three")
 ask("tell me a joke", ("pill", "medication", "skeleton"))
 ask("thank you", ("welcome", "protocol", "here for"))
-ask("hello", ("pilot",))
+ask("hello", ("ryan",))
 ask("how are you", ("nominal", "operational", "functioning"))
 ask("help", "add a new medication")
 
