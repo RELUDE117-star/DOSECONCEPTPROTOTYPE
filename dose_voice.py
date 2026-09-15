@@ -358,36 +358,53 @@ class DoseVoice:
 
     def _unmute_alsa_inputs(self):
         """USB microphones AND speakers frequently arrive with their
-        ALSA volume at zero or muted — raise and unmute every capture
-        and playback control on every card. Harmless if already fine."""
+        ALSA capture volume at zero or the capture switch OFF — which
+        makes arecord record pure digital silence (the exact 'mic
+        never hears anything' failure). Brute-force EVERY control on
+        EVERY card to full, enabling capture, with several amixer
+        forms so a differently-named C-Media control can't be
+        missed. Harmless if already fine."""
         for card in range(6):
-            try:
-                out = subprocess.run(
-                    ["amixer", "-c", str(card), "scontrols"],
-                    capture_output=True, text=True, timeout=5,
-                    env=self._audio_env()).stdout
-            except Exception:
-                break
-            if not out:
+            self._max_capture(card)
+
+    def _max_capture(self, card):
+        """Force every control on one card to full & capturing."""
+        try:
+            out = subprocess.run(
+                ["amixer", "-c", str(card), "scontrols"],
+                capture_output=True, text=True, timeout=5,
+                env=self._audio_env()).stdout
+        except Exception:
+            return
+        if not out:
+            return
+        for line in out.splitlines():
+            m = re.search(r"'([^']+)'", line)
+            if not m:
                 continue
-            for line in out.splitlines():
-                m = re.search(r"'([^']+)'", line)
-                if not m:
-                    continue
-                name = m.group(1)
-                low = name.lower()
-                if any(k in low for k in ("mic", "capture", "input")):
-                    args = ["100%", "on", "cap"]
-                elif any(k in low for k in ("speaker", "master",
-                                            "pcm", "headphone")):
-                    args = ["90%", "on"]
-                else:
-                    continue
+            name = m.group(1)
+            low = name.lower()
+            playbackish = any(k in low for k in (
+                "speaker", "master", "headphone", "pcm", "output"))
+            # Try multiple forms; each is harmless if it doesn't apply.
+            # For anything that could be a capture control (i.e. not
+            # obviously a pure playback control) enable capture at 100%.
+            attempts = []
+            if not playbackish:
+                attempts += [
+                    ["100%", "cap", "unmute"],
+                    ["100%", "on", "cap"],
+                    ["cap"],
+                    ["100%", "unmute"],
+                ]
+            else:
+                attempts += [["90%", "unmute", "on"]]
+            for args in attempts:
                 try:
                     subprocess.run(
                         ["amixer", "-c", str(card), "sset", name]
-                        + args,
-                        capture_output=True, timeout=5)
+                        + args, capture_output=True, timeout=5,
+                        env=self._audio_env())
                 except Exception:
                     pass
 
@@ -875,6 +892,20 @@ class DoseVoice:
                          % (num, desc[:120],
                             "  <-- USB" if self._is_usb_name(desc)
                             else ""))
+            # the actual mixer controls + levels on this card, so we
+            # can see if a capture control is muted or at zero
+            try:
+                mx = subprocess.run(["amixer", "-c", str(num)],
+                                    capture_output=True, text=True,
+                                    timeout=6, env=env).stdout
+                for ml in (mx or "").splitlines():
+                    s = ml.strip()
+                    if (s.startswith("Simple mixer control")
+                            or "Capture" in s or "Mono:" in s
+                            or "Front Left:" in s or "Limits" in s):
+                        lines.append("   " + s[:110])
+            except Exception:
+                pass
         for cmd in (["systemctl", "--user", "is-active", "pipewire",
                      "pipewire-pulse", "wireplumber"],
                     ["arecord", "-l"],
@@ -1205,6 +1236,7 @@ class DoseVoice:
             falling back to 44.1 kHz then a direct 16 kHz. The 'plug'
             layer converts format/channels regardless."""
             dev = "plughw:%d,0" % card
+            self._max_capture(card)   # unmute + max this card's capture
             for rate in (48000, 44100, 16000):
                 cmd = ["arecord", "-D", dev, "-f", "S16_LE",
                        "-r", str(rate), "-c", "1", "-t", "raw",
