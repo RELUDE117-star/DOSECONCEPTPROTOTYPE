@@ -1354,9 +1354,9 @@ class DoseVoice:
             pass
 
     # ── audio input ───────────────────────────────────────────────────
-    # Warm, caring, protective — a gentle guardian who's glad to help.
-    ACKS = ("I'm right here.", "Yes — I'm listening.",
-            "Go ahead, I've got you.", "I'm here for you.")
+    # Comforting, warm, protective — a gentle guardian, softly reassuring.
+    ACKS = ("I'm right here with you.", "I'm listening, take your time.",
+            "Go ahead — I've got you.", "I'm here for you, always.")
 
     def _prime_speech(self):
         """Load Piper up front and pre-render the short acknowledgment
@@ -1988,25 +1988,38 @@ class DoseVoice:
         return self._piper_voice
 
     def _synth(self, voice, text, wav):
-        """Synthesize with a warm, gentle, caring delivery — a soft
-        female guardian: unhurried but natural, smooth and even, never
-        robotic-slow. This is an ORIGINAL voice character, not a copy
-        of any specific game/film character or its voice actor. Falls
-        back to the plain call on any Piper API difference."""
+        """Synthesize with an EXTREMELY COMFORTING delivery — a soft
+        female guardian: calm and unhurried, smooth and even, gentle
+        and reassuring, with a little extra space between phrases so it
+        feels soothing rather than rushed. This is an ORIGINAL voice
+        character, not a copy of any specific game/film character or
+        its voice actor. Falls back to the plain call on any Piper API
+        difference."""
         # Newer piper-tts: SynthesisConfig(length_scale, noise_scale,...)
         try:
             from piper import SynthesisConfig
-            cfg = SynthesisConfig(length_scale=1.06,   # gentle, natural
-                                  noise_scale=0.667,    # smooth warmth
-                                  noise_w_scale=0.80)
+            cfg = SynthesisConfig(length_scale=1.16,   # calm, unhurried
+                                  noise_scale=0.62,     # smooth, soft
+                                  noise_w_scale=0.75)
+            try:
+                cfg.sentence_silence = 0.35   # gentle pauses (if used)
+            except Exception:
+                pass
             voice.synthesize_wav(text, wav, syn_config=cfg)
             return
         except Exception:
             pass
         # Older piper-tts: keyword args
         try:
-            voice.synthesize_wav(text, wav, length_scale=1.06,
-                                 noise_scale=0.667, noise_w=0.80)
+            voice.synthesize_wav(text, wav, length_scale=1.16,
+                                 noise_scale=0.62, noise_w=0.75,
+                                 sentence_silence=0.35)
+            return
+        except Exception:
+            pass
+        try:
+            voice.synthesize_wav(text, wav, length_scale=1.16,
+                                 noise_scale=0.62, noise_w=0.75)
             return
         except Exception:
             pass
