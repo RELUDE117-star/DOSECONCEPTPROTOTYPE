@@ -222,6 +222,7 @@ class DoseVoice:
         self._force_reopen = False
         self._ptt_requested = False   # push-to-talk (hold Dose logo)
         self._pause_capture = False   # full self-test holds the devices
+        self._paused_ack = False      # capture loop released the device
         self._forced_card = None      # (card, device) the self-test found
         self._probe()
         self._probe_moonshine()
@@ -546,16 +547,37 @@ class DoseVoice:
         return found
 
     @staticmethod
-    def _rank_capture(desc):
-        """Speaker input endpoint LAST; known mic chip first; other
-        USB capture card next; anything else after."""
+    def _card_has_playback(card):
+        """True if this ALSA card also exposes a PLAYBACK device — i.e.
+        it's a speaker/headset (its capture side is likely a phantom
+        endpoint), not a pure microphone. A cheap USB speaker (HONKYOB
+        etc.) has playback; a real USB mic is capture-only."""
+        try:
+            for entry in os.listdir("/proc/asound/card%d" % card):
+                if entry.startswith("pcm") and entry.endswith("p"):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _rank_capture(desc, has_playback=False):
+        """Rank capture devices so the REAL mic wins:
+          0  capture-only device with a mic-ish name (best)
+          1  capture-only device (pure input = almost certainly a mic)
+          2  other USB capture device
+          3  device that ALSO plays back (a speaker/headset — its
+             'capture' is probably a phantom endpoint)
+          4  a device whose name looks like a pure speaker
+        A USB SPEAKER'S fake input can no longer be mistaken for the
+        mic."""
         if DoseVoice._looks_like_speaker(desc):
+            return 4
+        if has_playback:
             return 3
         if DoseVoice._looks_like_mic(desc):
             return 0
-        if DoseVoice._is_usb_name(desc):
-            return 1
-        return 2
+        return 1
 
     @staticmethod
     def _alsa_capture_cards():
@@ -567,8 +589,10 @@ class DoseVoice:
         arecord -D plughw:<card>,<device> at exactly it."""
         rec = DoseVoice._arecord_capture_cards()
         if rec:
-            rec.sort(key=lambda c: (DoseVoice._rank_capture(c[2]),
-                                    c[0]))
+            rec.sort(key=lambda c: (
+                DoseVoice._rank_capture(
+                    c[2], DoseVoice._card_has_playback(c[0])),
+                c[0]))
             return rec
         # fallback: kernel card list, assume device 0
         cards = {}
@@ -597,8 +621,10 @@ class DoseVoice:
                 has_cap = True
             if has_cap:
                 capture.append((num, 0, desc))
-        capture.sort(key=lambda c: (DoseVoice._rank_capture(c[2]),
-                                    c[0]))
+        capture.sort(key=lambda c: (
+            DoseVoice._rank_capture(
+                c[2], DoseVoice._card_has_playback(c[0])),
+            c[0]))
         return capture
 
     def _pa_refresh(self):
@@ -1082,7 +1108,13 @@ class DoseVoice:
                 report.append("$ %s -> %r" % (" ".join(cmd), e))
         # 2) pause the live capture so devices are free to test
         self._pause_capture = True
-        time.sleep(0.6)
+        # wait until the capture loop confirms it released the device
+        # (so the direct probe doesn't hit 'device busy')
+        for _ in range(30):
+            if getattr(self, "_paused_ack", False):
+                break
+            time.sleep(0.1)
+        time.sleep(0.4)
         best = None      # (rms, card, device, desc)
         try:
             cards = self._alsa_capture_cards()
@@ -1719,6 +1751,31 @@ class DoseVoice:
                     ("arecord %s" % tag.strip(),
                      (lambda c=card_num, d=dev_num: open_arecord(c, d)),
                      self._looks_like_speaker(desc)))
+            # TRUE SYSTEM DEFAULTS — route through whatever the Pi is
+            # configured to use (these go via ALSA's 'default'/PipeWire
+            # plugin, which on modern Pi OS is often the ONLY path that
+            # actually delivers audio when raw plughw fights PipeWire).
+            def arec(dev, name, ch=1):
+                return open_pipe_cmd(
+                    ["arecord", "-D", dev, "-f", "S16_LE", "-r",
+                     "48000", "-c", str(ch), "-t", "raw", "-q", "-"],
+                    name, native_rate=48000, channels=ch)
+            default_routes = [
+                ("arecord default", lambda: arec("default",
+                                                 "arecord default"),
+                 False),
+                ("arecord plughw default", lambda: arec(
+                    "plughw:CARD=default", "arecord plughw default"),
+                 False),
+            ]
+            for card_num, dev_num, desc in cap_cards:
+                default_routes.append(
+                    ("arecord sysdefault card %d" % card_num,
+                     (lambda cn=card_num: arec(
+                         "sysdefault:CARD=%d" % cn,
+                         "arecord sysdefault card %d" % cn)),
+                     self._looks_like_speaker(desc)))
+            routes += default_routes
             routes += [
                 ("system default (pw-record)", lambda: open_pipe_cmd(
                     ["pw-record", "--rate", "16000", "--channels",
@@ -1802,8 +1859,10 @@ class DoseVoice:
                 if stream is not None:
                     close_capture(stream)
                     stream = None
+                self._paused_ack = True   # device is now released
                 time.sleep(0.2)
                 continue
+            self._paused_ack = False
             if stream is None:
                 stream = open_capture()
                 last_audio = time.time()
