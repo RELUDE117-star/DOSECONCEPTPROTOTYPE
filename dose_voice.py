@@ -547,8 +547,15 @@ class DoseVoice:
     #    key terms is the measured fix for drug-name mishears
     #    ("liz and opera" -> Lisinopril). Loaded lazily; if the model
     #    can't be fetched we silently fall back to Whisper/Vosk.
+    # Moonshine BASE is the default, not tiny. Recognition now runs
+    # DURING the end-of-speech pause rather than after it (see the
+    # speculation in _listen_command), so base's extra accuracy costs
+    # almost nothing in wall-clock time — it finishes inside a pause
+    # the user is taking anyway. Tiny stays available for a slower
+    # board via DOSE_STT_ARCH.
     _MS_ARCHS = {"tiny": "TINY_STREAMING", "base": "BASE_STREAMING",
                  "small": "SMALL_STREAMING", "medium": "MEDIUM_STREAMING"}
+    STT_ARCH = os.environ.get("DOSE_STT_ARCH", "base")
 
     def _moonshine_v2(self):
         if getattr(self, "_ms_v2", "unset") != "unset":
@@ -556,8 +563,8 @@ class DoseVoice:
         self._ms_v2 = None
         try:
             import moonshine_voice as mv
-            arch_name = self._MS_ARCHS.get(
-                os.environ.get("DOSE_STT_ARCH", "tiny"), "TINY_STREAMING")
+            arch_name = self._MS_ARCHS.get(self.STT_ARCH,
+                                           "BASE_STREAMING")
             path, arch = mv.get_model_for_language(
                 "en", getattr(mv.ModelArch, arch_name))
             boost = float(os.environ.get("KEYTERM_BOOST", "5"))
@@ -1811,22 +1818,23 @@ class DoseVoice:
     def _prime_speech(self):
         """Load Piper up front and pre-render the short acknowledgment
         lines to wav files, so the reply to 'Hey Dose' starts as fast
-        as a person would answer. Cache files are keyed by a hash of
-        the line text, so changing a line regenerates its audio (no
-        stale wav played for new words)."""
+        as a person would answer.
+
+        These go through the SAME voice-keyed cache as everything else.
+        They used to be keyed on the line text alone, which meant a
+        clip rendered in an older voice was found on disk, reused, and
+        played forever — the acknowledgements are the first thing you
+        hear, so that was the one place an old voice could survive
+        every other cleanup. Now the voice is part of the key, so a
+        clip in any other voice simply cannot be selected."""
         try:
-            import hashlib
-            voice = self._load_piper()
-            cache = os.path.join(VOICE_DIR, "cache")
-            os.makedirs(cache, exist_ok=True)
+            self._purge_foreign_cache()
+            self._load_piper()
             self._ack_files = []
             for line in self.ACKS:
-                key = hashlib.md5(line.encode("utf-8")).hexdigest()[:10]
-                path = os.path.join(cache, "ack_%s.wav" % key)
-                if not os.path.exists(path):
-                    with wave.open(path, "wb") as w:
-                        self._synth(voice, line, w)
-                self._ack_files.append((line, path))
+                path = self.render_to_cache(line)
+                if path:
+                    self._ack_files.append((line, path))
         except Exception:
             self._ack_files = []
         # everything else she can say, rendered in the background
@@ -2034,8 +2042,9 @@ class DoseVoice:
         return [("checking models…", None, "")]
 
     def ensure_upgraded_models(self, tries=6):
-        """Download the free Moonshine speech model and the Kokoro/Piper
-        voice if missing, retrying with backoff. Safe to call anytime."""
+        """Download the two free on-device models if missing — her
+        Piper voice and the Moonshine recogniser — retrying with
+        backoff. Safe to call anytime."""
         if getattr(self, "_model_dl_running", False):
             return
         self._model_dl_running = True
@@ -2065,8 +2074,8 @@ class DoseVoice:
                 self._ms_v2 = "unset"
                 ms = self._moonshine_v2()
                 rows.append(("Speech", ms is not None,
-                             "moonshine base" if ms is not None
-                             else "downloading…"))
+                             "moonshine %s" % self.STT_ARCH
+                             if ms is not None else "downloading…"))
 
                 # 3) The live listener. This is NOT a competing
                 #    recogniser: it is what puts your words on the
@@ -3004,6 +3013,36 @@ class DoseVoice:
         d = os.path.join(VOICE_DIR, "cache")
         os.makedirs(d, exist_ok=True)
         return os.path.join(d, "say_%s.wav" % h)
+
+    def _purge_foreign_cache(self):
+        """Delete every pre-rendered clip that was not made in HER
+        voice. Belt and braces on top of the voice-keyed cache: this
+        runs at startup, compares a stamp against the voice actually
+        loaded, and wipes the whole cache if they differ. It means no
+        ordering mistake in an update — and no half-finished migration
+        — can leave a clip of an older voice on the device."""
+        try:
+            cache = os.path.join(VOICE_DIR, "cache")
+            os.makedirs(cache, exist_ok=True)
+            stamp = os.path.join(cache, ".voice")
+            now = os.path.basename(self._piper_path or "")
+            was = ""
+            try:
+                with open(stamp) as f:
+                    was = f.read().strip()
+            except Exception:
+                pass
+            if was != now:
+                for f in glob.glob(os.path.join(cache, "*.wav")):
+                    try:
+                        os.unlink(f)
+                    except Exception:
+                        pass
+                with open(stamp, "w") as f:
+                    f.write(now)
+                self._cache_purged = was or "(unstamped)"
+        except Exception:
+            pass
 
     def render_to_cache(self, text):
         """Render one sentence into the cache if it isn't there yet.

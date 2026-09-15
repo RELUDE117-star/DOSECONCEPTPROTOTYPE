@@ -85,19 +85,21 @@ ok(not os.listdir(os.path.join(d, "cache")),
 ok(os.path.exists(os.path.join(d, VOICE + ".onnx.json")),
    "her config file is kept")
 
-print("== 2. it NEVER leaves the station mute ==")
+print("== 2. her voice is fetched, and the fetch is retried ==")
+# Silence is the correct state while waiting — NOT the old voice.
 d = seed("en_US-amy-medium", cache=2)
 app()._retire_other_voices(d)
-ok(names(d) == [], "retire alone would remove Amy...")
-# ...which is why migrate_voice downloads FIRST and only then retires
+ok(names(d) == [],
+   "with only an old voice on disk, it is removed and nothing is left "
+   "to speak with (silent, never the wrong voice)")
 src = open(os.path.join(ROOT, "dose_app.py"), errors="ignore").read()
 mig = src.split("def migrate_voice")[1].split("def _voice_download_models")[0]
-ok(mig.index("_voice_download_models") > 0
-   and "if os.path.exists(mine):" in mig,
-   "migrate_voice retires ONLY when her voice is already on disk")
+ok("_voice_download_models(force=True)" in mig,
+   "a station without her voice downloads it")
+ok("_voice_dl_tries" in src, "and a failed download is retried")
 dl = src.split("HER VOICE — exactly one file")[1][:2000]
 ok(dl.index("_retire_other_voices") > dl.index("if os.path.exists(onx)"),
-   "and the downloader retires only after a successful download")
+   "the downloader tidies up only after a successful download")
 
 print("== 3. the migration is not gated on anything being missing ==")
 boot = src.split("Voice assistant (\"Hey Dose\")")[1][:900]
@@ -148,13 +150,115 @@ ok(gone == [], "nothing is reported removed when there is nothing to do")
 ok(len(os.listdir(os.path.join(d, "cache"))) == 3,
    "and the pre-rendered clips are NOT wiped every launch")
 
-print("== 7. one recogniser ==")
+print("== 7. AMY IS NEVER AUDIBLE — not even one sentence ==")
+# Three separate ways she could still be heard. All three are closed.
+
+# (a) the engine refuses to load a voice it doesn't recognise, so a
+#     station holding only Amy is SILENT rather than speaking as her
+probe = vsrc.split("HER voice, or none")[1][:700]
+ok('self.reason = "voice model missing"' in probe,
+   "with only Amy on disk the engine reports a MISSING voice...")
+after = vsrc.split("HER voice, or none")[1]
+ok(after.index("self.available = True") > after.index(
+    'self.reason = "voice model missing"'),
+   "...and never reaches available=True, so nothing is ever spoken")
+
+# (b) the pre-rendered clips. These are played straight from disk, so
+#     a clip rendered in her voice would be heard no matter what the
+#     engine decided. The cache key must include the voice FILE.
+ck = vsrc.split("def _cache_path")[1][:600]
+ok("self._piper_path" in ck,
+   "every cached clip is keyed by the voice file that made it")
+acks = vsrc.split("def _prerender")[1][:1600] if "def _prerender" in vsrc \
+    else vsrc.split("Load Piper up front")[1][:1600]
+ok("hashlib.md5" not in acks,
+   "the 'Hey Dose' acknowledgements no longer use a text-only key")
+ok("self.render_to_cache(line)" in acks,
+   "they go through the same voice-keyed cache as everything else")
+ok("_purge_foreign_cache" in acks,
+   "and a cache from another voice is purged before anything plays")
+
+# (c) belt and braces: a stamp file, so even a half-run migration
+#     cannot leave a clip of hers behind
+pf = vsrc.split("def _purge_foreign_cache")[1][:1200]
+ok('stamp' in pf and '"*.wav"' in pf,
+   "the clip cache is stamped with the voice that rendered it")
+ok("if was != now:" in pf,
+   "and every clip is deleted the moment that stamp doesn't match")
+
+# (d) she is deleted on sight, before any download
+mg = src.split("def migrate_voice")[1].split(
+    "def _voice_download_models")[0]
+ok(mg.index("_retire_other_voices") < mg.index("os.path.exists(mine)"),
+   "other voices are removed BEFORE checking whether hers is present")
+ok("ON SIGHT" in mg, "deliberately, not as a side effect")
+sh_seg = sh.split("One voice, always hers")[1][:900]
+ok("RETIRED=" in sh_seg and 'if [ -f "$VOICE_DIR/$V_NAME.onnx" ]; then'
+   not in sh_seg,
+   "the setup script deletes her unconditionally too")
+
+# and the end-to-end shape: Amy present, hers absent -> Amy gone
+d = seed("en_US-amy-medium", cache=5)
+app()._retire_other_voices(d)
+ok(names(d) == [],
+   "Amy is removed even when hers has not downloaded yet "
+   "(the station stays silent instead of speaking as her)")
+ok(not os.listdir(os.path.join(d, "cache")),
+   "and every clip she rendered goes with her")
+
+print("== 8. one recogniser ==")
 ok("faster_whisper" not in vsrc.replace("faster-whisper", ""),
    "faster-whisper is gone from the engine")
 ok("faster-whisper" not in sh, "and from the setup script")
 ok("faster_whisper" not in src.replace("faster-whisper", ""),
    "and from the app's dependency list")
 ok("moonshine" in vsrc.lower(), "Moonshine does the hearing")
+
+print("== 9. exactly ONE voice model is ever downloaded ==")
+# Pin the source. The voice is the HuggingFace Piper hfc_female
+# medium checkpoint and nothing else — chosen because on a Pi 4 it
+# synthesizes about 3x faster than real time (RTF ~0.15) while Kokoro
+# is ~0.48 and Amy is slower still. Speed here IS reliability: a voice
+# that renders faster than it plays can never fall behind mid-sentence.
+import re as _re                                           # noqa: E402
+
+URL_RX = r'''https?://[^\s"')]+'''
+
+for blob, who in ((src, "dose_app.py"), (sh, "DOSE.sh")):
+    # the URL is assembled from pieces, so check the pieces
+    ok(blob.count("piper-voices/resolve") == 1,
+       "%s builds exactly one Piper voice URL (found %d)"
+       % (who, blob.count("piper-voices/resolve")))
+    ok("huggingface.co/rhasspy/" in blob,
+       "%s: the voice comes from HuggingFace rhasspy/piper-voices"
+       % who)
+    ok(blob.count("hfc_female") >= 1
+       and not _re.search(r"en_US-(?!hfc_female)[a-z_]+-(low|medium|high)",
+                          blob),
+       "%s names no voice checkpoint other than hers" % who)
+    ok("/amy/" not in blob and "amy-medium" not in blob
+       and "amy-low" not in blob,
+       "%s downloads no Amy checkpoint" % who)
+    ok("kokoro" not in blob.lower(),
+       "%s downloads no Kokoro checkpoint" % who)
+
+ok("hfc_female/medium" in src and "hfc_female/medium" in sh,
+   "and it is specifically the hfc_female MEDIUM checkpoint")
+ok(da.DoseApp.VOICE_SUB == "en/en_US/hfc_female/medium",
+   "the app's path points at that checkpoint")
+ok(da.DoseApp.VOICE_NAME == dv.VOICE_NAME == "en_US-hfc_female-medium",
+   "app and engine agree on the file name")
+
+# the only OTHER model the station fetches is the live listener
+hosts = set()
+for blob in (src, sh):
+    for u in _re.findall(URL_RX, blob):
+        h = u.split("//", 1)[-1].split("/")[0].lower()
+        if any(k in u for k in ("model", "voice", ".zip", ".onnx")):
+            hosts.add(h)
+ok(hosts <= {"huggingface.co", "alphacephei.com"},
+   "models come from exactly two free hosts: her voice and the live "
+   "listener (found %s)" % ", ".join(sorted(hosts)))
 
 print()
 print("migration suite: %d passed, %d failed" % (PASSED, FAILED))

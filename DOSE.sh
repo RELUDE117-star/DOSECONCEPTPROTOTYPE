@@ -180,24 +180,23 @@ if [ ! -f "$VOICE_DIR/.bt_ready3" ]; then
     python3 -m pip install --break-system-packages --no-deps openwakeword==0.6.0 2>/dev/null \
         || python3 -m pip install --no-deps openwakeword==0.6.0 2>/dev/null || true
     python3 -m pip install --break-system-packages scipy scikit-learn tqdm 2>/dev/null || true
-    # Pre-download the free on-device models so first run is instant and
-    # fully offline afterwards: Moonshine STT + the Kokoro/Piper voice.
+    # Pre-download the ONE recogniser so first run is instant and fully
+    # offline afterwards. This must match the arch the app loads
+    # (BASE_STREAMING) or the first thing you say still pays for the
+    # download. The moonshine-voice TTS is deliberately NOT fetched:
+    # her voice is the Piper file below and there is no second
+    # synthesis engine to feed.
     python3 - <<'PYEOF' 2>/dev/null || true
+import os
 try:
     import moonshine_voice as mv
-    mv.get_model_for_language("en", mv.ModelArch.TINY_STREAMING)
-    print("  Moonshine speech model ready")
-except Exception as e:
-    print("  (Moonshine model will download on first run)")
-try:
-    import os
-    from moonshine_voice import TextToSpeech
-    TextToSpeech().language("en_us").voice(
-        os.environ.get("DOSE_VOICE",
-                       "piper_en_US-hfc_female-medium")).load()
-    print("  Voice model ready")
+    arch = {"tiny": "TINY_STREAMING", "base": "BASE_STREAMING",
+            "small": "SMALL_STREAMING", "medium": "MEDIUM_STREAMING"}.get(
+        os.environ.get("DOSE_STT_ARCH", "base"), "BASE_STREAMING")
+    mv.get_model_for_language("en", getattr(mv.ModelArch, arch))
+    print("  Moonshine speech model ready (%s)" % arch)
 except Exception:
-    print("  (voice model will download on first run)")
+    print("  (Moonshine model will download on first run)")
 PYEOF
     python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
         || python3 -m pip install useful-moonshine-onnx 2>/dev/null || true
@@ -328,20 +327,24 @@ fi
 # carrying an older voice looked complete and kept it forever. Here we
 # check by NAME, on every launch, and only ever delete once hers is
 # actually on disk.
+# Any other voice is deleted ON SIGHT, whether or not hers is here
+# yet. That is safe: the app refuses to speak in a voice it does not
+# recognise, so an old file is not a fallback that keeps the station
+# talking — it is dead weight. Silence until her voice arrives is the
+# intended behaviour.
 V_NAME="en_US-hfc_female-medium"
-if [ -f "$VOICE_DIR/$V_NAME.onnx" ]; then
-    RETIRED=""
-    for F in "$VOICE_DIR"/*.onnx "$VOICE_DIR"/*.onnx.json; do
-        [ -e "$F" ] || continue
-        case "$(basename "$F")" in
-            $V_NAME*) ;;
-            *) rm -f "$F"; RETIRED="yes" ;;
-        esac
-    done
-    if [ -n "$RETIRED" ]; then
-        echo "  Retired an older voice; she is the only one now."
-        rm -f "$VOICE_DIR"/cache/*.wav 2>/dev/null || true
-    fi
+RETIRED=""
+for F in "$VOICE_DIR"/*.onnx "$VOICE_DIR"/*.onnx.json; do
+    [ -e "$F" ] || continue
+    case "$(basename "$F")" in
+        $V_NAME*) ;;
+        *) rm -f "$F"; RETIRED="yes" ;;
+    esac
+done
+if [ -n "$RETIRED" ]; then
+    echo "  Retired an older voice; she is the only one now."
+    rm -f "$VOICE_DIR"/cache/*.wav 2>/dev/null || true
+    rm -f "$VOICE_DIR"/cache/.voice 2>/dev/null || true
 fi
 
 # ── Check for updates ──

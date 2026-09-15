@@ -4218,27 +4218,33 @@ class DoseApp:
         """Run on EVERY launch: make sure the station is using her
         voice and nothing else. Cheap when there is nothing to do —
         a directory listing — and it is the only thing that can rescue
-        a device already carrying an older voice."""
+        a device already carrying an older voice.
+
+        Any other voice is deleted ON SIGHT, before anything is
+        downloaded and whether or not hers is present yet. This is
+        safe because the engine will not speak in a voice it does not
+        recognise in the first place: the probe reports "voice model
+        missing" and the assistant never starts. So an old voice on
+        disk is not a fallback that keeps the station talking — it is
+        dead weight that can only cause confusion. The station is
+        silent until HER voice arrives, which is the intended
+        behaviour: better to say nothing than to say it in the wrong
+        voice."""
         import glob as _glob
         vdir = os.path.expanduser("~/dose-home-station/voice")
         if not os.path.isdir(vdir):
             return
         try:
             mine = os.path.join(vdir, self.VOICE_NAME + ".onnx")
-            others = [f for f in _glob.glob(os.path.join(vdir, "*.onnx"))
-                      if self.VOICE_NAME not in os.path.basename(f)]
+            gone = self._retire_other_voices(vdir)
+            if gone:
+                self._voice_migrated = gone
             if os.path.exists(mine):
-                if others:
-                    gone = self._retire_other_voices(vdir)
-                    self._voice_migrated = gone
+                if gone:
                     self._swap_voice_engine()
                 return
-            if others:
-                # an older voice is installed and hers is not: fetch
-                # hers, then retire the old one. Until that download
-                # lands the station keeps talking in the old voice
-                # rather than going silent.
-                self._voice_download_models(force=True)
+            # hers is not here yet — fetch her
+            self._voice_download_models(force=True)
         except Exception:
             pass
 
