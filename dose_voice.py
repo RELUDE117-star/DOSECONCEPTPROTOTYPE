@@ -1354,20 +1354,25 @@ class DoseVoice:
             pass
 
     # ── audio input ───────────────────────────────────────────────────
-    ACKS = ("Yes, Pilot?", "Standing by.", "Go ahead, Pilot.",
-            "I am listening.")
+    # Warm, caring, protective — a gentle guardian who's glad to help.
+    ACKS = ("I'm right here.", "Yes — I'm listening.",
+            "Go ahead, I've got you.", "I'm here for you.")
 
     def _prime_speech(self):
         """Load Piper up front and pre-render the short acknowledgment
         lines to wav files, so the reply to 'Hey Dose' starts as fast
-        as a person would answer."""
+        as a person would answer. Cache files are keyed by a hash of
+        the line text, so changing a line regenerates its audio (no
+        stale wav played for new words)."""
         try:
+            import hashlib
             voice = self._load_piper()
             cache = os.path.join(VOICE_DIR, "cache")
             os.makedirs(cache, exist_ok=True)
             self._ack_files = []
-            for i, line in enumerate(self.ACKS):
-                path = os.path.join(cache, "ack_%d.wav" % i)
+            for line in self.ACKS:
+                key = hashlib.md5(line.encode("utf-8")).hexdigest()[:10]
+                path = os.path.join(cache, "ack_%s.wav" % key)
                 if not os.path.exists(path):
                     with wave.open(path, "wb") as w:
                         self._synth(voice, line, w)
@@ -1983,25 +1988,25 @@ class DoseVoice:
         return self._piper_voice
 
     def _synth(self, voice, text, wav):
-        """Synthesize with a calm, measured, protective delivery — a
-        steady guardian-robot cadence (slightly slowed, even tone),
-        kept soft. This is an ORIGINAL voice character, not a copy of
-        any specific game/film character or its voice actor. Falls
+        """Synthesize with a warm, gentle, caring delivery — a soft
+        female guardian: unhurried but natural, smooth and even, never
+        robotic-slow. This is an ORIGINAL voice character, not a copy
+        of any specific game/film character or its voice actor. Falls
         back to the plain call on any Piper API difference."""
         # Newer piper-tts: SynthesisConfig(length_scale, noise_scale,...)
         try:
             from piper import SynthesisConfig
-            cfg = SynthesisConfig(length_scale=1.12,   # a touch slower
-                                  noise_scale=0.60,
-                                  noise_w_scale=0.70)
+            cfg = SynthesisConfig(length_scale=1.06,   # gentle, natural
+                                  noise_scale=0.667,    # smooth warmth
+                                  noise_w_scale=0.80)
             voice.synthesize_wav(text, wav, syn_config=cfg)
             return
         except Exception:
             pass
         # Older piper-tts: keyword args
         try:
-            voice.synthesize_wav(text, wav, length_scale=1.12,
-                                 noise_scale=0.60, noise_w=0.70)
+            voice.synthesize_wav(text, wav, length_scale=1.06,
+                                 noise_scale=0.667, noise_w=0.80)
             return
         except Exception:
             pass
