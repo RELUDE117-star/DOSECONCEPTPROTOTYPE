@@ -74,6 +74,9 @@ _PATTERNS = [
                          r"can i take .* with|pregnan\w*|dosage|overdos\w*|too much)\b"),
     ("unwell", r"\b(don'?t feel (well|good)|feel(ing)? (sick|dizzy|bad|awful)|dizzy|nause\w*|throwing up)\b"),
     ("taken_today", r"\b(what (have|did) i (already )?(taken|take|had)|what'?s been taken|taken today|"
+                    r"(did|have) i (already )?(take|taken|had) (my |the |all (of )?my )?"
+                    r"(medicines?|medications?|meds?|pills?|tablets?|doses?|everything)|"
+                    r"am i (up to date|caught up)|did i miss anything|"
                     r"my history)\b"),
     ("did_take", r"\b(did i (already )?take|have i (already )?taken|did i have|have i had)\b"),
     ("next_dose", r"\b(what'?s next|what is next|next (dose|pill|one|medication|med)|"
@@ -86,9 +89,9 @@ _PATTERNS = [
     ("dispense", r"\b(dispense|release|give me|i need my|can i (have|get)|time for my|ready for my|"
                  r"take my (pills?|meds?|medicine|medication|dose)|"
                  r"my (morning|evening|night|bedtime) (pills?|meds?|dose))\b"),
-    ("schedule", r"\b(what ((medications?|meds?|pills?|drugs?|doses?) )?(do|should) i "
+    ("schedule", r"\b(what ((medications?|medicines?|meds?|pills?|drugs?|doses?|tablets?) )?(do|should) i "
                  r"(need to )?(take|have)( today| this morning| tonight| now)?|"
-                 r"what are my (medications?|meds?|pills?)|what do i take|"
+                 r"what are my (medications?|medicines?|meds?|pills?)|what do i take|"
                  r"what am i (taking|on|due for)|what'?s due|what is due|"
                  r"anything (to take|due)|"
                  r"my schedule|today'?s (doses?|medications?|pills?))\b"),

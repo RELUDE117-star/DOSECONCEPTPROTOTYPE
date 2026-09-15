@@ -329,6 +329,121 @@ ok(dv.ENDPOINT_MAX_UTTERANCE <= 10,
    "and speech that never ends (a television) is cut at %.0f s"
    % dv.ENDPOINT_MAX_UTTERANCE)
 
+print("== 5c. the live listener may NOT cut the turn short ==")
+# The reported symptom: "what time is it" answered as "what time".
+# Vosk endpoints on any brief pause; that used to return immediately
+# and bypass the whole policy above. Its finals are now just more
+# transcript.
+
+
+class ChoppyRec:
+    """A listener that finalises MID-SENTENCE, the way Vosk does when
+    someone takes a breath between words."""
+
+    def __init__(self, chunks):
+        self.chunks = list(chunks)   # each finalises separately
+        self.i = 0
+        self.fired = 0
+
+    def AcceptWaveform(self, data):
+        # finalise after a few blocks, repeatedly
+        self.fired += 1
+        return self.fired % 4 == 0 and self.i < len(self.chunks)
+
+    def Result(self):
+        txt = self.chunks[self.i] if self.i < len(self.chunks) else ""
+        self.i += 1
+        return json.dumps({"text": txt})
+
+    def PartialResult(self):
+        nxt = self.chunks[self.i] if self.i < len(self.chunks) else ""
+        return json.dumps({"partial": nxt})
+
+    def FinalResult(self):
+        rest = " ".join(self.chunks[self.i:])
+        self.i = len(self.chunks)
+        return json.dumps({"text": rest})
+
+    def Reset(self):
+        pass
+
+
+class WholeUtteranceEngine(ListenEngine):
+    """Records the transcript the policy finally committed."""
+
+    def _better_transcribe(self, audio, hint):
+        self.calls.append(hint)
+        return hint          # whatever the listener accumulated
+
+
+def choppy_turn(chunks, speak_blocks=16, quiet=1.4):
+    e = WholeUtteranceEngine(recog_time=0.0)
+    e._med_names = lambda: ["Sertraline"]
+
+    def mic():
+        for _ in range(speak_blocks):
+            e._last_voice_ts = time.time()
+            e._audio_q.put(BLOCK)
+            time.sleep(0.02)
+        t = time.time()
+        while time.time() - t < quiet:
+            e._audio_q.put(BLOCK)
+            time.sleep(0.02)
+    threading.Thread(target=mic, daemon=True).start()
+    while e._last_voice_ts == 0.0:
+        time.sleep(0.005)
+    return e._listen_command(ChoppyRec(chunks), timeout=8)
+
+
+got = choppy_turn(["what time", "is it"])
+ok(got == "what time is it",
+   "a mid-sentence finalisation does NOT cut the turn — got %r" % got)
+
+got = choppy_turn(["how many", "sertraline", "do i have left"])
+ok(got == "how many sertraline do i have left",
+   "three chopped pieces are reassembled — got %r" % got)
+
+got = choppy_turn(["did i take", "my medicine", "today"])
+ok(got == "did i take my medicine today",
+   "and so are these — got %r" % got)
+
+print("== 5d. it holds a conversation, and lets you leave ==")
+DONE = ("im done", "I'm done talking", "that's all", "nothing else",
+        "goodbye", "never mind", "stop listening", "that's it")
+NOT_DONE = ("what time is it", "how many sertraline do i have left",
+            "im not sure", "that's all i take in the morning",
+            "did i take my medicine today", "bye the way what is next")
+conv = object.__new__(DoseVoice)
+for phrase in DONE:
+    ok(conv._is_done_talking(phrase), "ends on %r" % phrase)
+for phrase in NOT_DONE:
+    ok(not conv._is_done_talking(phrase),
+       "does NOT end on %r" % phrase)
+
+VSRC = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
+ex = VSRC.split("def _handle_exchange")[1].split("\n    def ")[0]
+ok("FOLLOWUP_TIMEOUT" in ex,
+   "the mic stays open for a follow-up after every answer")
+ok(dv.FOLLOWUP_TIMEOUT >= 5,
+   "for %.0f s — long enough to think of the next question"
+   % dv.FOLLOWUP_TIMEOUT)
+# she must finish speaking before listening resumes, or she hears
+# herself through the speaker
+ok(ex.index("self._speak(reply") < ex.index("self._drain(rec)")
+   < ex.index("self._listen_command"),
+   "she finishes speaking, the mic is cleared, THEN it listens again")
+ok("self._last_voice_ts = 0.0" in ex,
+   "and her own voice is not mistaken for the start of your next turn")
+ok("_is_done_talking" in ex, "saying you're done ends it")
+ok("_closed.is_set()" in ex, "so does a tap outside the panel")
+
+APPSRC = open(os.path.join(ROOT, "dose_app.py"), errors="ignore").read()
+click = APPSRC.split("def _on_canvas_click")[1].split("\n    def ")[0]
+ok("_voice_panel_box" in click and "_voice_dismiss" in click,
+   "the UI turns a tap outside the panel into a close")
+ok(click.index("_voice_state") < click.index("_click_zones"),
+   "and it is checked before any button underneath it")
+
 print("== 6. silence alone never invents an utterance ==")
 e = ListenEngine(recog_time=0.05)
 

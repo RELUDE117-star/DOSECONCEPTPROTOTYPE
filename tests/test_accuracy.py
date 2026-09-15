@@ -195,6 +195,155 @@ for n in ["no", "nope", "nah", "negative", "that's wrong", "incorrect"]:
 for y in ["yes", "yeah", "correct"]:
     ok(not nlu.is_no(y), "%r is not read as no" % y)
 
+print("== 10. getting around by voice ==")
+# Every screen answers to several names, because nobody knows ours.
+import os as _os                                            # noqa: E402
+import sys as _sys                                          # noqa: E402
+import tempfile as _tf                                      # noqa: E402
+_os.environ.setdefault("DOSE_VOICE_DIR", _tf.mkdtemp(prefix="dose_nav_"))
+from datetime import datetime as _dt                         # noqa: E402
+from dose_voice import DoseVoice                             # noqa: E402
+
+
+class _Root:
+    def after(self, _m, fn, *a):
+        fn(*a)
+
+
+class _App:
+    def __init__(self):
+        self.root = _Root()
+        self.nav_to = None
+        self.statuses = {}
+        self.med_data = {
+            "blue": {"name": "Sertraline", "loaded": True, "count": 28,
+                     "dose_times": ["8:00 AM"],
+                     "schedule_days": ["Mon", "Tue", "Wed", "Thu", "Fri",
+                                       "Sat", "Sun"]},
+            "yellow": {"name": "Atorvastatin", "loaded": True,
+                       "count": 30, "dose_times": ["9:00 PM"],
+                       "schedule_days": ["Mon", "Tue", "Wed", "Thu",
+                                         "Fri", "Sat", "Sun"]},
+            "demo": {"name": "Demo", "loaded": False, "count": 0}}
+        self._demo_registered = False
+
+    def _dose_due_map(self):
+        return {}
+
+    def _get_today_schedule(self):
+        n = _dt.now()
+        return [{"key": "blue", "name": "Sertraline", "time": "8:00 AM",
+                 "count": 28, "sort": n.replace(hour=8, minute=0)},
+                {"key": "yellow", "name": "Atorvastatin",
+                 "time": "9:00 PM", "count": 30,
+                 "sort": n.replace(hour=21, minute=0)}]
+
+    def _dose_status(self, k, t):
+        return self.statuses.get((k, t))
+
+    def _adherence_stats(self):
+        return {"score": 92, "on_time": 11, "late": 1, "missed": 0}
+
+    def _start_dispense(self, k):
+        raise AssertionError("voice must never dispense")
+
+    def _nav(self, m):
+        self.nav_to = m
+
+    def _save_med(self):
+        pass
+
+    def _draw_frame(self):
+        pass
+
+    def _med_info_for(self, n):
+        return ["Cholesterol (statin)", "Avoid grapefruit juice"]
+
+
+_app = _App()
+_v = object.__new__(DoseVoice)
+_v.app = _app
+_v._flow = None
+_v.state = "idle"
+_v._last_reply = ""
+_v._last_exchange = None
+_v._learn = _v._learn_load()
+
+
+def says(phrase):
+    _app.nav_to = None
+    reply, _ = _v.respond(phrase)
+    return reply, _app.nav_to
+
+
+NAV = [
+    ("go to settings", "settings"), ("open settings", "settings"),
+    ("take me to settings", "settings"), ("show me the settings page",
+                                          "settings"),
+    ("go to user", "user"), ("go to the user page", "user"),
+    ("open my profile", "user"), ("take me to my record", "user"),
+    ("go to my stats", "user"), ("show me my progress", "user"),
+    ("go to storage", "storage"), ("go to storage apps", "storage"),
+    ("open the storage page", "storage"),
+    ("go to the medication screen", "storage"),
+    ("show me my medicine cabinet", "storage"),
+    ("go home", "home"), ("open the home screen", "home"),
+    ("take me back to the main screen", "home"),
+]
+for phrase, want in NAV:
+    reply, went = says(phrase)
+    ok(went == want, "%-38r -> %s screen (got %s)"
+       % (phrase, want, went))
+
+print("== 11. asking about today, however you phrase it ==")
+TODAY = ["what medication do i need to take today",
+         "what medicine do i need to take today",
+         "what pills do i need to take today",
+         "what do i take today",
+         "which meds are due today",
+         "what medications do i have today"]
+for phrase in TODAY:
+    reply, _ = says(phrase)
+    ok("sertraline" in reply.lower() and "atorvastatin" in reply.lower(),
+       "%-42r lists the whole day" % phrase)
+
+print("== 12. 'did i take my medicine today' ==")
+# "medicine" is not a drug name — it means everything due today.
+_app.statuses.clear()
+for phrase in ("did i already take my medicine today",
+               "did i take my medication today",
+               "have i taken my pills today",
+               "am i caught up",
+               "did i miss anything"):
+    reply, _ = says(phrase)
+    ok("not yet" in reply.lower() or "still to take" in reply.lower(),
+       "%-40r -> what is outstanding" % phrase)
+    ok("could not find" not in reply.lower(),
+       "%-40r does not hunt for a drug called 'medicine'" % phrase)
+
+_app.statuses[("blue", "8:00 AM")] = "taken"
+reply, _ = says("did i take my medicine today")
+ok("sertraline" in reply.lower() and "atorvastatin" in reply.lower(),
+   "part-done says what IS logged and what is left: %r" % reply[:70])
+
+_app.statuses[("yellow", "9:00 PM")] = "taken"
+reply, _ = says("did i take my medicine today")
+ok("yes" in reply.lower() and "outstanding" in reply.lower(),
+   "all-done says so plainly: %r" % reply[:70])
+_app.statuses.clear()
+
+print("== 13. 'how do i take X' ==")
+for phrase in ("how do i take atorvastatin",
+               "how do i take my atorvastatin",
+               "how should i take atorvastatin",
+               "tell me about atorvastatin"):
+    reply, _ = says(phrase)
+    ok("grapefruit" in reply.lower(),
+       "%-38r reads the label back" % phrase)
+    ok("cannot give medical advice" in reply.lower()
+       or "pharmacist" in reply.lower(),
+       "%-38r still defers to the pharmacist" % phrase)
+
 print()
 print("accuracy suite: %d passed, %d failed" % (PASSED, FAILED))
 if FAILED:

@@ -107,6 +107,9 @@ SAMPLE_RATE = 16000
 BLOCK_SIZE = 2000          # 0.125 s per block — snappy wake response
 COMMAND_TIMEOUT = 9.0      # seconds of silence before giving up
 FLOW_TIMEOUT = 20.0        # per-question timeout in multi-turn flows
+# After an answer the microphone stays open this long for a follow-up,
+# so a conversation can continue without starting over every sentence.
+FOLLOWUP_TIMEOUT = float(os.environ.get("DOSE_FOLLOWUP_TIMEOUT", "8.0"))
 
 # ── VOICE / LATENCY ──────────────────────────────────────────────────
 # The station has to feel like a conversation, not like waiting on a
@@ -550,6 +553,9 @@ class DoseVoice:
         self.mic_card = None
         self.mic_rms = 0
         self._ack_files = []
+        # set when the user ends the conversation (tap outside the
+        # panel, or "I'm done talking")
+        self._closed = threading.Event()
         self._level_probe = None
         self._force_reopen = False
         self._ptt_requested = False   # push-to-talk (hold Dose logo)
@@ -2925,6 +2931,7 @@ class DoseVoice:
         buf = bytearray()
         heard = False
         speech_started = time.time()
+        final_parts = []      # what the live listener has finalised
         # speculation is keyed on the LAST MOMENT REAL SPEECH WAS HEARD,
         # not on the byte count: the buffer keeps growing with silence
         # while we wait, and trailing silence cannot change what was
@@ -2979,9 +2986,31 @@ class DoseVoice:
                 if len(buf) > SAMPLE_RATE * 2 * 30:   # 30 s hard cap
                     del buf[:len(buf) - SAMPLE_RATE * 2 * 30]
                 if rec.AcceptWaveform(data):
-                    text = json.loads(rec.Result()).get("text", "").strip()
-                    if text:
-                        return finish(buf, text)
+                    # The live listener thinks the utterance ended.
+                    # That is NOT a decision to answer.
+                    #
+                    # This used to return immediately, which meant the
+                    # whole endpointing policy below was bypassed
+                    # whenever the listener endpointed first — and it
+                    # does that on any brief pause. "What time ... is
+                    # it" was answered after "what time". It looks
+                    # exactly like a bad microphone, but the audio was
+                    # fine; the turn was simply cut.
+                    #
+                    # Its finals are now just more transcript. We keep
+                    # listening, and OUR policy decides when the person
+                    # has actually finished.
+                    done_part = json.loads(
+                        rec.Result()).get("text", "").strip()
+                    if done_part:
+                        final_parts.append(done_part)
+                        heard = True
+                        self._partial = " ".join(final_parts)
+                        self._set_ui_state("listening",
+                                           user_text=self._partial)
+                        if time.time() - speech_started \
+                                < ENDPOINT_MAX_UTTERANCE:
+                            deadline = max(deadline, time.time() + 4.0)
                 else:
                     partial = json.loads(
                         rec.PartialResult()).get("partial", "")
@@ -2989,8 +3018,13 @@ class DoseVoice:
                         if not heard:
                             speech_started = time.time()
                         heard = True
-                        self._partial = partial
-                        self._set_ui_state("listening", user_text=partial)
+                        # the running transcript is everything the
+                        # listener has finalised PLUS what it is
+                        # hearing right now
+                        self._partial = " ".join(
+                            final_parts + [partial]).strip()
+                        self._set_ui_state("listening",
+                                           user_text=self._partial)
                         # keep the turn open while they are still
                         # talking, but not indefinitely: a television
                         # never stops, and we must not listen forever
@@ -3013,16 +3047,21 @@ class DoseVoice:
             need = self._endpoint_wait(getattr(self, "_partial", ""))
             if (heard or lv) and quiet >= need:
                 try:
-                    text = json.loads(
+                    tail = json.loads(
                         rec.FinalResult()).get("text", "").strip()
                 except Exception:
-                    text = ""
+                    tail = ""
+                if tail:
+                    final_parts.append(tail)
+                text = " ".join(final_parts).strip()
                 got = finish(buf, text)
                 if got:
                     return got
                 # nothing recognisable — keep listening, don't re-fire
                 self._last_voice_ts = 0.0
                 spec = {}
+                final_parts = []
+                self._partial = ""
         return ""
 
     def _drain(self, rec):
@@ -3338,21 +3377,88 @@ class DoseVoice:
                     pass
 
     # ── the exchange ──────────────────────────────────────────────────
+    # Ways of saying "we're done here". Saying any of these ends the
+    # conversation immediately — as does tapping anywhere outside the
+    # panel, which the UI turns into a close request.
+    DONE_PHRASES = (
+        "im done", "i'm done", "im done talking", "that's all",
+        "thats all", "that is all", "nothing else", "no thanks",
+        "no thank you", "never mind", "nevermind", "stop listening",
+        "stop talking", "goodbye", "good bye", "bye", "thanks thats all",
+        "we're done", "were done", "all done", "that's it", "thats it",
+        "quiet", "be quiet", "cancel", "exit", "close",
+    )
+
+    def _is_done_talking(self, text):
+        """Did they just say the conversation is over?
+
+        Matched WHOLE, not as a prefix. "That's all" ends it; "that's
+        all I take in the morning" is a sentence about medication, and
+        "bye the way, what's next" is a mis-transcription of "by the
+        way" — neither should hang up on someone. Only trailing
+        politeness is ignored."""
+        t = " ".join((text or "").lower().replace("'", "").split())
+        if not t:
+            return False
+        words = t.split()
+        while words and words[-1] in ("please", "thanks", "thank", "you",
+                                      "now", "ok", "okay", "then"):
+            words.pop()
+        t = " ".join(words)
+        return t in {d.replace("'", "") for d in self.DONE_PHRASES}
+
     def _handle_exchange(self, rec, text):
-        """One full exchange; multi-turn flows keep the mic open."""
+        """A conversation, not a single question.
+
+        This used to answer once and stop unless a flow explicitly held
+        the mic open, so a follow-up question went nowhere — you had to
+        start again for every sentence. Now the mic stays open after
+        every answer and only closes when you say so, or when you stop
+        talking for a while.
+
+        It also waits for her to actually FINISH before listening
+        again. Without that she hears her own voice through the speaker
+        and answers herself."""
+        self._closed.clear()
         while True:
             self._set_ui_state("thinking", user_text=text)
             reply, keep_listening = self.respond(text)
             self._speak(reply, user_text=text)
-            if not keep_listening:
-                break
+
+            # she has stopped speaking; clear whatever the microphone
+            # picked up of her own voice before listening again
             self._drain(rec)
-            text = self._listen_command(rec, timeout=FLOW_TIMEOUT)
-            if not text:
-                self._flow = None
-                self._speak("No response received. Standing by, Ryan.")
+            self._last_voice_ts = 0.0
+
+            if self._closed.is_set():
                 break
+
+            # A flow (adding a medication) asks its own questions and
+            # gets the full flow timeout. Otherwise this is an open
+            # conversation: keep listening for a follow-up, but not
+            # forever.
+            wait = FLOW_TIMEOUT if keep_listening else FOLLOWUP_TIMEOUT
+            text = self._listen_command(rec, timeout=wait)
+
+            if not text:
+                if keep_listening:
+                    self._flow = None
+                    self._speak("Standing by, Ryan.")
+                break                      # silence simply ends it
+
+            if self._is_done_talking(text):
+                self._flow = None
+                self._speak("Okay, Ryan.")
+                break
+            if self._closed.is_set():
+                break
+        self._flow = None
         self._set_ui_state("idle")
+
+    def close_conversation(self):
+        """Called from the UI when the screen is tapped outside the
+        voice panel. Ends the conversation at the next safe point."""
+        self._closed.set()
 
     # ══════════════════════════════════════════════════════════════════
     #  LEARNING — corrections teach phrase→intent mappings and
@@ -3426,6 +3532,8 @@ class DoseVoice:
             return self._intent_med_info(arg)
         if intent_id == "adherence":
             return self._intent_adherence()
+        if intent_id == "taken_today":
+            return self._intent_taken_today()
         if intent_id == "taken_check":
             return self._intent_taken_check(arg)
         if intent_id == "dispense":
@@ -3469,10 +3577,29 @@ class DoseVoice:
                " have i been taking ", " track record ", " performance "):
             return ("adherence", None)
 
-        m = re.search(r"did i (?:already )?take (?:my |the )?([a-z ]+?)"
-                      r"(?: today| yet| already)? $", t)
+        # "did i take my MEDICINE today" is not a question about a drug
+        # called "medicine" — it means "have I taken everything I was
+        # supposed to". Generic words are caught first, so the drug
+        # matcher is never handed one to guess at.
+        GENERIC_MEDS = (
+            "medicine", "medicines", "medication", "medications",
+            "meds", "med", "pills", "pill", "tablets", "tablet",
+            "dose", "doses", "everything", "them all", "them", "it all",
+            "my stuff", "anything", "drugs",
+        )
+        m = re.search(r"(?:did|have) i (?:already )?(?:take|taken|had|have)"
+                      r" (?:my |the |any |all (?:of )?my )?([a-z ]+?)"
+                      r"(?: today| yet| already| this morning| tonight"
+                      r"| this evening)* $", t)
         if m:
-            return ("taken_check", m.group(1))
+            what = m.group(1).strip()
+            if what in GENERIC_MEDS:
+                return ("taken_today", None)
+            return ("taken_check", what)
+        if has(" did i take everything ", " have i taken everything ",
+               " am i up to date ", " am i caught up ",
+               " did i miss anything ", " have i missed anything "):
+            return ("taken_today", None)
 
         m = re.search(r"how many (?:pills? |tablets? )?(?:of )?"
                       r"([a-z ]+?)(?: pills| tablets)?"
@@ -3489,6 +3616,18 @@ class DoseVoice:
                " still need to take ", " still have to take ",
                " left for today ", " remain today ",
                " what pills do i still ", " more today "):
+            return ("remaining_today", None)
+
+        # Asking about TODAY is a question about the whole day, not
+        # just the next one. "What medication do I need to take today"
+        # used to fall through to the next-dose rule below and answer
+        # with one item — or with "nothing further" once the last one
+        # had passed, which is the opposite of helpful.
+        if re.search(r"\b(what|which)\b.*\b(take|taking|have|having|"
+                     r"need|due)\b.*\btoday\b", t) or \
+                has(" my doses today ", " doses for today ",
+                    " schedule for today ", " on my schedule today ",
+                    " todays medications ", " todays meds "):
             return ("remaining_today", None)
 
         if has(" take next ", " next dose ", " next medication ",
@@ -3514,13 +3653,48 @@ class DoseVoice:
                " todays date ", " today's date "):
             return ("date", None)
 
+        # ── SCREENS. "go to X", "open X", "take me to X", "show me
+        #    X", or just naming the screen. Every screen answers to
+        #    several names because people don't know ours: the user
+        #    screen is also "my profile", "my record", "my stats".
+        nav_m = re.search(
+            r"\b(?:go (?:back )?(?:to)?|open|show( me)?|"
+            r"take me (?:back )?to|get me (?:back )?to|bring up|"
+            r"pull up|switch to|jump to|navigate to|let'?s go to)\b"
+            r"(?: the| my| a)?\s+([a-z ]+?)\s*$", t)
+        nav_word = (nav_m.group(2).strip() if nav_m else "")
+        nav_word = re.sub(r"\b(screen|page|tab|menu|view|section|app|"
+                          r"apps)\b", " ", nav_word).strip()
+
+        SCREENS = (
+            ("home", ("home", "main", "front", "start", "dashboard")),
+            ("storage", ("storage", "medications", "medication",
+                         "meds", "medicine", "medicines", "bottles",
+                         "cabinet", "inventory", "supply", "pills")),
+            ("settings", ("settings", "setting", "options",
+                          "preferences", "config", "configuration",
+                          "setup", "system")),
+            ("user", ("user", "profile", "me", "my record", "record",
+                      "stats", "statistics", "adherence", "history",
+                      "progress", "account")),
+        )
+        if nav_word:
+            for screen, names in SCREENS:
+                if nav_word in names:
+                    return ("nav:" + screen, None)
+            for screen, names in SCREENS:
+                if any(n in nav_word for n in names):
+                    return ("nav:" + screen, None)
+
         if has(" go home ", " home screen ", " show home "):
             return ("nav:home", None)
         if has(" storage ", " my medications ", " my meds "):
             return ("nav:storage", None)
         if has(" settings "):
             return ("nav:settings", None)
-        if has(" my stats ", " user screen ", " show my adherence "):
+        if has(" my stats ", " user screen ", " show my adherence ",
+               " my profile ", " my record ", " my progress ",
+               " my history ", " my account "):
             return ("nav:user", None)
 
         # ── NLU FALLBACK: nothing above understood this. The
@@ -3534,7 +3708,7 @@ class DoseVoice:
             arg = nlu_i.med or ""
             mapping = {
                 "schedule": ("remaining_today", None),
-                "taken_today": ("adherence", None),
+                "taken_today": ("taken_today", None),
                 "next_dose": ("schedule", arg) if arg else ("next_dose", None),
                 "pills_left": ("count", arg),
                 "did_take": ("taken_check", arg),
@@ -3951,6 +4125,30 @@ class DoseVoice:
         lead = ("One dose remains today: " if len(pending) == 1 else
                 f"{len(pending)} doses remain today: ")
         return lead + "; ".join(parts) + ".", False
+
+    def _intent_taken_today(self):
+        """'Did I take my medicine today?' — the whole day, not one
+        drug. Answers with what IS logged and what is still waiting,
+        because "yes" alone is useless when three of four are done."""
+        entries = self._today_entries()
+        if not entries:
+            return ("Nothing is scheduled today, Ryan."), False
+        taken, pending = [], []
+        for e in entries:
+            status = self._ui(lambda e=e: self.app._dose_status(
+                e["key"], e["time"]))
+            (taken if status == "taken" else pending).append(e)
+        if not pending:
+            names = ", ".join(sorted({e["name"] for e in taken}))
+            return (f"Yes — everything today is logged: {names}. "
+                    "Nothing is outstanding, Ryan."), False
+        rest = "; ".join(f"{e['name']} at {e['time']}"
+                         for e in pending[:4])
+        if not taken:
+            return (f"Not yet, Ryan. Still to take today: {rest}."), False
+        done = ", ".join(sorted({e["name"] for e in taken}))
+        return (f"Partly — {done} is logged. Still to take: "
+                f"{rest}."), False
 
     def _intent_next_dose(self):
         due = self._ui(lambda: self.app._dose_due_map()) or {}

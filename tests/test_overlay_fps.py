@@ -129,7 +129,36 @@ for label, state in (("listening", "listening"),
        "%s has no frame spikes (p99 est. %.2f ms)"
        % (label, p99 * PI_FACTOR))
 
-print("== the scheduler targets 60 fps and can't cascade ==")
+print("== it appears instantly, and costs little to keep up ==")
+# The panel image used to be re-rendered every time the overlay
+# appeared: ~10 ms here, nearer 80 ms on a Pi, paid exactly when you
+# first spoke. It is built once at startup and reused.
+app._voice_overlay_update("idle")
+app.root.update()
+app._voice_panel_cache = {}
+app._voice_prerender_panel()
+ok(len(app._voice_panel_cache) >= 1,
+   "the panel is pre-rendered before it is ever needed")
+
+app._voice_sig = None
+t0 = time.perf_counter()
+app._voice_overlay_update("listening", "hello", "")
+app.root.update()
+warm = (time.perf_counter() - t0) * 1000
+ok(warm < 6.0,
+   "showing the panel costs %.2f ms with the image already built "
+   "(~%.0f ms projected on a Pi)" % (warm, warm * PI_FACTOR))
+print("    first show (pre-rendered): %.2f ms" % warm)
+
+ok(mod.DoseApp.WAVE_POINTS <= 28,
+   "the wave is %d points — Tk retessellates every one on every "
+   "redraw" % mod.DoseApp.WAVE_POINTS)
+line_cfg = app.canvas.itemconfigure(app._voice_items["w0"])
+ok(str(line_cfg["smooth"][-1]) in ("0", "false", "False"),
+   "and they are plain polylines, not splines Tk must smooth in "
+   "software every frame")
+
+print("== the scheduler adapts instead of cascading ==")
 delays = []
 app._voice_overlay_update("listening", "x", "")
 real_after = app.root.after
@@ -140,9 +169,26 @@ try:
 finally:
     app.root.after = real_after
 ok(delays, "the animation reschedules itself")
-ok(all(1 <= d <= 17 for d in delays),
-   "every scheduled delay is a 60 fps frame (%d-%d ms)"
-   % (min(delays), max(delays)))
+lo = 1000.0 / mod.DoseApp.VOICE_FPS
+hi = 1000.0 / mod.DoseApp.VOICE_FPS_MIN
+ok(all(1 <= d <= hi + 1 for d in delays),
+   "every scheduled delay is between %.0f and %.0f fps (%d-%d ms)"
+   % (mod.DoseApp.VOICE_FPS_MIN, mod.DoseApp.VOICE_FPS,
+      min(delays), max(delays)))
+ok(mod.DoseApp.VOICE_FPS_MIN >= 30,
+   "and the floor is %d fps — still smooth to the eye"
+   % mod.DoseApp.VOICE_FPS_MIN)
+# a machine that cannot hold the ceiling must settle, not thrash
+app._voice_frame_cost = 1.0
+app._voice_anim_tick()
+ok(getattr(app, "_voice_fps_now", 0) == mod.DoseApp.VOICE_FPS_MIN,
+   "an overloaded machine drops to a steady %d fps rather than "
+   "queueing frames it cannot draw" % mod.DoseApp.VOICE_FPS_MIN)
+app._voice_frame_cost = 0.0005
+app._voice_anim_tick()
+ok(getattr(app, "_voice_fps_now", 0) == mod.DoseApp.VOICE_FPS,
+   "and a machine that can keep up gets the full %d fps"
+   % mod.DoseApp.VOICE_FPS)
 
 # a slow frame must not push the whole animation back
 app._voice_overlay_update("listening", "x", "")

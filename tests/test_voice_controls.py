@@ -65,6 +65,21 @@ res = da.DoseApp._swap_voice_engine(app)
 ok(res is False, "failed swap reports failure")
 ok(app.voice is old, "failed swap KEEPS the working engine (never None)")
 
+print("== tap the logo once to talk — no holding ==")
+APPSRC = open(os.path.join(ROOT, "dose_app.py"), errors="ignore").read()
+rel = APPSRC.split("def _on_canvas_release")[1].split("\n    def ")[0]
+ok("_voice_push_to_talk" in rel,
+   "a QUICK TAP on the logo starts talking, not just a long hold")
+ok("_voice_dismiss" in rel,
+   "and tapping it again stops")
+ok(rel.index("_voice_state") < rel.index('self._nav("home")'),
+   "an active conversation is checked before Home navigation")
+ok('self.mode == "home"' in rel,
+   "from other screens the tap still navigates Home")
+press = APPSRC.split("def _on_canvas_press")[1].split("\n    def ")[0]
+ok("_home_longpress_fire" in press,
+   "holding it from any screen still works")
+
 print()
 print("voice-controls suite: %d passed, %d failed" % (P,F))
 if not F: print("=== HOLD-TO-TALK + MIC PICKER: ALL PASSED ===")

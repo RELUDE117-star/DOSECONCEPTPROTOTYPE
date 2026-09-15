@@ -658,6 +658,7 @@ class DoseApp:
         self._voice_items = {}
         self._voice_sig = None
         self._voice_shown = {}
+        self._voice_last_change = 0.0
         self._voice_imgs = {}
         self._voice_ov_t0 = 0.0
         # Screen changes are INSTANT. The fade code stays available —
@@ -754,6 +755,9 @@ class DoseApp:
             # when something is missing. A station carrying an older
             # voice looks perfectly healthy to the probe, which is
             # exactly how one kept the slow voice through an update.
+            # Build the panel image before it is ever needed, so the
+            # very first time the overlay appears it is already there.
+            self.root.after(400, self._voice_prerender_panel)
             self.root.after(900, self.migrate_voice)
             # install any NEW voice packages an update introduced,
             # and restore any companion module an old updater missed
@@ -846,6 +850,9 @@ class DoseApp:
     def _apply_theme(self):
         self._apply_theme_colors()
         self._img_cache.clear()
+        self._voice_panel_cache = {}
+        self._voice_fit_cache = {}
+        self._voice_sig = None
         self.root.configure(bg=self.theme["bg"])
         self.canvas.configure(bg=self.theme["bg"])
         self._draw_frame()
@@ -2569,7 +2576,13 @@ class DoseApp:
         self._voice_push_to_talk()
 
     def _voice_push_to_talk(self):
-        """Start the voice assistant listening on demand (hold-logo)."""
+        """Enter talking mode.
+
+        Not push-to-talk in the radio sense, despite the name: this
+        opens a CONVERSATION. Tap the Dose logo once (or hold it from
+        any screen) and it listens, answers, and keeps listening for
+        whatever you say next. It stops when you tap outside the
+        panel, tap the logo again, say you're done, or go quiet."""
         if self.voice and getattr(self.voice, "available", False):
             if self.voice.request_listen():
                 return
@@ -2594,7 +2607,18 @@ class DoseApp:
                 self.root.after_cancel(self._home_longpress_id)
                 self._home_longpress_id = None
             if not getattr(self, "_home_longpressed", False):
-                self._nav("home")   # quick tap → go Home as usual
+                # A QUICK TAP. You should not have to hold the logo
+                # down like a radio button to have a conversation —
+                # one tap puts it in talking mode and it stays there
+                # until you tap away or say you're done.
+                if self._voice_state != "idle":
+                    self._voice_dismiss()      # tap again to stop
+                elif self.mode == "home":
+                    # already Home, so navigating Home does nothing:
+                    # the tap means "listen to me"
+                    self._voice_push_to_talk()
+                else:
+                    self._nav("home")
             return
         if self.mode == "hold" and self.dispense_state == 2:
             if self.hold_start > 0:
@@ -2873,10 +2897,45 @@ class DoseApp:
     # ══════════════════════════════════════════════════════════════════════
     def _on_canvas_click(self, event):
         x, y = event.x, event.y
+        # A tap OUTSIDE the voice panel means "we're done here". It is
+        # the obvious gesture and it needs no words — the alternative
+        # was waiting out the follow-up timeout. A tap inside the panel
+        # is ignored so you can't dismiss it by aiming badly.
+        if self._voice_state != "idle":
+            box = self._voice_panel_box()
+            if box and not (box[0] <= x <= box[2] and box[1] <= y <= box[3]):
+                self._voice_dismiss()
+                return
         for (x1, y1, x2, y2, callback) in reversed(self._click_zones):
             if x1 <= x <= x2 and y1 <= y <= y2:
                 callback()
                 return
+
+    def _voice_panel_box(self):
+        """Where the voice panel is on screen right now, or None."""
+        try:
+            ids = self.canvas.find_withtag("voice_ov")
+            if not ids:
+                return None
+            boxes = [b for b in (self.canvas.bbox(i) for i in ids) if b]
+            if not boxes:
+                return None
+            return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                    max(b[2] for b in boxes), max(b[3] for b in boxes))
+        except Exception:
+            return None
+
+    def _voice_dismiss(self):
+        """End the conversation now: stop listening and take the panel
+        away. Safe to call whether or not the engine is running."""
+        try:
+            if self.voice is not None:
+                self.voice.close_conversation()
+        except Exception:
+            pass
+        self._voice_state = "idle"
+        self._voice_hide_at = 0.0          # no hold — they asked it to go
+        self._voice_finish_overlay()
 
     # ══════════════════════════════════════════════════════════════════════
     #  CLOCK TICK
@@ -5225,19 +5284,44 @@ class DoseApp:
             # finished sliding up — all you saw was a flash of the blue
             # wave. Hold it for a moment so it can actually be read,
             # then let the tick retire it.
+            # Measured from when the CURRENT content appeared, not
+            # from when the panel first opened. In a continuing
+            # conversation the panel may have been up for a while, and
+            # the last answer still deserves its moment on screen.
             self._voice_hide_at = max(
                 time.time(),
-                getattr(self, "_voice_ov_t0", 0) + VOICE_OVERLAY_MIN_S)
+                getattr(self, "_voice_last_change", 0)
+                + VOICE_OVERLAY_MIN_S)
             if not self._voice_anim_running:
                 self._voice_finish_overlay()
             return
         self._voice_hide_at = None
+        self._voice_last_change = time.time()
         if not self._voice_anim_running:
             self._voice_anim_running = True
             self._voice_ov_t0 = time.time()
             self._voice_next_frame = self._voice_ov_t0
             self._voice_sig = None
             self._voice_anim_tick()
+
+    def _voice_prerender_panel(self):
+        """Render the overlay's panel once, up front. It costs ~10 ms
+        here and nearer 80 ms on a Pi, and that was being paid the
+        first time you spoke — which is exactly when it is most
+        noticeable."""
+        try:
+            t = self.theme
+            cache = getattr(self, "_voice_panel_cache", None)
+            if cache is None:
+                cache = self._voice_panel_cache = {}
+            for bar_h in (124, 168):          # normal and in-conversation
+                key = (620, bar_h, t["card_bg"])
+                if key not in cache:
+                    cache[key] = ImageTk.PhotoImage(
+                        _pil_rounded_rect(620, bar_h, 20, t["card_bg"],
+                                          outline=DOSE_BLUE, outline_w=2))
+        except Exception:
+            pass
 
     def _voice_finish_overlay(self):
         self._voice_anim_running = False
@@ -5267,8 +5351,14 @@ class DoseApp:
         (DOSE_BLUE_LT, 0.72, 1.6, 1.9, 2),
         ("#8fd0ff", 0.45, 2.3, 4.1, 2),
     )
-    WAVE_POINTS = 44          # enough for a smooth ribbon, cheap to draw
-    VOICE_FPS = 60
+    # 24 points per ribbon, drawn as a plain polyline. It was 44 with
+    # smooth=True: Tk tessellates a spline through every point on EVERY
+    # redraw, in software, and on a Pi that is most of the frame. At
+    # this width 24 straight segments are indistinguishable from a
+    # curve, and cost about a third as much.
+    WAVE_POINTS = 24
+    VOICE_FPS = 60            # ceiling; the real rate adapts (see below)
+    VOICE_FPS_MIN = 30        # a steady 30 beats a stuttering 45
 
     def _voice_wave_coords(self, x, y, w, h, phase, amp,
                            a_mul, f_mul, p_off):
@@ -5327,15 +5417,25 @@ class DoseApp:
             c.delete("voice_ov")
             self._voice_imgs.clear()
             items = {}
-            bar_img = _pil_rounded_rect(bar_w, bar_h, 20, t["card_bg"],
-                                        outline=DOSE_BLUE, outline_w=2)
-            self._voice_imgs["bar"] = ImageTk.PhotoImage(bar_img)
+            # Rendering this rounded rectangle costs ~10 ms here and
+            # closer to 80 ms on a Pi — which was the whole "it takes a
+            # moment to pop up". It never changes, so it is built once
+            # and kept for the life of the app.
+            pkey = (bar_w, bar_h, t["card_bg"])
+            panel = getattr(self, "_voice_panel_cache", None)
+            if panel is None:
+                panel = self._voice_panel_cache = {}
+            if pkey not in panel:
+                panel[pkey] = ImageTk.PhotoImage(
+                    _pil_rounded_rect(bar_w, bar_h, 20, t["card_bg"],
+                                      outline=DOSE_BLUE, outline_w=2))
+            self._voice_imgs["bar"] = panel[pkey]
             items["bar"] = c.create_image(
                 0, 0, image=self._voice_imgs["bar"], anchor="nw",
                 tags="voice_ov")
             for i, (color, _a, _f, _p, lw) in enumerate(self.WAVE_LAYERS):
                 items["w%d" % i] = c.create_line(
-                    0, 0, 1, 1, fill=color, width=lw, smooth=True,
+                    0, 0, 1, 1, fill=color, width=lw,
                     capstyle="round", tags="voice_ov")
             items["top"] = c.create_text(
                 0, 0, text="", anchor="n", width=568,
@@ -5374,14 +5474,27 @@ class DoseApp:
         # it actually changes (itemconfigure forces a redraw).
         shown = self._voice_shown
         heard = self._voice_user_text
+
+        def fit(txt, font, budget):
+            """_fit_text measures glyphs through Tk, which is slow on a
+            Pi. The strings only change when the conversation moves on,
+            so the result is remembered."""
+            k = (txt, id(font), budget)
+            cache = getattr(self, "_voice_fit_cache", None)
+            if cache is None:
+                cache = self._voice_fit_cache = {}
+            if k not in cache:
+                if len(cache) > 64:
+                    cache.clear()
+                cache[k] = self._fit_text(txt, font, budget)
+            return cache[k]
         if in_convo:
             # a question is being asked: her question small, your
             # answer large, so you can check every word of it
-            top = (self._fit_text(self._voice_reply, self.font_small,
-                                  1120) if self._voice_reply else "")
+            top = (fit(self._voice_reply, self.font_small, 1120) if self._voice_reply else "")
             big = heard or ("Listening…"
                             if self._voice_state == "listening" else "…")
-            big = self._fit_text(big, self.font_name, 1100)
+            big = fit(big, self.font_name, 1100)
             top_style = (self.font_small, t["muted"])
             big_style = (self.font_name, DOSE_BLUE_LT)
             top_y, big_y = by + 14, by + 62
@@ -5392,7 +5505,7 @@ class DoseApp:
             # accurate one from the real recogniser, so you can see
             # exactly what it understood you to say.
             if heard:
-                top = '"%s"' % self._fit_text(heard, self.font_small, 1080)
+                top = '"%s"' % fit(heard, self.font_small, 1080)
                 top_style = (self.font_small, DOSE_BLUE_LT)
             elif self._voice_state == "listening":
                 top = "Listening…"
@@ -5401,8 +5514,7 @@ class DoseApp:
                 top = "…"
                 top_style = (self.font_small, t["muted"])
             if self._voice_state == "speaking" and self._voice_reply:
-                big = self._fit_text(self._voice_reply, self.font_small,
-                                     1180)
+                big = fit(self._voice_reply, self.font_small, 1180)
                 big_style = (self.font_small, t["fg"])
             elif self._voice_state == "thinking":
                 big = "…"
@@ -5427,7 +5539,20 @@ class DoseApp:
         # rather than trying to catch up in a burst, and if the clock
         # ever gets ahead of real time we pull it back, so a frame can
         # never be scheduled further out than one interval.
-        interval = 1.0 / self.VOICE_FPS
+        # Adaptive pacing. Asking a Pi for 60 fps of software-rendered
+        # canvas while it is also recognising speech and decoding QR
+        # codes does not produce 60 fps — it produces a backlog and a
+        # stutter. Measure what a frame actually costs and pick a rate
+        # the machine can hold: a steady 30 looks better than a ragged
+        # 45, and leaves the CPU for the things that matter.
+        cost = time.time() - now
+        avg = getattr(self, "_voice_frame_cost", cost) * 0.9 + cost * 0.1
+        self._voice_frame_cost = avg
+        fps = self.VOICE_FPS
+        if avg > 0.7 / self.VOICE_FPS:        # can't hold the ceiling
+            fps = self.VOICE_FPS_MIN
+        self._voice_fps_now = fps
+        interval = 1.0 / fps
         done = time.time()
         nxt = getattr(self, "_voice_next_frame", 0.0) + interval
         if not (done <= nxt <= done + interval):
