@@ -419,6 +419,63 @@ class DoseVoice:
                         env=self._audio_env())
                 except Exception:
                     pass
+        # Second pass by numid via 'amixer contents' — catches capture
+        # switches/volumes that name-based sset misses (the surest way
+        # to turn a capture control ON).
+        self._max_capture_by_numid(card)
+
+    def _max_capture_by_numid(self, card):
+        """Enable every CAPTURE-capable control by numid with cset."""
+        try:
+            out = subprocess.run(
+                ["amixer", "-c", str(card), "contents"],
+                capture_output=True, text=True, timeout=6,
+                env=self._audio_env()).stdout
+        except Exception:
+            return
+        numid = None
+        is_cap = False
+        is_bool = False
+        for line in (out or "").splitlines():
+            m = re.match(r"numid=(\d+)", line)
+            if m:
+                numid = m.group(1)
+                is_cap = False
+                is_bool = False
+                low = line.lower()
+                # capture controls are marked access=...capture or
+                # named with CAPTURE/Mic in the same numid line
+                if ("capture" in low or "'mic" in low
+                        or "input" in low):
+                    is_cap = True
+                if "type=boolean" in low:
+                    is_bool = True
+                continue
+            if numid is None:
+                continue
+            low = line.lower()
+            if "capture" in low or "mic" in low or "input" in low:
+                is_cap = True
+            if "type=boolean" in low:
+                is_bool = True
+            # once we hit the values line, act
+            if line.strip().startswith(": values=") and is_cap:
+                try:
+                    if is_bool:
+                        subprocess.run(
+                            ["amixer", "-c", str(card), "cset",
+                             "numid=" + numid, "on"],
+                            capture_output=True, timeout=5,
+                            env=self._audio_env())
+                    else:
+                        subprocess.run(
+                            ["amixer", "-c", str(card), "cset",
+                             "numid=" + numid, "100%"],
+                            capture_output=True, timeout=5,
+                            env=self._audio_env())
+                except Exception:
+                    pass
+                numid = None
 
     @staticmethod
     def _is_usb_name(name):
@@ -1423,10 +1480,13 @@ class DoseVoice:
                     continue
             return None
 
-        def open_pipe_cmd(cmd, name, native_rate=SAMPLE_RATE):
+        def open_pipe_cmd(cmd, name, native_rate=SAMPLE_RATE,
+                          channels=1):
             """One recorder subprocess (arecord / pw-record / parec)
             as a capture. native_rate tells ingest() what to resample
-            from when the recorder can't give us 16 kHz directly."""
+            from; channels=2 means the reader downmixes stereo to mono
+            by taking the LOUDER channel per block, so a USB mic wired
+            to only one channel is still captured at full level."""
             try:
                 p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL,
@@ -1440,43 +1500,55 @@ class DoseVoice:
             self._ratecv_state = None
 
             def reader(proc=p):
+                import audioop
                 while (proc.poll() is None
                        and not self._stop.is_set()):
                     try:
-                        data = proc.stdout.read(BLOCK_SIZE * 2)
+                        n = BLOCK_SIZE * 2 * (2 if channels == 2 else 1)
+                        data = proc.stdout.read(n)
                     except Exception:
                         break
                     if not data:
                         break
+                    if channels == 2:
+                        try:
+                            left = audioop.tomono(data, 2, 1, 0)
+                            right = audioop.tomono(data, 2, 0, 1)
+                            data = (left if audioop.rms(left, 2)
+                                    >= audioop.rms(right, 2) else right)
+                        except Exception:
+                            pass
                     ingest(data)
             threading.Thread(target=reader, daemon=True).start()
             self.mic_name = name
             return ("pipe", p)
 
         def open_arecord(card, device=0):
-            """Record straight off an ALSA capture device with arecord,
-            through the 'plug' layer so rate/format are auto-converted.
-            This is the documented USB-mic method and does NOT go
-            through PipeWire at all. Ships in alsa-utils.
-
-            Known Raspberry Pi issue: many cheap USB mics (C-Media
-            CM108, PCM2902) reject a 16 kHz capture rate ('cannot set
-            hw params'). So we record at the mic's native 48 kHz and
-            resample to 16 kHz in software (ingest handles it),
-            falling back to 44.1 kHz then a direct 16 kHz. The 'plug'
-            layer converts format/channels regardless."""
-            dev = "plughw:%d,%d" % (card, device)
+            """Record straight off an ALSA capture device with arecord.
+            Tries, in order, every combination that fixes the common
+            'records silence' cases on cheap USB mics (C-Media CM108,
+            PCM2902):
+              • plughw (rate/format converted) AND raw hw (some devices
+                deliver zeros through the plug layer at a wrong rate)
+              • native 48 k / 44.1 k / 16 k
+              • mono AND stereo (mic wired to one channel only)
+            The first combination that opens is used. Does NOT go
+            through PipeWire. Ships in alsa-utils."""
             self.mic_card = card      # remember for the mixer readout
             self._max_capture(card)   # unmute + max this card's capture
-            for rate in (48000, 44100, 16000):
-                cmd = ["arecord", "-D", dev, "-f", "S16_LE",
-                       "-r", str(rate), "-c", "1", "-t", "raw",
-                       "-q", "-"]
-                cap = open_pipe_cmd(
-                    cmd, "USB mic (arecord %s @%d)" % (dev, rate),
-                    native_rate=rate)
-                if cap:
-                    return cap
+            for base in ("plughw", "hw"):
+                dev = "%s:%d,%d" % (base, card, device)
+                for rate in (48000, 44100, 16000):
+                    for ch in (1, 2):
+                        cmd = ["arecord", "-D", dev, "-f", "S16_LE",
+                               "-r", str(rate), "-c", str(ch),
+                               "-t", "raw", "-q", "-"]
+                        cap = open_pipe_cmd(
+                            cmd,
+                            "mic arecord %s @%d %dch" % (dev, rate, ch),
+                            native_rate=rate, channels=ch)
+                        if cap:
+                            return cap
             return None
 
         def capture_is_live(seconds=1.4):
