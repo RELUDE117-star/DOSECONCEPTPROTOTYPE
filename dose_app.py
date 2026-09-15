@@ -1009,8 +1009,11 @@ class DoseApp:
         if self.dispense_state > 0:
             return
         self._hide_keyboard(save=True)
-        if self.mode == "timeedit":
-            self._te_commit()  # rail nav keeps schedule edits, like keyboard
+        # Save schedule edits on nav even if some async redraw/alert has
+        # changed the mode out from under the editor — the edit-in-
+        # progress flag, not the current mode, decides.
+        if self.mode == "timeedit" or getattr(self, "_te_active", False):
+            self._te_commit()
         if mode_key == self.mode:
             self._draw_frame()
             return
@@ -1428,6 +1431,7 @@ class DoseApp:
         self._te_times = [list(_parse_time12(ts)) for ts in times]
         self._te_sel = 0
         self._te_return = self.mode
+        self._te_active = True   # an edit is in progress until committed
         self.mode = "timeedit"
         self._draw_frame()
 
@@ -1622,6 +1626,9 @@ class DoseApp:
             self._draw_frame()
 
     def _te_commit(self):
+        if not getattr(self, "_te_active", False):
+            return   # nothing being edited — never write stale times
+        self._te_active = False
         times = sorted(self._te_times,
                        key=lambda hm: hm[0] * 60 + hm[1])
         time_strs = [_fmt_time12(h, m) for h, m in times]

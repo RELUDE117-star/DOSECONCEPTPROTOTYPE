@@ -5,6 +5,29 @@ import sys, os, traceback, importlib.util, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# DETERMINISTIC CLOCK: freeze "now" to a fixed mid-morning instant so
+# the app and the test sections always agree on the current time. The
+# suite sets dose_times to "now" to make doses due; without a frozen
+# clock, a real minute rolling over mid-check occasionally shifts a
+# dose out of its window and flakes a wall-clock-dependent assertion.
+# Installed before dose_app is imported so its `from datetime import
+# datetime` binds the frozen class too.
+import datetime as _dtmod
+_FIXED_NOW = _dtmod.datetime(2026, 1, 15, 10, 30, 0)
+
+
+class _FrozenDateTime(_dtmod.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return _FIXED_NOW if tz is None else _FIXED_NOW.replace(tzinfo=tz)
+
+    @classmethod
+    def today(cls):
+        return _FIXED_NOW
+
+
+_dtmod.datetime = _FrozenDateTime
+
 spec = importlib.util.spec_from_file_location('dose_app', 'dose_app.py')
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
@@ -255,6 +278,13 @@ def alert_flow():
     ts = mod._fmt_time12(now.hour, now.minute)
     app.med_data["red"].update({"loaded": True, "count": 5,
                                 "dose_times": [ts]})
+    # isolate red as the ONLY due dose: push every other med's
+    # schedule far outside the due window, so the alert can only be
+    # about red (earlier sections may have left other meds — e.g. a
+    # registered demo — scheduled near "now")
+    for _k, _md in app.med_data.items():
+        if _k != "red":
+            _md["dose_times"] = ["3:00 AM"]
     app.adherence = {"events": []}
     app._due_prev = set()
     app.mode = "home"
@@ -263,12 +293,22 @@ def alert_flow():
     assert app._alert_key == "red"
     app._alert_dismiss(); app.root.update()
     assert app.mode == "home" and not app._banner_dismissed
-    app._due_prev = set(); app.mode = "home"
-    due_check(); app.root.update()
+    # second cycle: reset the alert/dispense state cleanly so the
+    # takeover re-fires deterministically (no reliance on leftover
+    # state from the first cycle), and re-affirm red is dispensable
+    app._due_prev = set()
+    app._due_keys = {}
+    app._banner_dismissed = False
+    app.dispense_state = 0
+    app.mode = "home"
+    app.med_data["red"].update({"loaded": True, "count": 5,
+                                "dose_times": [ts]})
+    due_check()
     assert app.mode == "dosealert", (app.mode, app._due_keys,
                                      app._due_prev, app.dispense_state,
                                      app._alert_key)
-    app._alert_dispense(); app.root.update()
+    assert app._alert_key == "red", app._alert_key
+    app._alert_dispense()
     assert app.mode == "hold" and app.dispense_pill == "red", (
         app.mode, app.dispense_pill, app.dispense_state,
         app._alert_key, app._alert_return)
