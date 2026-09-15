@@ -727,6 +727,11 @@ class DoseApp:
         # ── Voice assistant ("Hey Dose") ───────────────────────────────
         if self.settings.get("voice_enabled", True):
             self._start_voice()
+            # Make sure she is the voice — on EVERY launch, not only
+            # when something is missing. A station carrying an older
+            # voice looks perfectly healthy to the probe, which is
+            # exactly how one kept the slow voice through an update.
+            self.root.after(900, self.migrate_voice)
             # install any NEW voice packages an update introduced,
             # and restore any companion module an old updater missed
             self.root.after(1200, self.heal_missing_modules)
@@ -3761,8 +3766,10 @@ class DoseApp:
         ("rapidfuzz", "rapidfuzz"),          # phonetic drug matching
         ("jellyfish", "jellyfish"),          # metaphone
         ("audioop", "audioop-lts"),          # py3.13 removed audioop
-        ("moonshine_voice", "moonshine-voice"),   # STT + Kokoro voice
-        ("faster_whisper", "faster-whisper"),
+        # the ONE recogniser. faster-whisper was removed: ~1 s per
+        # command on a Pi 4 against Moonshine's ~0.25 s, which is the
+        # entire latency budget spent on one step.
+        ("moonshine_voice", "moonshine-voice"),
     )
 
     def _swap_voice_engine(self):
@@ -3878,7 +3885,11 @@ class DoseApp:
 
         # ── voice models actually in use ──
         y += 6
-        line("VOICE MODELS IN USE", t["muted"])
+        line("MODELS IN USE", t["muted"])
+        gone = getattr(self, "_voice_migrated", None)
+        if gone:
+            line("   retired: %s" % ", ".join(
+                g.replace(".onnx", "") for g in gone)[:34], "#2ECC71")
         try:
             rows = self.voice.model_status() if self.voice else []
         except Exception:
@@ -4164,24 +4175,81 @@ class DoseApp:
         except Exception:
             self.voice = None
 
-    # Fast, free Piper voices, best first. The station only needs ONE;
-    # the list exists so a single bad path or a hiccup at one mirror
-    # can never leave the assistant with no voice at all. Every one of
-    # these is a warm female voice that runs faster than real time on
-    # a Pi 4. ("Amy" is deliberately absent — it was the slow one.)
-    VOICE_CANDIDATES = (
-        ("en_US-hfc_female-medium", "en/en_US/hfc_female/medium"),
-        ("en_US-lessac-medium", "en/en_US/lessac/medium"),
-        ("en_US-libritts_r-medium", "en/en_US/libritts_r/medium"),
-    )
+    # HER VOICE. One file. The station does not carry alternatives,
+    # because a station that answers in a different voice than the one
+    # it was built with is a bug, not a fallback.
+    VOICE_NAME = "en_US-hfc_female-medium"
+    VOICE_SUB = "en/en_US/hfc_female/medium"
+    # more than one mirror ref, so a single bad path can't block her
     VOICE_REFS = ("v1.0.0", "main")
 
-    def _voice_download_models(self):
+    def _retire_other_voices(self, vdir):
+        """Delete every voice that is not hers, plus any speech clip
+        rendered in one. Returns the names removed.
+
+        This has to be its own step because of how the last update
+        failed: the download and the cleanup both lived inside the
+        'voice model missing' branch, so a station that ALREADY had the
+        old Amy voice was considered fine and never ran either one. It
+        kept the slow voice forever. This runs regardless of whether
+        anything is missing."""
+        import glob as _glob
+        removed = []
+        keep = self.VOICE_NAME
+        for f in _glob.glob(os.path.join(vdir, "*.onnx")) + \
+                _glob.glob(os.path.join(vdir, "*.onnx.json")):
+            if keep in os.path.basename(f):
+                continue
+            try:
+                os.unlink(f)
+                removed.append(os.path.basename(f))
+            except Exception:
+                pass
+        if removed:
+            # clips rendered in the old voice would still play
+            for f in _glob.glob(os.path.join(vdir, "cache", "*.wav")):
+                try:
+                    os.unlink(f)
+                except Exception:
+                    pass
+        return removed
+
+    def migrate_voice(self):
+        """Run on EVERY launch: make sure the station is using her
+        voice and nothing else. Cheap when there is nothing to do —
+        a directory listing — and it is the only thing that can rescue
+        a device already carrying an older voice."""
+        import glob as _glob
+        vdir = os.path.expanduser("~/dose-home-station/voice")
+        if not os.path.isdir(vdir):
+            return
+        try:
+            mine = os.path.join(vdir, self.VOICE_NAME + ".onnx")
+            others = [f for f in _glob.glob(os.path.join(vdir, "*.onnx"))
+                      if self.VOICE_NAME not in os.path.basename(f)]
+            if os.path.exists(mine):
+                if others:
+                    gone = self._retire_other_voices(vdir)
+                    self._voice_migrated = gone
+                    self._swap_voice_engine()
+                return
+            if others:
+                # an older voice is installed and hers is not: fetch
+                # hers, then retire the old one. Until that download
+                # lands the station keeps talking in the old voice
+                # rather than going silent.
+                self._voice_download_models(force=True)
+        except Exception:
+            pass
+
+    def _voice_download_models(self, force=False):
         """Missing speech/voice models: fetch them ourselves in the
         background (Vosk small ~40 MB, the fast hfc_female voice
         ~60 MB), then start the assistant. Pi only, once per boot."""
         if getattr(self, "_voice_downloading", False):
             return
+        if force:
+            self._voice_dl_tries = 0
         if not hasattr(self, "_voice_dl_tries"):
             self._voice_dl_tries = 0
         on_pi = (os.path.exists("/boot/config.txt")
@@ -4236,52 +4304,34 @@ class DoseApp:
                 except Exception:
                     pass
 
-            # The local neural voice. hfc_female is the one we want: a
-            # warm, soft female voice that synthesizes about 3x FASTER
-            # than real time on a Pi 4, which is what keeps replies
-            # under a second. (The old "Amy" voice is deliberately gone
-            # — it was far slower here and was why replies dragged.)
-            #
-            # We try each candidate against each ref until one lands
-            # and VALIDATES, so a single bad path can never leave the
-            # station with no voice. ONNX files start with the
-            # protobuf tag 0x08.
-            have = [f for f in _glob.glob(os.path.join(vdir, "*.onnx"))
-                    if "amy" not in os.path.basename(f).lower()]
-            if not have:
-                for name, sub in self.VOICE_CANDIDATES:
-                    onx = os.path.join(vdir, name + ".onnx")
-                    done = False
-                    for ref in self.VOICE_REFS:
-                        base = ("https://huggingface.co/rhasspy/"
-                                "piper-voices/resolve/%s/%s/"
-                                % (ref, sub))
-                        if (fetch(base + name + ".onnx", onx,
-                                  10_000_000, magic=b"\x08")
-                                and fetch(base + name + ".onnx.json",
-                                          onx + ".json", 500,
-                                          magic=b"{")):
-                            done = True
-                            break
-                        for _p in (onx, onx + ".json"):
-                            try:
-                                os.unlink(_p)
-                            except Exception:
-                                pass
-                    if done:
+            # HER VOICE — exactly one file, fetched by name. If some
+            # other .onnx is sitting in the folder it does NOT count:
+            # the station must sound like itself. ONNX files start with
+            # the protobuf tag 0x08, which is how we tell a real model
+            # from a CDN error page.
+            onx = os.path.join(vdir, self.VOICE_NAME + ".onnx")
+            if not os.path.exists(onx):
+                for ref in self.VOICE_REFS:
+                    base = ("https://huggingface.co/rhasspy/"
+                            "piper-voices/resolve/%s/%s/"
+                            % (ref, self.VOICE_SUB))
+                    if (fetch(base + self.VOICE_NAME + ".onnx", onx,
+                              10_000_000, magic=b"\x08")
+                            and fetch(base + self.VOICE_NAME
+                                      + ".onnx.json",
+                                      onx + ".json", 500, magic=b"{")):
                         break
+                    for _p in (onx, onx + ".json"):
+                        try:
+                            os.unlink(_p)
+                        except Exception:
+                            pass
 
-            # Retire the slow voice from any station that already has
-            # it, so it can never be picked again — but only once a
-            # replacement is actually on disk, so we never take away
-            # the only voice the station has.
-            if [f for f in _glob.glob(os.path.join(vdir, "*.onnx"))
-                    if "amy" not in os.path.basename(f).lower()]:
-                for _old in _glob.glob(os.path.join(vdir, "*amy*")):
-                    try:
-                        os.unlink(_old)
-                    except Exception:
-                        pass
+            # Now that she is on disk, remove every other voice — and
+            # every clip pre-rendered in one. Ordering matters: we
+            # never take away the only voice the station has.
+            if os.path.exists(onx):
+                self._retire_other_voices(vdir)
 
             def finish():
                 self._voice_downloading = False
@@ -4341,7 +4391,7 @@ class DoseApp:
                             [sys.executable, "-m", "pip", "install",
                              "sounddevice", "vosk", "piper-tts", "qrcode", "audioop-lts",
                              "rapidfuzz", "jellyfish", "moonshine-voice",
-                             "faster-whisper", "useful-moonshine-onnx"],
+                             "useful-moonshine-onnx"],
                             capture_output=True, timeout=900, env=env)
                 except Exception:
                     pass

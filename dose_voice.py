@@ -119,7 +119,15 @@ FLOW_TIMEOUT = 20.0        # per-question timeout in multi-turn flows
 #     the reason replies dragged, so it is no longer used at all.
 #   * sentence-level streaming: the first sentence starts playing
 #     while the rest is still being rendered (see _speak).
-DEFAULT_VOICE = "piper_en_US-hfc_female-medium"
+# THE VOICE. One name, one file, one engine — deliberately.
+#
+# The station used to carry several: Piper "Amy" locally, plus Kokoro
+# and a second Piper through moonshine-voice. That was slower (Amy and
+# Kokoro are both slower than real time on a Pi 4) and less reliable
+# (whichever one happened to load first decided what she sounded like,
+# so the same device could answer in two different voices). There is
+# now exactly one, and nothing can substitute for it.
+VOICE_NAME = "en_US-hfc_female-medium"
 
 # Trailing silence that ends an utterance. 0.45 s is about where a
 # person naturally pauses between turns: short enough that the reply
@@ -152,8 +160,6 @@ which who why um uh er hmm like just some any every each no not
 """.split())
 HANGING_EXTRA = float(os.environ.get("DOSE_HANGING_EXTRA", "0.45"))
 
-# Local .onnx voice files, best (= fastest warm female) first.
-VOICE_PREFERENCE = ("hfc_female", "libritts_r", "kathleen", "lessac")
 
 # ── RASPBERRY PI 4B HARDWARE PROFILE ─────────────────────────────────
 # The Pi 4B is a BCM2711: four Cortex-A72 cores at 1.5 GHz sharing a
@@ -492,21 +498,19 @@ class DoseVoice:
         if not onnx:
             self.reason = "voice model missing"
             return
-        # Pick the FASTEST warm female voice available. hfc_female
-        # synthesizes at roughly RTF 0.15 on a Pi 4 (~3x faster than
-        # real time), so a one-sentence reply is ready in well under a
-        # second. Amy is deliberately excluded: it is markedly slower
-        # here and was the cause of the long pause before replies.
-        def _voice_rank(path):
-            n = os.path.basename(path).lower()
-            if "amy" in n:
-                return (9, n)          # never, unless nothing else
-            for i, want in enumerate(VOICE_PREFERENCE):
-                if want in n:
-                    return (i, n)
-            return (len(VOICE_PREFERENCE), n)
-        onnx.sort(key=_voice_rank)
-        self._piper_path = onnx[0]
+        # HER voice, or none. hfc_female synthesizes at roughly RTF
+        # 0.15 on a Pi 4 (~3x faster than real time), so a sentence is
+        # ready in well under a second. If some other .onnx is sitting
+        # in the folder we do NOT quietly use it — a station that
+        # answers in a different voice than the one it was built with
+        # is a bug, not a fallback. We say the voice is missing and
+        # fetch the right one.
+        want = [p for p in onnx
+                if VOICE_NAME in os.path.basename(p)]
+        if not want:
+            self.reason = "voice model missing"
+            return
+        self._piper_path = want[0]
 
         # A microphone counts if ANY layer can see one: PortAudio,
         # the PipeWire/Pulse source list, or the kernel's own card
@@ -613,28 +617,16 @@ class DoseVoice:
             return ""
 
     def _probe_moonshine(self):
-        """Stronger offline command recognizers, best first:
-        1. faster-whisper (OpenAI Whisper via CTranslate2) — the most
-           accurate open model that runs on a Pi. Loaded as the small
-           English model in int8 for ~1 s transcription of a short
-           command with greedy decoding.
-        2. Moonshine (Useful Sensors ONNX) — Whisper-class, very fast.
-        Vosk always does the instant always-on wake word; one of these
-        re-transcribes just the captured COMMAND for high accuracy.
-        Everything still works on Vosk alone if neither installs."""
-        self._whisper = None
-        try:
-            from faster_whisper import WhisperModel
-            size = os.environ.get("DOSE_WHISPER_SIZE", "base.en")
-            # int8 + a bounded thread count is what a Cortex-A72
-            # actually wants: the win is halved memory traffic, not an
-            # int8 MAC (ARMv8.0 has no dot-product instruction), so
-            # more threads past INFER_THREADS buy nothing.
-            self._whisper = WhisperModel(
-                size, device="cpu", compute_type="int8",
-                cpu_threads=INFER_THREADS, num_workers=1)
-        except Exception:
-            self._whisper = None
+        """ONE recogniser: Moonshine Base (Useful Sensors, MIT, ONNX).
+
+        faster-whisper used to run in front of it. It was removed: on a
+        Pi 4 it takes roughly a second on a short command, which is the
+        whole latency budget spent on the step that Moonshine does in
+        ~0.25 s at comparable accuracy for this vocabulary — especially
+        once the cabinet's own drug names are supplied as key terms.
+        Carrying both also meant two downloads, two failure modes, and
+        no way to tell which one had answered."""
+        self._whisper = None       # deliberately gone
         try:
             import moonshine_onnx
             self._moonshine = moonshine_onnx
@@ -660,36 +652,17 @@ class DoseVoice:
         return " ".join(text.split())
 
     def _better_transcribe(self, audio_bytes, vosk_text):
-        """Re-transcribe the captured command with the strongest model
-        available — faster-whisper first, then Moonshine — falling back
-        to the Vosk transcript on any problem."""
+        """Transcribe the captured command with Moonshine — the one
+        recogniser — falling back to the live listener's own transcript
+        if it is unavailable, so the station never goes deaf."""
         if not audio_bytes:
             return vosk_text
-        # 0) Moonshine v2 with THIS device's drug names as key terms —
-        #    the measured fix for medication-name mishears.
+        # Moonshine v2, with THIS device's drug names as key terms —
+        # the measured fix for medication-name mishears.
         ms = self._moonshine_transcribe(audio_bytes)
         if ms and not (_nlu_mod and _nlu_mod.looks_hallucinated(ms)):
             return ms
-        # 1) faster-whisper (most accurate general model)
-        if self._whisper is not None:
-            path = None
-            try:
-                path = self._write_wav(audio_bytes)
-                segs, _ = self._whisper.transcribe(
-                    path, language="en", beam_size=1,
-                    vad_filter=True, condition_on_previous_text=False)
-                text = self._clean_text(" ".join(s.text for s in segs))
-                if text:
-                    return text
-            except Exception:
-                pass
-            finally:
-                if path:
-                    try:
-                        os.unlink(path)
-                    except Exception:
-                        pass
-        # 2) Moonshine
+        # the same model through the plain ONNX package
         if self._moonshine is not None:
             path = None
             try:
@@ -1961,26 +1934,8 @@ class DoseVoice:
                 self._moonshine_transcribe(silence)
             except Exception:
                 pass
-            if self._whisper is not None:
-                path = None
-                try:
-                    path = self._write_wav(silence)
-                    list(self._whisper.transcribe(
-                        path, language="en", beam_size=1)[0])
-                except Exception:
-                    pass
-                finally:
-                    if path:
-                        try:
-                            os.unlink(path)
-                        except Exception:
-                            pass
             try:
                 self._load_piper()
-            except Exception:
-                pass
-            try:
-                self._ms_tts()
             except Exception:
                 pass
             self._warmed = True
@@ -2094,38 +2049,38 @@ class DoseVoice:
             for attempt in range(tries):
                 rows = []
 
-                # 1) Vosk (wake word / fallback recogniser) — local dir
-                vok = bool(self._vosk_dir and os.path.isdir(self._vosk_dir))
-                rows.append(("Speech (Vosk)", vok,
-                             os.path.basename(self._vosk_dir or "")
-                             if vok else "missing"))
+                # There are exactly TWO things on this device now, and
+                # they do different jobs — they are not alternatives to
+                # each other and nothing else is downloaded.
 
-                # 2) Piper voice file — local .onnx
+                # 1) HER VOICE — one Piper file, nothing substitutes.
                 pok = bool(self._piper_path
-                           and os.path.exists(self._piper_path))
-                rows.append(("Voice (Piper)", pok,
-                             os.path.basename(self._piper_path or "")
-                             if pok else "missing"))
+                           and os.path.exists(self._piper_path)
+                           and VOICE_NAME in os.path.basename(
+                               self._piper_path))
+                rows.append(("Voice", pok,
+                             VOICE_NAME if pok else "downloading…"))
 
-                # 3) Moonshine v2 streaming recogniser (free, MIT)
+                # 2) HEARING — Moonshine Base does the transcription.
                 self._ms_v2 = "unset"
                 ms = self._moonshine_v2()
-                rows.append(("Speech+ (Moonshine)", ms is not None,
-                             "ready" if ms is not None
+                rows.append(("Speech", ms is not None,
+                             "moonshine base" if ms is not None
                              else "downloading…"))
 
-                # 4) Kokoro / upgraded voice (free)
-                self._mstts = "unset"
-                tts = self._ms_tts()
-                want = os.environ.get("DOSE_VOICE", DEFAULT_VOICE)
-                rows.append(("Voice+ (%s)" % want, tts is not None,
-                             "ready" if tts is not None
-                             else "downloading…"))
+                # 3) The live listener. This is NOT a competing
+                #    recogniser: it is what puts your words on the
+                #    screen while you are still talking, and it is the
+                #    safety net that keeps the station from going deaf
+                #    if Moonshine is ever unavailable.
+                vok = bool(self._vosk_dir and os.path.isdir(self._vosk_dir))
+                rows.append(("Live listener", vok,
+                             "on-screen text" if vok else "missing"))
 
                 self._model_status = rows
                 if all(r[1] for r in rows):
-                    # everything present — re-render cached replies in
-                    # the upgraded voice, then stop retrying
+                    # everything present — re-render the cached replies
+                    # in her voice, then stop retrying
                     try:
                         self.prewarm_replies()
                     except Exception:
@@ -2925,58 +2880,11 @@ class DoseVoice:
             self._piper_voice = PiperVoice.load(self._piper_path)
         return self._piper_voice
 
-    # ── Upgraded voice engine (moonshine-voice TTS, MIT, on-device).
-    #    The default is hfc_female: a warm, soft female voice that runs
-    #    ~3x faster than real time on a Pi 4 (RTF ~0.15), which is what
-    #    makes replies feel conversational instead of delayed. Kokoro
-    #    (kokoro_af_heart) sounds slightly richer but is SLOWER than
-    #    real time on this hardware (RTF ~0.48) — it is still available
-    #    via DOSE_VOICE for anyone who prefers it over speed. Set
-    #    DOSE_VOICE="" to force the built-in Piper voice. All free.
-    def _ms_tts(self):
-        if getattr(self, "_mstts", "unset") != "unset":
-            return self._mstts
-        self._mstts = None
-        name = os.environ.get("DOSE_VOICE", DEFAULT_VOICE).strip()
-        if not name:
-            return None
-        try:
-            from moonshine_voice import TextToSpeech
-            tts = TextToSpeech().language("en_us").voice(name)
-            tts.load()
-            self._mstts = tts
-            self._mstts_name = name
-        except Exception:
-            self._mstts = None
-        return self._mstts
-
-    def _synth_moonshine(self, text, wav):
-        """Render with the upgraded voice into an open wave file.
-        Returns True on success."""
-        tts = self._ms_tts()
-        if tts is None:
-            return False
-        try:
-            import array
-            speed = float(os.environ.get("VOICE_SPEED", "1.0"))
-            try:
-                samples, sr = tts.synthesize(text, speed=speed)
-            except TypeError:
-                samples, sr = tts.synthesize(text)
-            pcm = array.array("h")
-            for f in samples:
-                v = int(max(-1.0, min(1.0, float(f))) * 32767)
-                pcm.append(v)
-            if not len(pcm):
-                return False
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(int(sr))
-            wav.writeframes(pcm.tobytes())
-            return True
-        except Exception:
-            return False
-
+    # ── There is no second synthesis engine. Kokoro and the
+    #    moonshine-voice TTS are gone: both were slower than real time
+    #    on a Pi 4, and having two engines meant the station could
+    #    answer in two different voices depending on which one loaded.
+    #    One voice, one engine, one file.
     def _synth(self, voice, text, wav):
         """Synthesize with an EXTREMELY COMFORTING delivery — a soft
         female guardian: calm and unhurried, smooth and even, gentle
@@ -2985,9 +2893,6 @@ class DoseVoice:
         character, not a copy of any specific game/film character or
         its voice actor. Falls back to the plain call on any Piper API
         difference."""
-        # Upgraded voice first (Kokoro/Piper via moonshine-voice)
-        if self._synth_moonshine(text, wav):
-            return
         # Newer piper-tts: SynthesisConfig(length_scale, noise_scale,...)
         try:
             from piper import SynthesisConfig
@@ -3094,8 +2999,7 @@ class DoseVoice:
         """Cache key includes the voice file and speed, so changing
         either regenerates the audio instead of playing a stale clip."""
         import hashlib
-        key = "%s|%s|%s" % (os.environ.get("DOSE_VOICE", DEFAULT_VOICE),
-                            os.path.basename(self._piper_path or ""), text)
+        key = "%s|%s" % (os.path.basename(self._piper_path or ""), text)
         h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
         d = os.path.join(VOICE_DIR, "cache")
         os.makedirs(d, exist_ok=True)

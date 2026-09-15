@@ -61,46 +61,41 @@ ok("voice-en-us-amy-low" not in APP_SRC,
    "app no longer downloads the Amy fallback")
 ok("en_US-amy-medium.onnx" not in SH_SRC,
    "setup script no longer downloads Amy")
-ok("*amy*" in APP_SRC and "*amy*" in SH_SRC,
-   "an existing Amy install is deleted from the device")
+ok("_retire_other_voices" in APP_SRC and "One voice, always hers"
+   in SH_SRC,
+   "an existing Amy install is deleted from the device "
+   "(see test_migration for the full check)")
 ok("hfc_female" in APP_SRC and "hfc_female" in SH_SRC,
    "the fast voice is downloaded instead")
 
-print("== 2. the fast voice is the default ==")
-ok(dv.DEFAULT_VOICE == "piper_en_US-hfc_female-medium",
-   "default voice is hfc_female (RTF ~0.15, ~3x real time)")
-ok('"kokoro_af_heart"' not in VOICE_SRC.replace(
-    "# ", ""), "kokoro is no longer the hard-coded default")
-ok("hfc_female" in dv.VOICE_PREFERENCE[0],
-   "local .onnx picker prefers the fast voice")
+print("== 2. there is ONE voice, and she is the fast one ==")
+ok(dv.VOICE_NAME == "en_US-hfc_female-medium",
+   "the voice is hfc_female (RTF ~0.15, ~3x real time)")
+ok("VOICE_PREFERENCE" not in VOICE_SRC,
+   "there is no list of alternative voices to fall back to")
+ok("_synth_moonshine" not in VOICE_SRC,
+   "and no second synthesis engine that could sound different")
 
 
 def pick(files):
-    """Run the real voice-file ranking over a set of filenames."""
+    """Run the real voice-file selection over a set of filenames.
+    Returns the chosen basename, or None for 'voice model missing'."""
     import glob as _g
     d = tempfile.mkdtemp()
     for f in files:
         open(os.path.join(d, f), "w").close()
     onnx = sorted(_g.glob(os.path.join(d, "*.onnx")))
-
-    def rank(path):
-        n = os.path.basename(path).lower()
-        if "amy" in n:
-            return (9, n)
-        for i, want in enumerate(dv.VOICE_PREFERENCE):
-            if want in n:
-                return (i, n)
-        return (len(dv.VOICE_PREFERENCE), n)
-    onnx.sort(key=rank)
-    return os.path.basename(onnx[0])
+    want = [p for p in onnx if dv.VOICE_NAME in os.path.basename(p)]
+    return os.path.basename(want[0]) if want else None
 
 
 ok(pick(["en_US-amy-medium.onnx", "en_US-hfc_female-medium.onnx"])
    == "en_US-hfc_female-medium.onnx",
-   "Amy is never chosen when the fast voice is present")
-ok(pick(["en_US-amy-low.onnx", "en_US-lessac-medium.onnx"])
-   == "en_US-lessac-medium.onnx",
-   "Amy is never chosen over any other voice")
+   "hers is chosen when Amy is also on disk")
+ok(pick(["en_US-amy-low.onnx", "en_US-lessac-medium.onnx"]) is None,
+   "no other voice is adopted — the station asks for hers instead")
+ok(pick(["en_US-hfc_female-medium.onnx"])
+   == "en_US-hfc_female-medium.onnx", "hers alone is fine")
 
 print("== 3. end-of-speech is cut conversationally ==")
 ok(0.35 <= dv.ENDPOINT_SILENCE <= 0.6,
@@ -300,10 +295,8 @@ ok(dv.INFER_THREADS == max(1, min(3, dv.CPU_CORES - 1)),
    % (dv.INFER_THREADS, dv.CPU_CORES))
 ok(os.environ.get("OMP_NUM_THREADS") == str(dv.INFER_THREADS),
    "the ONNX/BLAS runtimes honour that core budget")
-ok("cpu_threads=INFER_THREADS" in VOICE_SRC,
-   "faster-whisper is loaded with the Pi's core budget")
-ok('compute_type="int8"' in VOICE_SRC,
-   "int8 weights — the Cortex-A72 win is halved memory traffic")
+ok("faster_whisper" not in VOICE_SRC.replace("faster-whisper", ""),
+   "the slow recogniser is gone — Moonshine alone does the hearing")
 ok("TMP_AUDIO_DIR" in VOICE_SRC and "/dev/shm" in VOICE_SRC,
    "transient audio goes to RAM, not the SD card")
 ok('dir=TMP_AUDIO_DIR' in VOICE_SRC,

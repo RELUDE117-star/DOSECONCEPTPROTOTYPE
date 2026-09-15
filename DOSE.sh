@@ -176,7 +176,6 @@ if [ ! -f "$VOICE_DIR/.bt_ready3" ]; then
             || echo "  (could not install $PKG — continuing)"
     done
     # Optional stronger command recognizer (Moonshine, offline ONNX)
-    python3 -m pip install --break-system-packages faster-whisper 2>/dev/null || python3 -m pip install faster-whisper 2>/dev/null || true
     # openWakeWord: --no-deps skips tflite-runtime (we use onnxruntime)
     python3 -m pip install --break-system-packages --no-deps openwakeword==0.6.0 2>/dev/null \
         || python3 -m pip install --no-deps openwakeword==0.6.0 2>/dev/null || true
@@ -291,40 +290,26 @@ PYEOF2
         rm -f "$TMPZ"
     fi
 
-    # Neural voice: hfc_female — a soft, warm female voice that runs
-    # about 3x FASTER than real time on a Pi 4, which is what keeps
-    # replies conversational. The old "Amy" voice is gone: it was far
-    # slower on this hardware and was what made replies drag.
-    # Only ONE voice is needed. The list and the two refs exist so a
-    # single bad path or a hiccup at one mirror can never leave the
-    # station mute; each download is size-checked before it counts.
-    if ! ls "$VOICE_DIR"/*.onnx 2>/dev/null | grep -vi amy >/dev/null; then
+    # HER VOICE — hfc_female. One file, fetched by name. It runs
+    # about 3x faster than real time on a Pi 4, which is what keeps
+    # replies conversational. Two refs are tried so a single bad path
+    # at one mirror can't leave the station mute.
+    V_NAME="en_US-hfc_female-medium"
+    V_SUB="en/en_US/hfc_female/medium"
+    if [ ! -f "$VOICE_DIR/$V_NAME.onnx" ]; then
         echo "  Downloading the voice..."
-        for SPEC in "en_US-hfc_female-medium en/en_US/hfc_female/medium" \
-                    "en_US-lessac-medium en/en_US/lessac/medium" \
-                    "en_US-libritts_r-medium en/en_US/libritts_r/medium"; do
-            V_NAME=${SPEC%% *}; V_SUB=${SPEC##* }
-            for V_REF in v1.0.0 main; do
-                V_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/$V_REF/$V_SUB"
-                if curl -sSL -o "$VOICE_DIR/$V_NAME.onnx" "$V_BASE/$V_NAME.onnx" \
-                    && curl -sSL -o "$VOICE_DIR/$V_NAME.onnx.json" "$V_BASE/$V_NAME.onnx.json" \
-                    && [ "$(stat -c%s "$VOICE_DIR/$V_NAME.onnx" 2>/dev/null || echo 0)" -gt 10000000 ]; then
-                    echo "  Voice installed: $V_NAME (fast)."
-                    break 2
-                fi
-                rm -f "$VOICE_DIR/$V_NAME.onnx" "$VOICE_DIR/$V_NAME.onnx.json"
-            done
+        for V_REF in v1.0.0 main; do
+            V_BASE="https://huggingface.co/rhasspy/piper-voices/resolve/$V_REF/$V_SUB"
+            if curl -sSL -o "$VOICE_DIR/$V_NAME.onnx" "$V_BASE/$V_NAME.onnx" \
+                && curl -sSL -o "$VOICE_DIR/$V_NAME.onnx.json" "$V_BASE/$V_NAME.onnx.json" \
+                && [ "$(stat -c%s "$VOICE_DIR/$V_NAME.onnx" 2>/dev/null || echo 0)" -gt 10000000 ]; then
+                echo "  Voice installed: $V_NAME."
+                break
+            fi
+            rm -f "$VOICE_DIR/$V_NAME.onnx" "$VOICE_DIR/$V_NAME.onnx.json"
         done
-        ls "$VOICE_DIR"/*.onnx >/dev/null 2>&1 || \
+        [ -f "$VOICE_DIR/$V_NAME.onnx" ] || \
             echo "  (voice download failed — will retry next launch)"
-    fi
-
-    # Retire the slow voice if a previous install left it behind, along
-    # with the clips pre-rendered in it — but only once a replacement
-    # is actually on disk, so we never take away the only voice.
-    if ls "$VOICE_DIR"/*.onnx 2>/dev/null | grep -vi amy >/dev/null; then
-        rm -f "$VOICE_DIR"/*amy* 2>/dev/null || true
-        rm -f "$VOICE_DIR"/cache/*.wav 2>/dev/null || true
     fi
 
     # Mark ready only when both models are in place
@@ -334,6 +319,28 @@ PYEOF2
         echo "  Bluetooth (AirPods): pair via the Bluetooth icon in the"
         echo "  Pi menu bar; Dose picks up the default mic/speaker"
         echo "  automatically, including after reconnects."
+    fi
+fi
+
+# ── One voice, always hers ──
+# This deliberately sits OUTSIDE the "models are missing" block above.
+# That block is skipped whenever any .onnx is present, so a station
+# carrying an older voice looked complete and kept it forever. Here we
+# check by NAME, on every launch, and only ever delete once hers is
+# actually on disk.
+V_NAME="en_US-hfc_female-medium"
+if [ -f "$VOICE_DIR/$V_NAME.onnx" ]; then
+    RETIRED=""
+    for F in "$VOICE_DIR"/*.onnx "$VOICE_DIR"/*.onnx.json; do
+        [ -e "$F" ] || continue
+        case "$(basename "$F")" in
+            $V_NAME*) ;;
+            *) rm -f "$F"; RETIRED="yes" ;;
+        esac
+    done
+    if [ -n "$RETIRED" ]; then
+        echo "  Retired an older voice; she is the only one now."
+        rm -f "$VOICE_DIR"/cache/*.wav 2>/dev/null || true
     fi
 fi
 

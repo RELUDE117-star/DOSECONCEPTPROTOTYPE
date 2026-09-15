@@ -5,10 +5,12 @@ keys, no per-use billing, and no medication data leaving the device.
 This suite FAILS the build if anything paid or cloud-dependent creeps
 into the voice path, so the guarantee can't be broken by accident.
 
-Every model the station uses is free and runs on-device:
-  Vosk (Apache-2.0) · Moonshine (MIT) · Whisper via faster-whisper
-  (MIT weights, run locally) · Piper (MIT) · Kokoro (Apache-2.0) ·
-  openWakeWord (Apache-2.0)
+Every model the station uses is free and runs on-device. There are
+now exactly two, doing different jobs:
+  Moonshine Base (MIT) — hearing
+  Piper hfc_female (MIT) — her voice
+plus Vosk (Apache-2.0) as the live on-screen listener and deaf-proof
+fallback, and openWakeWord (Apache-2.0) as an optional wake word.
 """
 import os
 import re
@@ -79,7 +81,7 @@ for u in urls:
        "network target is a free host (found %s)" % host)
 
 # ── 5. Installers pull only free, open packages ──────────────────────
-for pkg in ("vosk", "piper-tts", "moonshine-voice", "faster-whisper",
+for pkg in ("vosk", "piper-tts", "moonshine-voice",
             "rapidfuzz", "jellyfish", "openwakeword"):
     ok(pkg in SETUP or pkg in APP, "installs free package %s" % pkg)
 ok("--api-key" not in SETUP and "GROQ" not in SETUP,

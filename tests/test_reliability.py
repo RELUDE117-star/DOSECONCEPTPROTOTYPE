@@ -323,20 +323,27 @@ ok(leaked <= 1, "12 replies leak no threads (delta %d)" % leaked)
 print("== 8. the station is never left without a voice ==")
 APP = open(os.path.join(ROOT, "dose_app.py"), errors="ignore").read()
 SH = open(os.path.join(ROOT, "DOSE.sh"), errors="ignore").read()
-ok("VOICE_CANDIDATES" in APP and len(
-    [c for c in APP.split("VOICE_CANDIDATES")[1].split(")")[0:6]]) > 1,
-   "several voices are tried, so one bad path can't mute the station")
-ok("VOICE_REFS" in APP, "and more than one mirror ref is tried")
+# There is ONE voice by design, so "never mute" cannot mean "fall
+# back to a different voice" — it means the download is retried and
+# the old voice is kept until hers actually lands.
+ok("VOICE_REFS" in APP and APP.count('"v1.0.0", "main"') >= 1,
+   "more than one mirror ref is tried for her voice")
 ok('magic=b"\\x08"' in APP,
    "a download is validated as a real ONNX, not an HTML error page")
 ok("doctype html" in APP.lower(),
    "an HTML error page is explicitly rejected")
-# Amy is only removed once a replacement is on disk
-seg = APP.split("Retire the slow voice")[1][:600]
-ok('"*.onnx"' in seg and "if [f for f" in seg,
-   "the old voice is deleted only once a replacement exists")
-ok("grep -vi amy" in SH,
+seg = APP.split("Now that she is on disk")[1][:400]
+ok("if os.path.exists(onx):" in seg,
+   "other voices are deleted only once hers is on disk")
+mig = APP.split("def migrate_voice")[1].split(
+    "def _voice_download_models")[0]
+ok("_voice_download_models(force=True)" in mig,
+   "a station with only an old voice downloads hers before anything "
+   "is removed")
+ok("One voice, always hers" in SH,
    "the setup script applies the same rule")
+ok("_voice_dl_tries" in APP,
+   "and a failed download is retried rather than giving up")
 
 print("== 9. the assistant still cannot dispense ==")
 
