@@ -1,9 +1,28 @@
 """Full-app audit: boot the real DoseApp under Xvfb and drive every
 screen, click zone, and flow. Any uncaught exception = a bug."""
-import sys, os, traceback, importlib.util, time
+import sys, os, traceback, importlib.util, time, tempfile, json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# ISOLATED, SEEDED STATE: run against a fresh temp HOME each time and
+# write a known med_data fixture, so the audit is fully deterministic
+# and never accumulates state across runs. (The app persists dispenses
+# to med_data.json; without isolation, repeated runs decrement counts
+# on disk until a dispense test eventually hits an empty pill.)
+_HOME = tempfile.mkdtemp(prefix="dose_audit_home_")
+os.environ["HOME"] = _HOME
+_APPDIR = os.path.join(_HOME, "dose-home-station")
+os.makedirs(_APPDIR, exist_ok=True)
+_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+_seed = {}
+for _k in ("blue", "red", "green", "yellow"):
+    _seed[_k] = {"name": _k.capitalize(), "count": 30, "loaded": True,
+                 "take_with": "", "schedule_time": "8:00 AM",
+                 "doses": [2], "times_per_day": 1,
+                 "schedule_days": list(_DAYS)}
+with open(os.path.join(_APPDIR, "med_data.json"), "w") as _f:
+    json.dump(_seed, _f)
 
 # DETERMINISTIC CLOCK: freeze "now" to a fixed mid-morning instant so
 # the app and the test sections always agree on the current time. The
@@ -76,6 +95,7 @@ def click_all_zones(mode):
     for (x1, y1, x2, y2, cb) in zones:
         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
         app._on_canvas_press(FakeEvent(cx, cy))
+        app._on_canvas_release(FakeEvent(cx, cy))  # full tap, not press-only
         app.root.update()
         if app.mode != mode:
             app._hide_keyboard(save=True)

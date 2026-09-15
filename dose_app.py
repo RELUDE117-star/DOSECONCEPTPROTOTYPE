@@ -916,9 +916,18 @@ class DoseApp:
             ly = y + 78
             c.create_text(lx, ly, text=label, font=self.font_rail,
                           fill=t["fg"], anchor="n")
+            # tiny hint that the logo doubles as push-to-talk
+            if mode_key == "home" and self.voice \
+                    and getattr(self.voice, "available", False):
+                c.create_text(lx, ly + 14, text="hold: talk",
+                              font=self.font_tiny,
+                              fill=t["muted"], anchor="n")
 
             self._click_zones.append((bx, y, bx + 72, y + 90,
                                       lambda mk=mode_key: self._nav(mk)))
+            if mode_key == "home":
+                # remember the logo rect for hold-to-talk detection
+                self._home_btn_rect = (bx, y, bx + 72, y + 90)
 
     def _draw_rail_icon(self, c, mode_key, bx, y, is_active):
         t = self.theme
@@ -2449,7 +2458,20 @@ class DoseApp:
         self.mode = self._prev_mode
         self._draw_frame()
 
+    def _cancel_home_longpress(self):
+        """Drop any pending hold-to-talk timer/state (a new, unrelated
+        interaction supersedes a half-finished press)."""
+        if getattr(self, "_home_longpress_id", None):
+            try:
+                self.root.after_cancel(self._home_longpress_id)
+            except Exception:
+                pass
+            self._home_longpress_id = None
+        self._home_press_active = False
+
     def _on_canvas_press(self, event):
+        # a fresh press cancels any stale hold-to-talk state
+        self._cancel_home_longpress()
         if self.mode == "hold" and self.dispense_state == 2:
             cx = CONTENT_W // 2
             cancel_x = cx - 80
@@ -2460,9 +2482,46 @@ class DoseApp:
                 self.hold_start = time.time()
                 self._hold_update()
             return
+        # HOLD THE DOSE LOGO to talk: press-and-hold the Home logo for
+        # ~0.7 s starts the voice assistant listening (no wake word).
+        # A quick tap still navigates Home (handled on release).
+        rect = getattr(self, "_home_btn_rect", None)
+        if rect and rect[0] <= event.x <= rect[2] \
+                and rect[1] <= event.y <= rect[3]:
+            self._home_longpressed = False
+            self._home_press_active = True
+            self._home_longpress_id = self.root.after(
+                700, self._home_longpress_fire)
+            return
         self._on_canvas_click(event)
 
+    def _home_longpress_fire(self):
+        self._home_longpress_id = None
+        if not getattr(self, "_home_press_active", False):
+            return
+        self._home_longpressed = True
+        self._voice_push_to_talk()
+
+    def _voice_push_to_talk(self):
+        """Start the voice assistant listening on demand (hold-logo)."""
+        if self.voice and self.voice.available:
+            started = self.voice.request_listen()
+            if started:
+                return
+        # voice not ready — jump to the audio screen so the user can
+        # see why (models installing, mic issue, etc.)
+        self._voice_row_tap()
+
     def _on_canvas_release(self, event):
+        # Dose-logo hold-to-talk: on release, decide tap vs. hold
+        if getattr(self, "_home_press_active", False):
+            self._home_press_active = False
+            if getattr(self, "_home_longpress_id", None):
+                self.root.after_cancel(self._home_longpress_id)
+                self._home_longpress_id = None
+            if not getattr(self, "_home_longpressed", False):
+                self._nav("home")   # quick tap → go Home as usual
+            return
         if self.mode == "hold" and self.dispense_state == 2:
             if self.hold_start > 0:
                 elapsed = time.time() - self.hold_start

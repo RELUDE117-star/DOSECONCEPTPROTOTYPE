@@ -219,7 +219,7 @@ class DoseVoice:
         self._ack_files = []
         self._level_probe = None
         self._force_reopen = False
-        self._force_reopen = False
+        self._ptt_requested = False   # push-to-talk (hold Dose logo)
         self._probe()
         self._probe_moonshine()
 
@@ -812,6 +812,15 @@ class DoseVoice:
         """Ask the capture loop to redo device selection now (used
         when the user picks a different microphone)."""
         self._force_reopen = True
+
+    def request_listen(self):
+        """Start a listening session right now without the wake word —
+        wired to holding the Dose logo. Returns True if the engine is
+        running and will listen, False if voice isn't available."""
+        if not self.available:
+            return False
+        self._ptt_requested = True
+        return True
 
     def _mic_pref(self):
         # Selection is fully automatic now — whatever is physically
@@ -1454,6 +1463,31 @@ class DoseVoice:
                 if stream is None:
                     time.sleep(3)
                     continue
+            # PUSH-TO-TALK: holding the Dose logo starts a listening
+            # session directly, no wake word needed — the reliable way
+            # in when "Hey Dose" isn't being detected.
+            if self._ptt_requested and self.state == "idle":
+                self._ptt_requested = False
+                self._drain(rec)
+                self._set_ui_state("listening")
+                acks = getattr(self, "_ack_files", [])
+                if acks:
+                    line, path = random.choice(acks)
+                    self._last_reply = line
+                    self._set_ui_state("speaking", reply_text=line)
+                    self._play_wav(path)
+                    self._set_ui_state("listening")
+                else:
+                    self._chime()
+                command = self._listen_command(rec)
+                if command:
+                    self._handle_exchange(rec, command)
+                else:
+                    self._speak("I didn't catch that, Pilot. "
+                                "Hold the logo and try again.")
+                    self._set_ui_state("idle")
+                self._drain(rec)
+                continue
             # Bluetooth drops: if no audio arrives for a while, the
             # capture likely died — redo the full selection (the
             # device may have reconnected on a different profile)
