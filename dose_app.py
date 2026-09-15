@@ -3759,6 +3759,7 @@ class DoseApp:
         self._prev_mode = self.mode
         self.mode = "sysinfo"
         self._draw_frame()
+        self._sysinfo_tick()
         # refresh the "what's on GitHub" column in the background
         if not getattr(self, "_sysinfo_busy", False):
             self._sysinfo_busy = True
@@ -3782,6 +3783,17 @@ class DoseApp:
                 except Exception:
                     pass
             threading.Thread(target=work, daemon=True).start()
+
+    def _sysinfo_tick(self):
+        """Keep the page live while it's open, so installs and model
+        downloads visibly progress instead of looking frozen."""
+        if self.mode != "sysinfo":
+            return
+        self._draw_frame()
+        try:
+            self.root.after(2000, self._sysinfo_tick)
+        except Exception:
+            pass
 
     def _close_sysinfo(self):
         self.mode = "settings"
@@ -3971,20 +3983,42 @@ class DoseApp:
 
         def worker():
             done, failed = [], []
-            for mod, pkg in missing:
+            total = len(missing)
+            for i, (mod, pkg) in enumerate(missing, 1):
+                # live progress so a long install never looks hung
+                def show(msg=None, _i=i, _p=pkg):
+                    self._deps_status = (msg or
+                                         "installing %s  (%d of %d)…"
+                                         % (_p, _i, total))
+                    if self.mode in ("sysinfo", "btaudio", "settings"):
+                        self._draw_frame()
+                try:
+                    self.root.after(0, show)
+                except Exception:
+                    pass
                 okpkg = False
+                t0 = time.time()
                 for args in (["--break-system-packages", pkg], [pkg]):
                     try:
                         r = subprocess.run(
                             [sys.executable, "-m", "pip", "install",
                              "--no-input"] + args,
-                            capture_output=True, text=True, timeout=900)
+                            capture_output=True, text=True, timeout=1800)
                         if r.returncode == 0:
                             okpkg = True
                             break
                     except Exception:
                         pass
+                secs = int(time.time() - t0)
                 (done if okpkg else failed).append(pkg)
+                try:
+                    self.root.after(
+                        0, show,
+                        "%s %s in %ds  (%d of %d)" %
+                        (pkg, "installed" if okpkg else "FAILED",
+                         secs, i, total))
+                except Exception:
+                    pass
             try:
                 __import__("importlib").invalidate_caches()
             except Exception:
