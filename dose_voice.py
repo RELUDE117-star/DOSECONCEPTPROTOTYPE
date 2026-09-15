@@ -215,6 +215,7 @@ class DoseVoice:
         self._moonshine = None       # optional stronger command STT
         self.mic_index = None
         self.mic_name = "default"
+        self.mic_card = None
         self.mic_rms = 0
         self._ack_files = []
         self._level_probe = None
@@ -917,6 +918,42 @@ class DoseVoice:
         when the user picks a different microphone)."""
         self._force_reopen = True
 
+    def mixer_summary(self):
+        """One-line state of the active mic card's capture controls:
+        e.g. 'Mic 100%[on] · Capture 0%[off]'. Reveals whether a
+        control is muted or at zero (software fix) vs. the mixer being
+        fine while the device is silent (hardware). '' if unknown."""
+        card = getattr(self, "mic_card", None)
+        if card is None:
+            return ""
+        cache = getattr(self, "_mix_cache", None)
+        if cache and cache[0] == card and time.time() - cache[1] < 1.0:
+            return cache[2]
+        try:
+            out = subprocess.run(["amixer", "-c", str(card)],
+                                 capture_output=True, text=True,
+                                 timeout=6, env=self._audio_env()).stdout
+        except Exception:
+            return ""
+        parts = []
+        name = None
+        for ln in (out or "").splitlines():
+            s = ln.strip()
+            m = re.match(r"Simple mixer control '([^']+)'", s)
+            if m:
+                name = m.group(1)
+                continue
+            if name and ("Capture" in s and "%" in s):
+                pm = re.search(r"\[(\d+)%\].*?\[(on|off)\]", s)
+                if pm and any(k in name.lower() for k in
+                              ("mic", "capture", "input", "adc")):
+                    parts.append("%s %s%%[%s]"
+                                 % (name, pm.group(1), pm.group(2)))
+                    name = None
+        summ = " · ".join(parts[:4])
+        self._mix_cache = (card, time.time(), summ)
+        return summ
+
     def request_listen(self):
         """Start a listening session right now without the wake word —
         wired to holding the Dose logo. Returns True if the engine is
@@ -1429,6 +1466,7 @@ class DoseVoice:
             falling back to 44.1 kHz then a direct 16 kHz. The 'plug'
             layer converts format/channels regardless."""
             dev = "plughw:%d,%d" % (card, device)
+            self.mic_card = card      # remember for the mixer readout
             self._max_capture(card)   # unmute + max this card's capture
             for rate in (48000, 44100, 16000):
                 cmd = ["arecord", "-D", dev, "-f", "S16_LE",

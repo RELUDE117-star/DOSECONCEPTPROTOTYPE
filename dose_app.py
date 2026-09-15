@@ -4259,6 +4259,17 @@ class DoseApp:
                       text=self._fit_text("Recording from: " + str(route),
                                           self.font_small, 556),
                       font=self.font_small, fill=DOSE_BLUE_LT, anchor="nw")
+        mix = ""
+        try:
+            mix = v.mixer_summary() if v else ""
+        except Exception:
+            mix = ""
+        if mix:
+            c.create_text(56, 96,
+                          text=self._fit_text("Capture mixer: " + mix,
+                                              self.font_tiny, 556),
+                          font=self.font_tiny, fill=t["muted"],
+                          anchor="nw")
 
         raw = getattr(self, "_meter_raw", 0)
         boost = getattr(self, "_meter_boost", 0)
