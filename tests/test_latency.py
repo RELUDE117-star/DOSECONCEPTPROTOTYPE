@@ -290,8 +290,9 @@ ok("_np.frombuffer" in VOICE_SRC,
    "PCM conversion is vectorised, not a per-sample Python loop")
 
 print("== 7. Raspberry Pi 4B hardware tuning ==")
-ok(dv.INFER_THREADS == max(1, min(3, dv.CPU_CORES - 1)),
-   "speech gets %d of %d cores — one is reserved for the screen"
+ok(dv.INFER_THREADS == max(1, min(2, dv.CPU_CORES - 2)),
+   "speech gets %d of %d cores — one reserved for the screen, one "
+   "for the QR camera (see test_qr_stability)"
    % (dv.INFER_THREADS, dv.CPU_CORES))
 ok(os.environ.get("OMP_NUM_THREADS") == str(dv.INFER_THREADS),
    "the ONNX/BLAS runtimes honour that core budget")

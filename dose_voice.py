@@ -189,8 +189,14 @@ def _pi_cores():
 
 
 CPU_CORES = _pi_cores()
-# leave one core for the UI, but never drop below one worker
-INFER_THREADS = max(1, min(3, CPU_CORES - 1))
+# TWO cores are reserved, not one: the touchscreen UI needs one, and
+# the CAMERA needs one. The QR decode runs in its own thread every
+# 0.2 s, and if speech recognition takes every remaining core those
+# decode passes get starved — which the station used to read as the
+# bottle being removed and put back, over and over, while nobody had
+# touched it. Speech is allowed to be a little slower; the camera is
+# watching someone's medication and must not be.
+INFER_THREADS = max(1, min(2, CPU_CORES - 2))
 
 for _var in ("OMP_NUM_THREADS", "ORT_NUM_THREADS",
              "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
@@ -2797,6 +2803,13 @@ class DoseVoice:
             box = {"voice_ts": voice_ts, "done": ev, "text": ""}
 
             def work():
+                # yield to the camera: a missed QR decode is worse
+                # than a few milliseconds of extra speech latency,
+                # and this work is speculative anyway
+                try:
+                    os.nice(5)
+                except Exception:
+                    pass
                 try:
                     box["text"] = self._better_transcribe(snapshot, hint)
                 except Exception:
@@ -3116,6 +3129,10 @@ class DoseVoice:
             done = [threading.Event() for _ in chunks]
 
             def render_rest():
+                try:
+                    os.nice(5)      # never at the camera's expense
+                except Exception:
+                    pass
                 # never let a synthesizer fault escape onto stderr —
                 # the fallback below handles it, and a traceback in the
                 # log looks like a crash when nothing actually broke

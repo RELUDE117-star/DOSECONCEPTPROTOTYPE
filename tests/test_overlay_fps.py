@@ -160,8 +160,13 @@ ok(delays2 and delays2[0] >= 1,
 print("== it stops cleanly ==")
 app._voice_overlay_update("idle")
 app.root.update()
-app._voice_anim_tick()
-app.root.update()
+# it is held briefly so a fast reply stays readable (see
+# test_overlay_live) — run past that window, then it must be gone
+deadline = time.time() + mod.VOICE_OVERLAY_MIN_S + 1.0
+while time.time() < deadline and app.canvas.find_withtag("voice_ov"):
+    app._voice_anim_tick()
+    app.root.update()
+    time.sleep(0.01)
 ok(not app.canvas.find_withtag("voice_ov"), "overlay is removed")
 ok(not app._voice_items, "canvas item handles are released")
 ok(not app._voice_imgs, "images are released")

@@ -85,6 +85,23 @@ SPIN_TIME = 4.0
 DISPENSED_TIME = 4.0
 DEFAULT_QTY = 30
 QR_PRESENCE_TIMEOUT = 2.5   # removal shows within ~2.5s of pickup
+# A bottle counts as REMOVED only after this many completed scan passes
+# in a row that did not see its code — never on elapsed time alone.
+# At the camera's ~0.2 s cadence that is about 1.6 s of real scanning.
+#
+# Elapsed time is the wrong measure because it cannot tell "the bottle
+# is gone" apart from "the camera thread didn't get to run". When the
+# Pi is busy — speech recognition during a conversation is the obvious
+# case — decode passes get starved, the old 2.5 s window lapsed, and
+# the station announced a removal and then a replacement, over and
+# over, while nothing had been touched.
+QR_MISS_LIMIT = 8
+# How long the voice panel stays on screen at minimum, so a fast reply
+# is still readable instead of a flicker.
+VOICE_OVERLAY_MIN_S = 1.8
+# If the camera hasn't completed a pass in this long it is stalled, not
+# empty: presence freezes rather than expiring.
+QR_SCAN_STALL = 1.5
 ALL_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 DAY_LABELS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
 
@@ -659,6 +676,12 @@ class DoseApp:
         self._anim_running = False
         self._prev_qr_present = {k: False for k in SLOT_KEYS}
         self._prev_qr_present["demo"] = False
+        # consecutive completed scan passes that did NOT see each code
+        self._qr_miss = {k: QR_MISS_LIMIT for k in SLOT_KEYS}
+        self._qr_miss["demo"] = QR_MISS_LIMIT
+        self._qr_held = {k: False for k in SLOT_KEYS}
+        self._qr_held["demo"] = False
+        self._qr_last_scan = 0.0
         self._prev_mode = "home"
         self._kbd_shift = False
 
@@ -829,7 +852,24 @@ class DoseApp:
 
     # ── QR Presence ────────────────────────────────────────────────────────
     def _is_qr_present(self, key):
-        return (time.time() - self.qr_last_seen.get(key, 0)) < QR_PRESENCE_TIMEOUT
+        """Is this bottle in the unit right now?
+
+        Answered from COMPLETED SCAN PASSES, not from elapsed time. A
+        slot is absent only once the camera has actually looked for it
+        and not found it QR_MISS_LIMIT times running. If the camera is
+        stalled or stopped, the last known answer stands — a busy CPU
+        must never be reported as someone removing their medication."""
+        if not getattr(self, "camera_running", False):
+            return self._qr_held.get(key, False)
+        since_scan = time.time() - getattr(self, "_qr_last_scan", 0.0)
+        if since_scan > QR_SCAN_STALL:
+            # the camera isn't keeping up — hold, don't guess
+            return self._qr_held.get(key, False)
+        present = (self._qr_miss.get(key, QR_MISS_LIMIT) < QR_MISS_LIMIT
+                   and (time.time() - self.qr_last_seen.get(key, 0))
+                   < QR_PRESENCE_TIMEOUT)
+        self._qr_held[key] = present
+        return present
 
     # ══════════════════════════════════════════════════════════════════════
     #  MASTER DRAW
@@ -3490,18 +3530,21 @@ class DoseApp:
                 self._camera_frame = pil_img
                 self._camera_qr_results = list(results) if results else []
 
-                if results:
-                    seen_data = set()
-                    qr_with_pos = []
-                    for r in results:
-                        text = r.data.decode("utf-8", errors="ignore").strip()
-                        if text in seen_data:
-                            continue
-                        seen_data.add(text)
-                        x_pos = r.rect.left if r.rect else 0
-                        qr_with_pos.append((x_pos, text))
-                    qr_with_pos.sort(key=lambda p: p[0], reverse=True)
-                    self.root.after(0, self._handle_qr_results, qr_with_pos)
+                # Report EVERY completed pass, including empty ones.
+                # Presence is counted in passes, so the UI has to know
+                # the difference between "looked and saw nothing" and
+                # "never got to look".
+                seen_data = set()
+                qr_with_pos = []
+                for r in (results or []):
+                    text = r.data.decode("utf-8", errors="ignore").strip()
+                    if text in seen_data:
+                        continue
+                    seen_data.add(text)
+                    x_pos = r.rect.left if r.rect else 0
+                    qr_with_pos.append((x_pos, text))
+                qr_with_pos.sort(key=lambda p: p[0], reverse=True)
+                self.root.after(0, self._handle_qr_results, qr_with_pos)
 
                 if self._camera_view and self.mode == "camview":
                     self.root.after(0, self._draw_frame)
@@ -3543,6 +3586,23 @@ class DoseApp:
     def _handle_qr_results(self, qr_with_pos):
         now = time.time()
         triggered_addmed = False
+
+        # One completed scan pass. Count a miss for every slot this
+        # pass did not see, and reset the counter for those it did.
+        # This runs BEFORE anything below can return early, so the
+        # bookkeeping can never be skipped by a flow that opens a
+        # screen.
+        self._qr_last_scan = now
+        seen_slots = set()
+        for _x, _raw in qr_with_pos:
+            _p = self._parse_qr_payload(_raw)
+            if _p:
+                seen_slots.add(_p[0])
+        for _k in list(self._qr_miss):
+            if _k in seen_slots:
+                self._qr_miss[_k] = 0
+            elif self._qr_miss[_k] < QR_MISS_LIMIT:
+                self._qr_miss[_k] += 1
 
         for x_pos, raw_text in qr_with_pos:
             parsed = self._parse_qr_payload(raw_text)
@@ -5160,17 +5220,38 @@ class DoseApp:
         if reply_text:
             self._voice_reply = reply_text
         if state == "idle":
-            self._voice_user_text = ""
-            self._voice_reply = ""
-            self.canvas.delete("voice_ov")
-            self._voice_imgs.clear()
+            # Don't yank it off the screen. Replies are fast enough now
+            # that a short exchange was over before the panel had
+            # finished sliding up — all you saw was a flash of the blue
+            # wave. Hold it for a moment so it can actually be read,
+            # then let the tick retire it.
+            self._voice_hide_at = max(
+                time.time(),
+                getattr(self, "_voice_ov_t0", 0) + VOICE_OVERLAY_MIN_S)
+            if not self._voice_anim_running:
+                self._voice_finish_overlay()
             return
+        self._voice_hide_at = None
         if not self._voice_anim_running:
             self._voice_anim_running = True
             self._voice_ov_t0 = time.time()
             self._voice_next_frame = self._voice_ov_t0
             self._voice_sig = None
             self._voice_anim_tick()
+
+    def _voice_finish_overlay(self):
+        self._voice_anim_running = False
+        self._voice_hide_at = None
+        self._voice_user_text = ""
+        self._voice_reply = ""
+        try:
+            self.canvas.delete("voice_ov")
+        except Exception:
+            pass
+        self._voice_imgs.clear()
+        self._voice_items = {}
+        self._voice_sig = None
+        self._voice_shown = {}
 
     # Wave geometry: three overlapping sine ribbons, drawn as NATIVE
     # canvas lines. The old overlay re-rendered two supersampled PIL
@@ -5205,16 +5286,26 @@ class DoseApp:
         return pts
 
     def _voice_anim_tick(self):
-        if self._voice_state == "idle":
-            self._voice_anim_running = False
-            self.canvas.delete("voice_ov")
-            self._voice_imgs.clear()
-            self._voice_items = {}
-            self._voice_sig = None
-            return
         c = self.canvas
         t = self.theme
         now = time.time()
+
+        if self._voice_state == "idle":
+            hide_at = getattr(self, "_voice_hide_at", None)
+            if hide_at is None or now >= hide_at:
+                self._voice_finish_overlay()
+                return
+            # still inside the minimum visible window — keep drawing
+
+        # A full redraw (_draw_frame) does canvas.delete("all"), which
+        # takes the overlay's items with it. Tk then accepts coords()
+        # on those dead ids SILENTLY, so the animation would carry on
+        # at 60 fps moving things that no longer exist and the panel
+        # would simply vanish. Anything that repaints the screen mid-
+        # sentence used to do this — a QR presence change was the
+        # common one. Notice it and rebuild.
+        if not c.find_withtag("voice_ov"):
+            self._voice_sig = None
 
         # During a conversation (add-med, corrections) the panel grows
         # and shows the dictation in big type so the user can verify
@@ -5260,8 +5351,13 @@ class DoseApp:
 
         # Siri-style animated wave — coordinates only, no re-rendering
         phase = now * 5.0
-        amp = {"listening": 1.0, "thinking": 0.3}.get(
+        amp = {"listening": 1.0, "thinking": 0.3, "idle": 0.0}.get(
             self._voice_state, 0.45 + 0.45 * abs(math.sin(phase * 1.7)))
+        if self._voice_state == "idle":
+            # settling out during the hold, so it reads as finished
+            # rather than frozen
+            left = max(0.0, getattr(self, "_voice_hide_at", now) - now)
+            amp = 0.25 * min(1.0, left / 0.8)
         wx, wy, ww, wh = bx + 24, by + bar_h - 38, bar_w - 48, 30
         for i, (_c, a_mul, f_mul, p_off, _lw) in enumerate(
                 self.WAVE_LAYERS):

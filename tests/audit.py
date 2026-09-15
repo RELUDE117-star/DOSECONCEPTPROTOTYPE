@@ -394,7 +394,16 @@ def voice_integration():
     app.root.update()
     app._voice_overlay_update("idle")
     app.root.update()
-    assert not app.canvas.find_withtag("voice_ov")
+    # The panel is deliberately HELD for a moment after idle, so a
+    # fast reply is still readable instead of a flicker. It must still
+    # be up now, and gone once that window passes.
+    assert app.canvas.find_withtag("voice_ov"), "panel hidden too fast"
+    deadline = time.time() + mod.VOICE_OVERLAY_MIN_S + 1.0
+    while time.time() < deadline and app.canvas.find_withtag("voice_ov"):
+        app._voice_anim_tick()
+        app.root.update()
+        time.sleep(0.01)
+    assert not app.canvas.find_withtag("voice_ov"), "panel never hid"
     # med-info bridge
     lines = app._med_info_for("Atorvastatin")
     assert any("grapefruit" in l.lower() for l in lines)
