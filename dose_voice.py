@@ -448,14 +448,60 @@ class DoseVoice:
             "burr-brown", "burr brown", "audio codec", "codec"))
 
     @staticmethod
+    def _arecord_capture_cards():
+        """Authoritative list of RECORDABLE devices from `arecord -l`
+        — the exact tool the Raspberry Pi mic guides use. It lists
+        ONLY capture-capable hardware, with real card AND device
+        numbers, e.g.:
+            card 2: CODEC [USB Audio CODEC], device 0: USB Audio ...
+        Returns [(card, device, "name longname"), ...]. Empty if
+        arecord isn't installed (caller falls back to /proc/asound)."""
+        try:
+            out = subprocess.run(["arecord", "-l"],
+                                 capture_output=True, text=True,
+                                 timeout=6).stdout
+        except Exception:
+            return []
+        found = []
+        for line in (out or "").splitlines():
+            m = re.match(
+                r"\s*card\s+(\d+):\s*([^\[]*)\[([^\]]*)\].*?"
+                r"device\s+(\d+):\s*([^\[]*)\[([^\]]*)\]", line)
+            if m:
+                card = int(m.group(1))
+                dev = int(m.group(4))
+                name = " ".join(x.strip() for x in
+                                (m.group(2), m.group(3),
+                                 m.group(5), m.group(6)) if x.strip())
+                found.append((card, dev, name))
+        return found
+
+    @staticmethod
+    def _rank_capture(desc):
+        """Speaker input endpoint LAST; known mic chip first; other
+        USB capture card next; anything else after."""
+        if DoseVoice._looks_like_speaker(desc):
+            return 3
+        if DoseVoice._looks_like_mic(desc):
+            return 0
+        if DoseVoice._is_usb_name(desc):
+            return 1
+        return 2
+
+    @staticmethod
     def _alsa_capture_cards():
-        """ALSA card numbers that can CAPTURE, USB mic first. Read
-        straight from the kernel (/proc/asound) — no tools, no
-        PipeWire. The SunFounder / C-Media 'USB PnP Sound Device'
-        lands here as e.g. card 1, so arecord -D plughw:1,0 records
-        from it directly, bypassing PipeWire entirely. That is the
-        vendor's own documented method and the most reliable path
-        on a Raspberry Pi."""
+        """Recordable devices as (card, device, desc), the actual
+        microphone first. Primary source is `arecord -l` (only lists
+        capture hardware); falls back to parsing /proc/asound/cards
+        if arecord is unavailable. This is how we LOCATE the real mic
+        device (e.g. the PCM2902 USB Audio CODEC) directly, and target
+        arecord -D plughw:<card>,<device> at exactly it."""
+        rec = DoseVoice._arecord_capture_cards()
+        if rec:
+            rec.sort(key=lambda c: (DoseVoice._rank_capture(c[2]),
+                                    c[0]))
+            return rec
+        # fallback: kernel card list, assume device 0
         cards = {}
         try:
             with open("/proc/asound/cards") as f:
@@ -470,37 +516,20 @@ class DoseVoice:
                 cards[cur] = line
             elif cur is not None and cards.get(cur):
                 cards[cur] += " " + line.strip()
-        # keep only cards that actually expose a capture device
         capture = []
         for num, desc in cards.items():
-            pcm = "/proc/asound/card%d" % num
             has_cap = False
             try:
-                for entry in os.listdir(pcm):
+                for entry in os.listdir("/proc/asound/card%d" % num):
                     if entry.startswith("pcm") and entry.endswith("c"):
                         has_cap = True
                         break
             except Exception:
-                has_cap = True   # can't tell — assume yes, arecord fails safe
+                has_cap = True
             if has_cap:
-                capture.append((num, desc))
-        # Rank: a real microphone card first (C-Media/PnP), then a
-        # generic USB capture card, then a speaker's capture endpoint
-        # (Jieli/UACDemo) LAST, then anything non-USB. This is what
-        # makes us point at the MIC, not the speaker.
-        # A speaker's capture endpoint (Jieli/UACDemo) is ALWAYS last;
-        # any other capture card is a mic candidate. So even an
-        # unknown USB mic beats the speaker's silent input side.
-        def rank(c):
-            desc = c[1]
-            if DoseVoice._looks_like_speaker(desc):
-                return 3          # speaker input endpoint — last
-            if DoseVoice._looks_like_mic(desc):
-                return 0          # known mic chip — first
-            if DoseVoice._is_usb_name(desc):
-                return 1          # some other USB capture card
-            return 2
-        capture.sort(key=lambda c: (rank(c), c[0]))
+                capture.append((num, 0, desc))
+        capture.sort(key=lambda c: (DoseVoice._rank_capture(c[2]),
+                                    c[0]))
         return capture
 
     def _pa_refresh(self):
@@ -934,11 +963,12 @@ class DoseVoice:
                      % (os.getuid(), env.get("XDG_RUNTIME_DIR")))
         # ALSA capture cards straight from the kernel — the arecord
         # path depends only on these, not on PipeWire
-        for num, desc in self._alsa_capture_cards():
-            lines.append("alsa capture card %d: %s%s"
-                         % (num, desc[:120],
-                            "  <-- USB" if self._is_usb_name(desc)
-                            else ""))
+        for num, devn, desc in self._alsa_capture_cards():
+            tag = ("  <-- MIC" if self._looks_like_mic(desc) else
+                   "  (speaker input)" if self._looks_like_speaker(desc)
+                   else "")
+            lines.append("recordable card %d,%d: %s%s"
+                         % (num, devn, desc[:100], tag))
             # the actual mixer controls + levels on this card, so we
             # can see if a capture control is muted or at zero
             try:
@@ -1269,20 +1299,19 @@ class DoseVoice:
             self.mic_name = name
             return ("pipe", p)
 
-        def open_arecord(card):
-            """Record straight off an ALSA card with arecord, through
-            the 'plug' layer so rate/format are auto-converted. This
-            is the SunFounder / C-Media USB mic's documented method
-            and it does NOT go through PipeWire at all — the whole
-            layer that's been failing. Ships in alsa-utils.
+        def open_arecord(card, device=0):
+            """Record straight off an ALSA capture device with arecord,
+            through the 'plug' layer so rate/format are auto-converted.
+            This is the documented USB-mic method and does NOT go
+            through PipeWire at all. Ships in alsa-utils.
 
             Known Raspberry Pi issue: many cheap USB mics (C-Media
-            CM108) reject a 16 kHz capture rate ('cannot set hw
-            params'). So we record at the mic's native 48 kHz and
+            CM108, PCM2902) reject a 16 kHz capture rate ('cannot set
+            hw params'). So we record at the mic's native 48 kHz and
             resample to 16 kHz in software (ingest handles it),
             falling back to 44.1 kHz then a direct 16 kHz. The 'plug'
             layer converts format/channels regardless."""
-            dev = "plughw:%d,0" % card
+            dev = "plughw:%d,%d" % (card, device)
             self._max_capture(card)   # unmute + max this card's capture
             for rate in (48000, 44100, 16000):
                 cmd = ["arecord", "-D", dev, "-f", "S16_LE",
@@ -1430,13 +1459,12 @@ class DoseVoice:
             # endpoint — it is deprioritized so a real microphone on
             # another card always wins the tie.
             routes = []
-            for card_num, desc in self._alsa_capture_cards():
-                tag = "card %d %s" % (
-                    card_num,
-                    "(USB)" if self._is_usb_name(desc) else "")
+            for card_num, dev_num, desc in self._alsa_capture_cards():
+                short = desc.split("[")[0].strip() or desc[:20]
+                tag = "card %d,%d %s" % (card_num, dev_num, short)
                 routes.append(
                     ("arecord %s" % tag.strip(),
-                     (lambda c=card_num: open_arecord(c)),
+                     (lambda c=card_num, d=dev_num: open_arecord(c, d)),
                      self._looks_like_speaker(desc)))
             routes += [
                 ("system default (pw-record)", lambda: open_pipe_cmd(
