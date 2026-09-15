@@ -118,7 +118,7 @@ ask("how many certain lean pills do i have left", "sertraline", "28")
 ask("how many pills do i have", "sertraline", "atorvastatin")
 
 # schedule + info
-ask("when do i take atorvastatin", "nine pm", "every day")
+ask("when do i take atorvastatin", "9:00 pm", "every day")
 ask("how do i take atorvastatin", "grapefruit")
 ask("did i take my sertraline today", "affirmative")
 ask("did i take atorvastatin", "negative")
@@ -157,7 +157,7 @@ for q in ("can i take a double dose of sertraline",
 ask("add a new medication", "what is the medication called", keep=True)
 ask("ibuprofen", "read me the label", keep=True)
 ask("take one tablet by mouth at seven thirty pm thirty pills",
-    "confirm intake", "ibuprofen", "30 pills", "seven 30 PM", keep=True)
+    "confirm intake", "ibuprofen", "30 pills", "7:30 PM", keep=True)
 ask("yes that is correct", "registered", keep=False)
 assert app.med_data["demo"]["loaded"]
 assert app.med_data["demo"]["name"] == "Ibuprofen"
@@ -256,7 +256,7 @@ ask("add a new medication", "called", keep=True)
 ask("vitamin d", "label", keep=True)
 ask("take two tablets at seven thirty, sixty pills",
     ("morning, or the evening",), keep=True)
-ask("in the evening", "confirm intake", "seven 30 PM", "60",
+ask("in the evening", "confirm intake", "7:30 PM", "60",
     keep=True)
 ask("yes", "registered", keep=False)
 assert app.med_data["demo"]["dose_times"] == ["7:30 PM"], \

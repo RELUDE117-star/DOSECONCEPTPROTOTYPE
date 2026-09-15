@@ -156,7 +156,59 @@ ok(not items(), "and it retires once it has been readable")
 ok(not app._voice_items, "cleanly, releasing its canvas handles")
 ok(not app._voice_imgs, "and its images")
 
-print("== 4. the wave animates while it is up ==")
+print("== 4. it shows BOTH what was heard and the answer ==")
+app._voice_overlay_update("idle")
+settle(0.05)
+end = time.time() + mod.VOICE_OVERLAY_MIN_S + 0.5
+while time.time() < end and items():
+    app._voice_anim_tick()
+    app.root.update()
+    time.sleep(0.01)
+
+app._voice_overlay_update("listening", "how many sertraline do i have left", "")
+settle(0.3)
+top = app.canvas.itemcget(app._voice_items["top"], "text")
+ok("sertraline" in top.lower(),
+   "while listening, the live transcript is shown: %r" % top[:48])
+
+app._voice_overlay_update(
+    "speaking", "how many sertraline do i have left",
+    "Sertraline: 28 pills remaining.")
+settle(0.3)
+top = app.canvas.itemcget(app._voice_items["top"], "text")
+big = app.canvas.itemcget(app._voice_items["big"], "text")
+ok("sertraline" in top.lower(),
+   "while answering, what you SAID is still on screen: %r" % top[:48])
+ok("28 pills" in big,
+   "and the answer is shown underneath it: %r" % big[:48])
+ok(top != big, "they are two different lines")
+
+# nothing may overlap the waveform
+tb = app.canvas.bbox(app._voice_items["top"])
+bb = app.canvas.bbox(app._voice_items["big"])
+wb = app.canvas.bbox(app._voice_items["w0"])
+ok(tb[3] <= bb[1] + 4, "the two lines do not overlap each other")
+ok(bb[3] <= wb[1] + 6,
+   "and the answer does not run into the waveform "
+   "(text ends %d, wave starts %d)" % (bb[3], wb[1]))
+box = panel_box()
+ok(box[3] <= SCREEN_H, "the whole panel is still on screen (%d <= %d)"
+   % (box[3], SCREEN_H))
+
+# a long reply must not spill out either
+app._voice_overlay_update(
+    "speaking", "what do i take today",
+    "Sertraline at 8:00 AM, Atorvastatin at 9:00 PM, Metformin at "
+    "12:00 PM and Levothyroxine at 7:00 AM, Ryan.")
+settle(0.3)
+bb = app.canvas.bbox(app._voice_items["big"])
+wb = app.canvas.bbox(app._voice_items["w0"])
+ok(bb[3] <= wb[1] + 6,
+   "a long answer is fitted, not spilled over the wave "
+   "(ends %d, wave starts %d)" % (bb[3], wb[1]))
+ok(panel_box()[3] <= SCREEN_H, "and stays on screen")
+
+print("== 5. the wave animates while it is up ==")
 app._voice_overlay_update("listening", "testing", "")
 settle(0.1)
 a = app.canvas.coords(app._voice_items["w0"])
@@ -166,7 +218,7 @@ ok(a != b, "the wave is moving")
 ok(len(a) == mod.DoseApp.WAVE_POINTS * 2,
    "drawn from %d points" % mod.DoseApp.WAVE_POINTS)
 
-print("== 5. it never lingers forever ==")
+print("== 6. it never lingers forever ==")
 app._voice_overlay_update("idle")
 end = time.time() + mod.VOICE_OVERLAY_MIN_S + 1.0
 while time.time() < end and items():

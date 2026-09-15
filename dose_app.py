@@ -5312,7 +5312,12 @@ class DoseApp:
         # every word they said
         in_convo = bool(getattr(self.voice, "_flow", None))
         bar_w = 620
-        bar_h = 168 if in_convo else 94
+        # Taller than it was: the panel now always has room for BOTH
+        # what you said and what she answered. It used to show only one
+        # or the other, so the corrected transcript — the accurate one,
+        # from the real recogniser rather than the live on-screen
+        # listener — was never actually shown to you.
+        bar_h = 168 if in_convo else 124
 
         # Rebuild the canvas items only when the LAYOUT changes, never
         # per frame.
@@ -5368,33 +5373,44 @@ class DoseApp:
         # Text: recomputed cheaply, but only PUSHED to the canvas when
         # it actually changes (itemconfigure forces a redraw).
         shown = self._voice_shown
+        heard = self._voice_user_text
         if in_convo:
+            # a question is being asked: her question small, your
+            # answer large, so you can check every word of it
             top = (self._fit_text(self._voice_reply, self.font_small,
                                   1120) if self._voice_reply else "")
-            big = self._voice_user_text or (
-                "Listening…" if self._voice_state == "listening" else "…")
+            big = heard or ("Listening…"
+                            if self._voice_state == "listening" else "…")
             big = self._fit_text(big, self.font_name, 1100)
             top_style = (self.font_small, t["muted"])
             big_style = (self.font_name, DOSE_BLUE_LT)
             top_y, big_y = by + 14, by + 62
-        elif self._voice_state == "listening":
-            top = self._fit_text(self._voice_user_text or "Listening…",
-                                 self.font_title, 560)
-            big = ""
-            top_style = (self.font_title, DOSE_BLUE_LT)
-            big_style = (self.font_name, DOSE_BLUE_LT)
-            top_y, big_y = by + 14, by + 62
         else:
-            if self._voice_state == "speaking" and self._voice_reply:
-                top = self._fit_text(self._voice_reply, self.font_small,
-                                     1120)
-                top_style = (self.font_small, t["fg"])
+            # ALWAYS both lines: what was heard on top, the answer
+            # below. While listening the top line is the live
+            # transcript; once the turn closes it is replaced by the
+            # accurate one from the real recogniser, so you can see
+            # exactly what it understood you to say.
+            if heard:
+                top = '"%s"' % self._fit_text(heard, self.font_small, 1080)
+                top_style = (self.font_small, DOSE_BLUE_LT)
+            elif self._voice_state == "listening":
+                top = "Listening…"
+                top_style = (self.font_small, t["muted"])
             else:
                 top = "…"
                 top_style = (self.font_small, t["muted"])
-            big = ""
-            big_style = (self.font_name, DOSE_BLUE_LT)
-            top_y, big_y = by + 14, by + 62
+            if self._voice_state == "speaking" and self._voice_reply:
+                big = self._fit_text(self._voice_reply, self.font_small,
+                                     1180)
+                big_style = (self.font_small, t["fg"])
+            elif self._voice_state == "thinking":
+                big = "…"
+                big_style = (self.font_small, t["muted"])
+            else:
+                big = ""
+                big_style = (self.font_small, t["fg"])
+            top_y, big_y = by + 12, by + 40
 
         for key, text, style, ty in (("top", top, top_style, top_y),
                                      ("big", big, big_style, big_y)):

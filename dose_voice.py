@@ -129,10 +129,34 @@ FLOW_TIMEOUT = 20.0        # per-question timeout in multi-turn flows
 # now exactly one, and nothing can substitute for it.
 VOICE_NAME = "en_US-hfc_female-medium"
 
-# Trailing silence that ends an utterance. 0.45 s is about where a
-# person naturally pauses between turns: short enough that the reply
-# feels immediate, long enough not to cut someone off mid-thought.
-ENDPOINT_SILENCE = float(os.environ.get("DOSE_ENDPOINT_SILENCE", "0.45"))
+# ── WHEN HAS THE PERSON FINISHED TALKING? ────────────────────────────
+# A single silence timer cannot answer this. Too short and it cuts
+# people off mid-sentence; too long and every reply feels sluggish.
+# So the wait depends on WHAT WAS SAID SO FAR — the assistant commits
+# quickly on a sentence that is obviously finished and waits patiently
+# on one that obviously is not:
+#
+#   crisis / emergency        commit at once — never make them repeat
+#   a complete, stable command  0.35 s   "what time is it"
+#   dispense or cancel        0.60 s   leaves room for "no wait, the—"
+#   parses to nothing         0.70 s   probably still forming it
+#   ends mid-thought          2.20 s   "how many of my..." — WAIT
+#
+# The mid-thought figure is not a guess. A 900 ms mid-sentence pause
+# was measured beating a 700 ms grace, cutting "I've been thinking
+# about ... ending my life" in half and answering the first part. 2.2 s
+# covers the pause ladder people actually produce. It costs nothing in
+# the common case, because that case is the 0.35 s branch.
+ENDPOINT_STABLE = float(os.environ.get("DOSE_ENDPOINT_STABLE", "0.35"))
+ENDPOINT_CORRECTION = float(os.environ.get("DOSE_ENDPOINT_CORRECTION",
+                                           "0.60"))
+ENDPOINT_UNPARSED = float(os.environ.get("DOSE_ENDPOINT_UNPARSED", "0.70"))
+ENDPOINT_DANGLING = float(os.environ.get("DOSE_ENDPOINT_DANGLING", "2.20"))
+# Someone has to stop eventually — a television will not. Cut an
+# utterance that never ends rather than listening forever.
+ENDPOINT_MAX_UTTERANCE = float(os.environ.get("DOSE_MAX_UTTERANCE", "8.0"))
+# the shortest of the graces, used where a single number is needed
+ENDPOINT_SILENCE = ENDPOINT_STABLE
 
 # SPECULATIVE RECOGNITION — the trick that buys back most of the wait.
 # Recognition normally runs AFTER the turn closes, so its cost lands
@@ -150,15 +174,19 @@ SPECULATE_AFTER = float(os.environ.get("DOSE_SPECULATE_AFTER", "0.18"))
 # next word, not done — so we wait longer before closing the turn. This
 # is what stops a short endpoint from clipping "how many ... sertraline
 # ... do i have left" into "how many".
+# Words a sentence cannot END on — someone saying one of these is
+# reaching for the next word. Object pronouns ("it", "them", "one") and
+# time words are deliberately ABSENT: "what time is it" and "did i take
+# them" are finished sentences.
 HANGING_WORDS = frozenset("""
 a an the my your his her its our their this that these those and or but
 so if when while with for to of in on at from about into than then
 because is are was were be been am do does did have has had can could
-should would will shall may might must i you he she it we they
+should would will shall may might must i you he she we they
 take taken taking need want get got give show tell how what when where
-which who why um uh er hmm like just some any every each no not
+which who why um uh er hmm like just every each
 """.split())
-HANGING_EXTRA = float(os.environ.get("DOSE_HANGING_EXTRA", "0.45"))
+
 
 
 # ── RASPBERRY PI 4B HARDWARE PROFILE ─────────────────────────────────
@@ -196,7 +224,26 @@ CPU_CORES = _pi_cores()
 # bottle being removed and put back, over and over, while nobody had
 # touched it. Speech is allowed to be a little slower; the camera is
 # watching someone's medication and must not be.
-INFER_THREADS = max(1, min(2, CPU_CORES - 2))
+def _load_now():
+    """1-minute load average — how much of the machine is already
+    spoken for by everything else."""
+    try:
+        return os.getloadavg()[0]
+    except Exception:
+        return 0.0
+
+
+# Start from the core budget: the touchscreen keeps one, the camera
+# keeps one. Then look at what is ACTUALLY running. The station is not
+# alone on this Pi — the Tk UI, the QR decode loop, PipeWire, the
+# camera stack and whatever the desktop is doing all want time. If the
+# machine is already loaded when we start up, taking two more cores
+# for speech just makes everything worse, so we take one.
+_RESERVED_CORES = 2          # screen + camera
+INFER_THREADS = max(1, min(2, CPU_CORES - _RESERVED_CORES))
+_STARTUP_LOAD = _load_now()
+if _STARTUP_LOAD > CPU_CORES - _RESERVED_CORES:
+    INFER_THREADS = 1
 
 for _var in ("OMP_NUM_THREADS", "ORT_NUM_THREADS",
              "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
@@ -225,7 +272,18 @@ def pi_health():
     rather than guessing."""
     out = {"cores": CPU_CORES, "infer_threads": INFER_THREADS,
            "governor": "", "mhz": 0, "temp_c": 0.0,
-           "throttled": False, "under_voltage": False, "arch64": False}
+           "throttled": False, "under_voltage": False, "arch64": False,
+           "load": 0.0, "load_per_core": 0.0, "mem_free_mb": 0}
+    out["load"] = round(_load_now(), 2)
+    out["load_per_core"] = round(out["load"] / max(1, CPU_CORES), 2)
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    out["mem_free_mb"] = int(line.split()[1]) // 1024
+                    break
+    except Exception:
+        pass
     try:
         out["arch64"] = os.uname().machine in ("aarch64", "arm64")
     except Exception:
@@ -420,6 +478,24 @@ def parse_spoken_time(text):
     return f"{hour}:{minute:02d} {ampm}"
 
 
+_TIME_RX = re.compile(r"\b(\d{1,2}):([0-5]\d)\s?([AP]M)\b")
+
+
+def to_speech(text):
+    """Rewrite a reply for the SYNTHESIZER only.
+
+    Replies are written the way they should be READ — "1:15 PM" — and
+    that is exactly what goes on screen. They used to be built with
+    the time already verbalized, so the screen showed "one 15 PM" as
+    well, which is not how anyone writes a time. The conversion now
+    happens here, on the way into the voice, and the text the user
+    sees is left alone."""
+    if not text:
+        return text
+    return _TIME_RX.sub(
+        lambda m: time_to_speech("%s:%s %s" % m.groups()), text)
+
+
 def time_to_speech(ts):
     """'7:30 PM' -> 'seven thirty PM' style text Piper says naturally."""
     try:
@@ -429,13 +505,23 @@ def time_to_speech(ts):
     except Exception:
         return ts
     ones = ["zero", "one", "two", "three", "four", "five", "six",
-            "seven", "eight", "nine", "ten", "eleven", "twelve"]
+            "seven", "eight", "nine", "ten", "eleven", "twelve",
+            "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+            "eighteen", "nineteen"]
+    tens = {20: "twenty", 30: "thirty", 40: "forty", 50: "fifty"}
+
+    def words(n):
+        if n < 20:
+            return ones[n]
+        t, r = divmod(n, 10)
+        return tens[t * 10] + (" " + ones[r] if r else "")
+
     hour_w = ones[h] if h <= 12 else str(h)
     if m == 0:
         return f"{hour_w} {ap}"
     if m < 10:
-        return f"{hour_w} oh {m} {ap}"
-    return f"{hour_w} {m} {ap}"
+        return f"{hour_w} oh {ones[m]} {ap}"
+    return f"{hour_w} {words(m)} {ap}"
 
 
 class DoseVoice:
@@ -1818,8 +1904,12 @@ class DoseVoice:
 
     # ── audio input ───────────────────────────────────────────────────
     # Comforting, warm, protective — a gentle guardian, softly reassuring.
-    ACKS = ("I'm right here with you.", "I'm listening, take your time.",
-            "Go ahead — I've got you.", "I'm here for you, always.")
+    # What she says the moment she starts listening. Just "Ready." —
+    # it is the fastest possible acknowledgement and it gets out of the
+    # way. The old lines ("I'm here for you, always", "I've got you")
+    # were reassurance nobody asked for at the start of every single
+    # exchange, which reads as unsettling rather than warm.
+    ACKS = ("Ready.",)
 
     def _prime_speech(self):
         """Load Piper up front and pre-render the short acknowledgment
@@ -1914,6 +2004,13 @@ class DoseVoice:
         rows = [
             ("CPU", "%d cores · %d for speech" % (h["cores"],
                                                   h["infer_threads"]), True),
+            # what EVERYTHING on this Pi is asking for, not just us:
+            # the UI, the QR camera, PipeWire and the desktop all count
+            ("Load", "%.2f (%.0f%% of %d cores)"
+             % (h["load"], h["load_per_core"] * 100, h["cores"]),
+             h["load_per_core"] < 0.9),
+            ("Free RAM", "%d MB" % h["mem_free_mb"],
+             h["mem_free_mb"] > 200),
             ("Clock", "%d MHz (%s)" % (h["mhz"], h["governor"] or "?"),
              h["governor"] == "performance" or h["mhz"] >= 1400),
             ("Temp", "%.1f °C" % h["temp_c"], h["temp_c"] < 75),
@@ -1927,8 +2024,9 @@ class DoseVoice:
              if TMP_AUDIO_DIR == "/dev/shm" else TMP_AUDIO_DIR,
              TMP_AUDIO_DIR == "/dev/shm"),
             ("Voice", os.path.basename(self._piper_path or "—"), True),
-            ("Endpoint", "%.2f s of silence ends a turn"
-             % ENDPOINT_SILENCE, ENDPOINT_SILENCE <= 0.7),
+            ("Endpoint", "%.2fs done · %.1fs mid-thought"
+             % (ENDPOINT_STABLE, ENDPOINT_DANGLING),
+             ENDPOINT_STABLE <= 0.5),
         ]
         return rows
 
@@ -2772,6 +2870,46 @@ class DoseVoice:
                 return json.loads(rec.Result()).get("text", "").strip()
         return json.loads(rec.FinalResult()).get("text", "").strip()
 
+    def _endpoint_wait(self, text):
+        """How long to keep waiting after the person goes quiet.
+
+        This is the difference between an assistant that talks over you
+        and one that feels like it is listening. A finished command
+        commits almost immediately; a sentence that is obviously still
+        being formed gets real time. See the constants above for the
+        measured figures and why the mid-thought one is so long."""
+        t = (text or "").strip().lower()
+        if not t:
+            return ENDPOINT_UNPARSED
+        words = t.split()
+        dangling = words[-1] in HANGING_WORDS
+
+        if _nlu_mod is None:
+            return ENDPOINT_DANGLING if dangling else ENDPOINT_UNPARSED
+        try:
+            intent = _nlu_mod.parse(t, self._med_names())
+        except Exception:
+            return ENDPOINT_DANGLING if dangling else ENDPOINT_UNPARSED
+
+        # never make someone in trouble say it twice
+        if intent.name in ("crisis", "emergency"):
+            return 0.0
+
+        # WHAT WAS SAID outranks how it ends. Plenty of finished
+        # sentences end on a function word — "what time is it", "did i
+        # take it" — so the mid-thought rule only applies when the
+        # sentence does not already stand on its own.
+        if dangling and not intent.complete:
+            return ENDPOINT_DANGLING
+
+        # room to change their mind: "my metformin — no wait, the other"
+        if intent.name in ("dispense", "cancel"):
+            return ENDPOINT_CORRECTION
+        # a complete, unambiguous command: answer now
+        if intent.complete:
+            return ENDPOINT_STABLE
+        return ENDPOINT_UNPARSED
+
     def _listen_command(self, rec, timeout=COMMAND_TIMEOUT):
         """Capture one utterance; empty string on timeout.
 
@@ -2786,6 +2924,7 @@ class DoseVoice:
         deadline = time.time() + timeout
         buf = bytearray()
         heard = False
+        speech_started = time.time()
         # speculation is keyed on the LAST MOMENT REAL SPEECH WAS HEARD,
         # not on the byte count: the buffer keeps growing with silence
         # while we wait, and trailing silence cannot change what was
@@ -2847,10 +2986,17 @@ class DoseVoice:
                     partial = json.loads(
                         rec.PartialResult()).get("partial", "")
                     if partial:
+                        if not heard:
+                            speech_started = time.time()
                         heard = True
                         self._partial = partial
                         self._set_ui_state("listening", user_text=partial)
-                        deadline = max(deadline, time.time() + 4.0)
+                        # keep the turn open while they are still
+                        # talking, but not indefinitely: a television
+                        # never stops, and we must not listen forever
+                        if time.time() - speech_started \
+                                < ENDPOINT_MAX_UTTERANCE:
+                            deadline = max(deadline, time.time() + 4.0)
 
             lv = self._last_voice_ts
             if not lv:
@@ -2863,13 +3009,8 @@ class DoseVoice:
                 spec = speculate(bytes(buf),
                                  getattr(self, "_partial", ""), lv)
 
-            # (b) they are done — close the turn. A transcript that
-            #     ends on a hanging word means they are mid-thought, so
-            #     give them longer rather than clipping them.
-            need = ENDPOINT_SILENCE
-            last = (getattr(self, "_partial", "") or "").split()
-            if last and last[-1] in HANGING_WORDS:
-                need += HANGING_EXTRA
+            # (b) are they done? The wait depends on what they said.
+            need = self._endpoint_wait(getattr(self, "_partial", ""))
             if (heard or lv) and quiet >= need:
                 try:
                     text = json.loads(
@@ -3067,7 +3208,7 @@ class DoseVoice:
             voice = self._load_piper()
             tmp = path + ".tmp"
             with wave.open(tmp, "wb") as w:
-                self._synth(voice, text, w)
+                self._synth(voice, to_speech(text), w)
             os.replace(tmp, path)
             return path
         except Exception:
@@ -3185,7 +3326,7 @@ class DoseVoice:
                                        dir=TMP_AUDIO_DIR)
             os.close(fd)
             with wave.open(tmp, "wb") as w:
-                self._synth(voice, text, w)
+                self._synth(voice, to_speech(text), w)
             self._play_wav(tmp)
         except Exception:
             pass
@@ -3293,7 +3434,7 @@ class DoseVoice:
             return self._flow_start_addmed()
         if intent_id == "time":
             ts = self._fmt_now(datetime.now())
-            return f"The time is {time_to_speech(ts)}.", False
+            return f"The time is {ts}.", False
         if intent_id == "date":
             now = datetime.now()
             return ("Today is %s, %s %d." % (
@@ -3805,7 +3946,7 @@ class DoseVoice:
                 "All doses complete. Outstanding work today, Ryan.",
                 "Nothing remains. Every dose is logged. Protocol "
                 "two is satisfied."]), False
-        parts = [f"{e['name']} at {time_to_speech(e['time'])}"
+        parts = [f"{e['name']} at {e['time']}"
                  for e in pending[:4]]
         lead = ("One dose remains today: " if len(pending) == 1 else
                 f"{len(pending)} doses remain today: ")
@@ -3817,7 +3958,7 @@ class DoseVoice:
             key = sorted(due)[0]
             name = self.app.med_data.get(key, {}).get("name", "medication")
             return (f"{name} is due now, Ryan. Scheduled for "
-                    f"{time_to_speech(due[key])}. The station is "
+                    f"{due[key]}. The station is "
                     "ready when you are."), False
         entries = self._today_entries()
         now = datetime.now()
@@ -3835,7 +3976,7 @@ class DoseVoice:
         if upcoming:
             e = upcoming[0]
             return (f"Next dose: {e['name']} at "
-                    f"{time_to_speech(e['time'])}."), False
+                    f"{e['time']}."), False
         return ("Nothing further is scheduled today, Ryan. "
                 "Rest easy."), False
 
@@ -3866,7 +4007,7 @@ class DoseVoice:
                     "station, Ryan."), False
         times = md.get("dose_times") or [md.get("schedule_time",
                                                 "8:00 AM")]
-        spoken_times = " and ".join(time_to_speech(ts) for ts in times)
+        spoken_times = " and ".join(times)
         days = md.get("schedule_days", [])
         if len(days) >= 7:
             day_part = "every day"
@@ -3874,8 +4015,8 @@ class DoseVoice:
             day_part = "on " + " and ".join(days)
         else:
             day_part = ""
-        return (f"{md['name']} is scheduled at {spoken_times} "
-                f"{day_part}.").strip() + ".", False
+        line = f"{md['name']} is scheduled at {spoken_times} {day_part}"
+        return " ".join(line.split()).rstrip(".") + ".", False
 
     def _intent_med_info(self, spoken):
         key, md = self._find_med(spoken)
@@ -3932,7 +4073,7 @@ class DoseVoice:
                     "today."), False
         if taken_any:
             return (f"Partially. {md['name']} at "
-                    f"{time_to_speech(pending[0])} is still "
+                    f"{pending[0]} is still "
                     "pending."), False
         return (f"Negative, Ryan. {md['name']} has not been "
                 "dispensed today."), False
@@ -4090,7 +4231,7 @@ class DoseVoice:
                     return (f"{data['name']} is registered: "
                             f"{data['qty']} pill"
                             f"{'s' if data['qty'] != 1 else ''} at "
-                            f"{time_to_speech(data['time'])} daily. "
+                            f"{data['time']} daily. "
                             "Protocol two is watching it now, "
                             "Ryan."), False
                 return ("Registration failed — the self-fill slot "
@@ -4124,7 +4265,7 @@ class DoseVoice:
                 "Is that correct?" % (
                     data.get("name", "unknown"),
                     data.get("qty", 30),
-                    time_to_speech(data.get("time", "8:00 AM"))))
+                    data.get("time", "8:00 AM")))
 
     def _save_new_med(self, data):
         """Runs on the UI thread. Registers into the self-fill slot."""

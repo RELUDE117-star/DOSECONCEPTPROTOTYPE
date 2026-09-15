@@ -281,20 +281,53 @@ def trailing_on(word, quiet=0.60):
     return txt, time.time() - e._last_voice_ts
 
 
-_, held = trailing_on("i")          # "...do i" — mid-thought
-_, cut = trailing_on("left")        # "...do i have left" — finished
+_, held = trailing_on("i", quiet=2.9)   # "...do i" — mid-thought
+_, cut = trailing_on("left")            # "...do i have left" — finished
 ok(held > cut,
    "a hanging word buys more time before the turn closes "
    "(%.2f s vs %.2f s)" % (held, cut))
-ok(held >= dv.ENDPOINT_SILENCE + dv.HANGING_EXTRA * 0.7,
-   "and it is a meaningful amount of extra time (%.2f s)" % held)
-ok(cut < dv.ENDPOINT_SILENCE + 0.2,
-   "while a finished sentence still closes immediately (%.2f s)" % cut)
-ok("left" not in dv.HANGING_WORDS and "today" not in dv.HANGING_WORDS,
+ok(held >= dv.ENDPOINT_DANGLING * 0.7,
+   "and it is a real amount of extra time (%.2f s of a %.1f s grace)"
+   % (held, dv.ENDPOINT_DANGLING))
+ok(cut < dv.ENDPOINT_STABLE + 0.35,
+   "while a finished sentence still closes promptly (%.2f s)" % cut)
+ok("left" not in dv.HANGING_WORDS and "today" not in dv.HANGING_WORDS
+   and "it" not in dv.HANGING_WORDS,
    "words people DO end on are not treated as hanging")
 ok("and" in dv.HANGING_WORDS and "my" in dv.HANGING_WORDS
    and "um" in dv.HANGING_WORDS,
    "words people never end on are")
+
+# the policy itself, straight from the engine
+pol = ListenEngine()
+pol._med_names = lambda: ["Sertraline", "Metformin"]
+CASES = [
+    ("i want to kill myself", 0.0, "a crisis is never made to wait"),
+    ("chest pain", 0.0, "nor an emergency"),
+    ("what time is it", dv.ENDPOINT_STABLE,
+     "a finished command commits fast even ending on 'it'"),
+    ("how many sertraline do i have left", dv.ENDPOINT_STABLE,
+     "so does a complete question"),
+    ("give me my sertraline", dv.ENDPOINT_CORRECTION,
+     "a dispense request leaves room to change your mind"),
+    ("ive been thinking about", dv.ENDPOINT_DANGLING,
+     "a sentence cut mid-thought WAITS"),
+    ("how many of my", dv.ENDPOINT_DANGLING, "so does this one"),
+    ("umm what about my", dv.ENDPOINT_DANGLING, "and this one"),
+]
+for phrase, want, why in CASES:
+    got = pol._endpoint_wait(phrase)
+    ok(abs(got - want) < 0.001,
+       "%s — %r waits %.2fs (want %.2fs)" % (why, phrase, got, want))
+ok(dv.ENDPOINT_DANGLING >= 2.0,
+   "the mid-thought grace is %.1f s — long enough to beat a real "
+   "pause" % dv.ENDPOINT_DANGLING)
+ok(dv.ENDPOINT_STABLE <= 0.4,
+   "while a finished command still commits in %.2f s"
+   % dv.ENDPOINT_STABLE)
+ok(dv.ENDPOINT_MAX_UTTERANCE <= 10,
+   "and speech that never ends (a television) is cut at %.0f s"
+   % dv.ENDPOINT_MAX_UTTERANCE)
 
 print("== 6. silence alone never invents an utterance ==")
 e = ListenEngine(recog_time=0.05)
