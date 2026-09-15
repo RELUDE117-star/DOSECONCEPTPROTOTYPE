@@ -3867,7 +3867,7 @@ class DoseApp:
                     if r.returncode != 0:
                         subprocess.run(
                             [sys.executable, "-m", "pip", "install",
-                             "sounddevice", "vosk", "piper-tts", "qrcode"],
+                             "sounddevice", "vosk", "piper-tts", "qrcode", "audioop-lts"],
                             capture_output=True, timeout=900, env=env)
                 except Exception:
                     pass

@@ -22,11 +22,76 @@ import queue
 import random
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import wave
 from datetime import datetime
+
+# ── audioop shim ──────────────────────────────────────────────────────
+# Python 3.13 REMOVED the stdlib 'audioop' module. Every audio
+# measurement here (rms/max/mul/tomono/ratecv) depends on it — without
+# it the mic level always read 0 and the tests errored 'no module named
+# audioop'. Prefer the real module (or the pip 'audioop-lts' backport);
+# otherwise install a pure-Python fallback so the mic works on 3.13.
+try:
+    import audioop  # noqa: F401  (real module, or audioop-lts backport)
+except Exception:
+    import array as _array
+    import types as _types
+
+    def _ao_rms(data, width=2):
+        a = _array.array('h'); a.frombytes(data[:len(data) // 2 * 2])
+        if not a:
+            return 0
+        return int((sum(x * x for x in a) / len(a)) ** 0.5)
+
+    def _ao_max(data, width=2):
+        a = _array.array('h'); a.frombytes(data[:len(data) // 2 * 2])
+        return max((abs(x) for x in a), default=0)
+
+    def _ao_mul(data, width, factor):
+        a = _array.array('h'); a.frombytes(data[:len(data) // 2 * 2])
+        for i in range(len(a)):
+            v = int(a[i] * factor)
+            a[i] = 32767 if v > 32767 else (-32768 if v < -32768 else v)
+        return a.tobytes()
+
+    def _ao_tomono(data, width, lf, rf):
+        a = _array.array('h'); a.frombytes(data[:len(data) // 4 * 4])
+        out = _array.array('h')
+        for i in range(0, len(a) - 1, 2):
+            v = int(a[i] * lf + a[i + 1] * rf)
+            out.append(32767 if v > 32767 else
+                       (-32768 if v < -32768 else v))
+        return out.tobytes()
+
+    def _ao_ratecv(data, width, ch, in_rate, out_rate, state):
+        a = _array.array('h'); a.frombytes(data[:len(data) // 2 * 2])
+        if in_rate == out_rate or not a:
+            return data, state
+        ratio = out_rate / float(in_rate)
+        n_out = int(len(a) * ratio)
+        out = _array.array('h')
+        for i in range(n_out):
+            src = i / ratio
+            j = int(src)
+            if j + 1 < len(a):
+                frac = src - j
+                out.append(int(a[j] * (1 - frac) + a[j + 1] * frac))
+            elif j < len(a):
+                out.append(a[j])
+        return out.tobytes(), state
+
+    audioop = _types.ModuleType("audioop")
+    audioop.rms = _ao_rms
+    audioop.max = _ao_max
+    audioop.mul = _ao_mul
+    audioop.tomono = _ao_tomono
+    audioop.ratecv = _ao_ratecv
+    audioop.error = Exception
+    sys.modules["audioop"] = audioop   # so local 'import audioop' works
 
 VOICE_DIR = os.environ.get(
     "DOSE_VOICE_DIR", os.path.expanduser("~/dose-home-station/voice"))
