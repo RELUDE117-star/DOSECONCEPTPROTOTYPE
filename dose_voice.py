@@ -422,12 +422,27 @@ class DoseVoice:
     def _looks_like_speaker(desc):
         """Does this card look like a pure OUTPUT device (a USB
         speaker) that might expose a dead capture endpoint? Used to
-        deprioritize it so a real mic wins. Jieli 'UACDemo' boards
-        are the common cheap USB speaker."""
+        deprioritize it so a real mic wins. Jieli 'UACDemo' /
+        'Advanced Audio Device' boards are the common cheap USB
+        speaker the user has alongside the mic."""
         d = (desc or "").lower()
         return any(k in d for k in ("jieli", "uacdemo", "uac demo",
-                                    "speaker", "headphone", "output",
-                                    "playback"))
+                                    "advanced audio", "speaker",
+                                    "headphone", "output", "playback"))
+
+    @staticmethod
+    def _looks_like_mic(desc):
+        """Does this card look like an actual MICROPHONE (as opposed
+        to a speaker's capture endpoint)? The SunFounder mini mic is a
+        C-Media 'USB PnP Sound Device'. Prefer these so we point at
+        the mic, never the speaker's input side."""
+        d = (desc or "").lower()
+        if DoseVoice._looks_like_speaker(desc):
+            return False
+        return any(k in d for k in ("c-media", "cmedia", "cm108",
+                                    "cm106", "pnp", "sound device",
+                                    "microphone", " mic", "webcam",
+                                    "sunfounder"))
 
     @staticmethod
     def _alsa_capture_cards():
@@ -466,8 +481,20 @@ class DoseVoice:
                 has_cap = True   # can't tell — assume yes, arecord fails safe
             if has_cap:
                 capture.append((num, desc))
-        capture.sort(key=lambda c: (
-            0 if DoseVoice._is_usb_name(c[1]) else 1, c[0]))
+        # Rank: a real microphone card first (C-Media/PnP), then a
+        # generic USB capture card, then a speaker's capture endpoint
+        # (Jieli/UACDemo) LAST, then anything non-USB. This is what
+        # makes us point at the MIC, not the speaker.
+        def rank(c):
+            desc = c[1]
+            if DoseVoice._looks_like_mic(desc):
+                return 0
+            if DoseVoice._looks_like_speaker(desc):
+                return 3
+            if DoseVoice._is_usb_name(desc):
+                return 1
+            return 2
+        capture.sort(key=lambda c: (rank(c), c[0]))
         return capture
 
     def _pa_refresh(self):
@@ -735,10 +762,24 @@ class DoseVoice:
         independent of the speaker choice."""
         srcs = self._list_sources()
         target = None
+        # 1) a real microphone source (never the speaker's input side)
         for s in srcs:
-            if self._is_usb_name(s):
+            if self._looks_like_mic(s):
                 target = s
                 break
+        # 2) a USB source that isn't obviously the speaker
+        if target is None:
+            for s in srcs:
+                if self._is_usb_name(s) and not self._looks_like_speaker(s):
+                    target = s
+                    break
+        # 3) any USB source
+        if target is None:
+            for s in srcs:
+                if self._is_usb_name(s):
+                    target = s
+                    break
+        # 4) any physical (non-Bluetooth) source
         if target is None:
             physical = [s for s in srcs if "bluez" not in s.lower()]
             target = physical[0] if physical else None
