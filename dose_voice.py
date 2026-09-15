@@ -1598,6 +1598,70 @@ class DoseVoice:
                 self._ack_files.append((line, path))
         except Exception:
             self._ack_files = []
+        # everything else she can say, rendered in the background
+        try:
+            self.prewarm_replies()
+        except Exception:
+            pass
+
+    # Every fixed sentence the engine can say. Pre-rendered in the
+    # background so these ALWAYS start playing instantly (the build
+    # guide's core latency trick: never synthesize at reply time).
+    def _fixed_lines(self):
+        lines = list(self.ACKS)
+        lines += [
+            "Standing by, Ryan.",
+            "I didn't catch that, Ryan. Hold the logo and try again.",
+            "No response received. Standing by, Ryan.",
+            "Acknowledged. Standing by.",
+            "Understood, Ryan.",
+            "Cancelling. I will be here.",
+            "Safety protocol, Ryan: I cannot give medical advice. "
+            "Never change a dose on your own — please contact your "
+            "pharmacist or doctor. Protocol three: protect the patient.",
+            "This sounds like an emergency, Ryan. I am only an "
+            "assistant — please call 9 1 1, or your local emergency "
+            "number, right now. Poison control in the U S is "
+            "1 800, 2 2 2, 1 2 2 2.",
+            "I am really glad you told me, Ryan. You do not have to go "
+            "through this alone. You can call or text 9 8 8, the "
+            "Suicide and Crisis Lifeline, any time, to talk with "
+            "someone right now. If you are in danger, please call 9 1 1.",
+            "Nothing further is scheduled today, Ryan. Rest easy.",
+            "Instruction unclear. Standing by.",
+            "Home screen, Ryan.",
+            "Opening storage.",
+            "Opening settings.",
+            "Here is your record, Ryan.",
+        ]
+        # "did you mean <med>?" for every loaded medication
+        for n in self._med_names():
+            lines.append("I want to be certain before I answer, Ryan — "
+                         "did you mean %s?" % n)
+        seen, out = set(), []
+        for ln in lines:
+            if ln and ln not in seen:
+                seen.add(ln)
+                out.append(ln)
+        return out
+
+    def prewarm_replies(self):
+        """Render every fixed line into the cache, in the background at
+        low priority so it never competes with live audio."""
+        def work():
+            try:
+                os.nice(10)
+            except Exception:
+                pass
+            n = 0
+            for line in self._fixed_lines():
+                if self._stop.is_set():
+                    return
+                if self.render_to_cache(line):
+                    n += 1
+            self._prewarmed = n
+        threading.Thread(target=work, daemon=True,
+                         name="tts-prewarm").start()
 
     def _vosk_grammar(self):
         """Constrain recognition to the words Dose actually expects —
@@ -2395,19 +2459,54 @@ class DoseVoice:
             self._play_wav("/usr/share/sounds/alsa/Front_Center.wav")
         threading.Thread(target=go, daemon=True).start()
 
+    def _cache_path(self, text):
+        """Cache key includes the voice file and speed, so changing
+        either regenerates the audio instead of playing a stale clip."""
+        import hashlib
+        key = "%s|%s" % (os.path.basename(self._piper_path or ""), text)
+        h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+        d = os.path.join(VOICE_DIR, "cache")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "say_%s.wav" % h)
+
+    def render_to_cache(self, text):
+        """Render one sentence into the cache if it isn't there yet.
+        Returns its path (or None). Safe to call from a worker."""
+        try:
+            path = self._cache_path(text)
+            if os.path.exists(path):
+                return path
+            voice = self._load_piper()
+            tmp = path + ".tmp"
+            with wave.open(tmp, "wb") as w:
+                self._synth(voice, text, w)
+            os.replace(tmp, path)
+            return path
+        except Exception:
+            return None
+
     def _speak(self, text, user_text=""):
-        """Synthesize with Piper and play. Blocks until done."""
+        """Say one line. Pre-rendered lines start playing immediately;
+        anything new is synthesized once and cached, so the second time
+        it is instant. This is the main latency win on a Pi."""
         self._last_reply = text
         self._set_ui_state("speaking", user_text=user_text,
                            reply_text=text)
         try:
+            path = self._cache_path(text)
+            if not os.path.exists(path):
+                self.render_to_cache(text)
+            if os.path.exists(path):
+                self._play_wav(path)
+                return
+            # last resort: synthesize to a temp file
             voice = self._load_piper()
-            fd, path = tempfile.mkstemp(suffix=".wav")
+            fd, tmp = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
-            with wave.open(path, "wb") as w:
+            with wave.open(tmp, "wb") as w:
                 self._synth(voice, text, w)
-            self._play_wav(path)
-            os.unlink(path)
+            self._play_wav(tmp)
+            os.unlink(tmp)
         except Exception:
             pass
 
