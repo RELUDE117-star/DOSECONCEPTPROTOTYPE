@@ -8,7 +8,7 @@ then hears and answers a genuinely SPOKEN "hey dose" command
 through it (Piper renders the speech; Vosk must recognize it).
 
 Needs the voice models: set DOSE_TEST_MODELDIR to a dir holding
-vosk-model-small-en-us-0.15/ and an en-us-amy*.onnx voice."""
+vosk-model-small-en-us-0.15/ and an en_US-hfc_female-medium.onnx voice."""
 import sys, os, time, wave, tempfile, shutil, stat
 
 MODELDIR = os.environ.get("DOSE_TEST_MODELDIR")

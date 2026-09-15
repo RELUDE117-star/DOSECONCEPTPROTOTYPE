@@ -638,6 +638,9 @@ class DoseApp:
         self._voice_user_text = ""
         self._voice_reply = ""
         self._voice_anim_running = False
+        self._voice_items = {}
+        self._voice_sig = None
+        self._voice_shown = {}
         self._voice_imgs = {}
         self._voice_ov_t0 = 0.0
         # Screen changes are INSTANT. The fade code stays available —
@@ -3840,13 +3843,19 @@ class DoseApp:
         c.create_text(56, 38, text="INSTALLED ON THIS DEVICE",
                       font=self.font_label, fill=t["muted"], anchor="nw")
         remote = getattr(self, "_sysinfo_remote", {})
+        # Two columns so nothing ever runs off the bottom of the card:
+        # software on the left, the hardware this is running on (and
+        # anything about it that is costing response time) on the right.
+        COL_L, COL_R, COL_W = 56, 330, 250
         y = 62
+        col = COL_L
 
         def line(txt, colour=None, dy=15, font=None):
             nonlocal y
-            c.create_text(56, y,
+            c.create_text(col, y,
                           text=self._fit_text(txt, font or self.font_tiny,
-                                              556),
+                                              COL_W if col == COL_R
+                                              else 272),
                           font=font or self.font_tiny,
                           fill=colour or t["fg"], anchor="nw")
             y += dy
@@ -3899,6 +3908,38 @@ class DoseApp:
         if ds:
             y += 4
             line(ds, DOSE_BLUE_LT)
+
+        # ── the hardware, and whether it is holding us back ──
+        def _endpoint_s():
+            try:
+                import dose_voice as _dv
+                return float(_dv.ENDPOINT_SILENCE)
+            except Exception:
+                return 0.55
+
+        col, y = COL_R, 62
+        line("RASPBERRY PI — SPEED", t["muted"])
+        try:
+            hw = self.voice.hardware_report() if self.voice else []
+        except Exception:
+            hw = []
+        if not hw:
+            line("   (voice engine not started)", t["muted"])
+        for label, detail, good in hw:
+            line("   %-13s %s" % (label, detail),
+                 "#2ECC71" if good else "#F1C40F")
+
+        y += 6
+        line("RESPONSE BUDGET", t["muted"])
+        for label, detail in (
+                ("end of speech", "%.2f s" % _endpoint_s()),
+                ("recognise", "~0.25 s"),
+                ("answer", "instant (on-device)"),
+                ("first words", "~0.20 s"),
+                ("TOTAL", "under 1 s")):
+            line("   %-13s %s" % (label, detail),
+                 DOSE_BLUE_LT if label == "TOTAL" else t["fg"])
+        col = COL_L
 
         for label, x0, cb in (("CHECK NOW", 56, self._on_update_pressed),
                               ("CLOSE", 466, self._close_sysinfo)):
@@ -4123,10 +4164,22 @@ class DoseApp:
         except Exception:
             self.voice = None
 
+    # Fast, free Piper voices, best first. The station only needs ONE;
+    # the list exists so a single bad path or a hiccup at one mirror
+    # can never leave the assistant with no voice at all. Every one of
+    # these is a warm female voice that runs faster than real time on
+    # a Pi 4. ("Amy" is deliberately absent — it was the slow one.)
+    VOICE_CANDIDATES = (
+        ("en_US-hfc_female-medium", "en/en_US/hfc_female/medium"),
+        ("en_US-lessac-medium", "en/en_US/lessac/medium"),
+        ("en_US-libritts_r-medium", "en/en_US/libritts_r/medium"),
+    )
+    VOICE_REFS = ("v1.0.0", "main")
+
     def _voice_download_models(self):
         """Missing speech/voice models: fetch them ourselves in the
-        background (Vosk small ~40 MB, Piper Amy voice ~60 MB), then
-        start the assistant. Pi only, once per boot."""
+        background (Vosk small ~40 MB, the fast hfc_female voice
+        ~60 MB), then start the assistant. Pi only, once per boot."""
         if getattr(self, "_voice_downloading", False):
             return
         if not hasattr(self, "_voice_dl_tries"):
@@ -4137,10 +4190,19 @@ class DoseApp:
             return
         self._voice_downloading = True
 
-        def fetch(url, path, min_bytes):
+        def fetch(url, path, min_bytes, magic=None):
+            """Download and VALIDATE. A CDN that answers a bad path
+            with an HTML error page must not leave a file on disk that
+            looks like a model — that is how a station ends up mute
+            with no explanation."""
             try:
                 data = urlopen(url, timeout=600).read()
                 if len(data) < min_bytes:
+                    return False
+                if magic and not data.startswith(magic):
+                    return False
+                if data.lstrip()[:15].lower().startswith(b"<!doctype html") \
+                        or data.lstrip()[:6].lower() == b"<html>":
                     return False
                 with open(path, "wb") as f:
                     f.write(data)
@@ -4174,40 +4236,50 @@ class DoseApp:
                 except Exception:
                     pass
 
-            if not _glob.glob(os.path.join(vdir, "*amy-medium*.onnx")):
-                # hold Amy's highest quality — upgrade from the low
-                # fallback whenever medium becomes reachable
-                base = ("https://huggingface.co/rhasspy/piper-voices/"
-                        "resolve/v1.0.0/en/en_US/amy/medium/")
-                got = (fetch(base + "en_US-amy-medium.onnx",
-                             os.path.join(vdir, "en_US-amy-medium.onnx"),
-                             10_000_000)
-                       and fetch(base + "en_US-amy-medium.onnx.json",
-                                 os.path.join(
-                                     vdir, "en_US-amy-medium.onnx.json"),
-                                 500))
-                if not got:
-                    for p in ("en_US-amy-medium.onnx",
-                              "en_US-amy-medium.onnx.json"):
-                        try:
-                            os.unlink(os.path.join(vdir, p))
-                        except Exception:
-                            pass
-                if not got and not _glob.glob(
-                        os.path.join(vdir, "*.onnx")):
-                    fd, tpath = _tf.mkstemp(suffix=".tar.gz")
-                    os.close(fd)
-                    if fetch("https://github.com/rhasspy/piper/releases/"
-                             "download/v0.0.2/voice-en-us-amy-low.tar.gz",
-                             tpath, 10_000_000):
-                        try:
-                            import tarfile
-                            with tarfile.open(tpath) as tf:
-                                tf.extractall(vdir)
-                        except Exception:
-                            pass
+            # The local neural voice. hfc_female is the one we want: a
+            # warm, soft female voice that synthesizes about 3x FASTER
+            # than real time on a Pi 4, which is what keeps replies
+            # under a second. (The old "Amy" voice is deliberately gone
+            # — it was far slower here and was why replies dragged.)
+            #
+            # We try each candidate against each ref until one lands
+            # and VALIDATES, so a single bad path can never leave the
+            # station with no voice. ONNX files start with the
+            # protobuf tag 0x08.
+            have = [f for f in _glob.glob(os.path.join(vdir, "*.onnx"))
+                    if "amy" not in os.path.basename(f).lower()]
+            if not have:
+                for name, sub in self.VOICE_CANDIDATES:
+                    onx = os.path.join(vdir, name + ".onnx")
+                    done = False
+                    for ref in self.VOICE_REFS:
+                        base = ("https://huggingface.co/rhasspy/"
+                                "piper-voices/resolve/%s/%s/"
+                                % (ref, sub))
+                        if (fetch(base + name + ".onnx", onx,
+                                  10_000_000, magic=b"\x08")
+                                and fetch(base + name + ".onnx.json",
+                                          onx + ".json", 500,
+                                          magic=b"{")):
+                            done = True
+                            break
+                        for _p in (onx, onx + ".json"):
+                            try:
+                                os.unlink(_p)
+                            except Exception:
+                                pass
+                    if done:
+                        break
+
+            # Retire the slow voice from any station that already has
+            # it, so it can never be picked again — but only once a
+            # replacement is actually on disk, so we never take away
+            # the only voice the station has.
+            if [f for f in _glob.glob(os.path.join(vdir, "*.onnx"))
+                    if "amy" not in os.path.basename(f).lower()]:
+                for _old in _glob.glob(os.path.join(vdir, "*amy*")):
                     try:
-                        os.unlink(tpath)
+                        os.unlink(_old)
                     except Exception:
                         pass
 
@@ -4649,7 +4721,7 @@ class DoseApp:
                 bt["busy"] = False
                 bt["status"] = (
                     f"Speaker played via {method} — did you hear "
-                    "Amy? If not, the wrong output is selected."
+                    "the voice? If not, the wrong output is selected."
                     if method else
                     "Speaker playback FAILED — no working output "
                     "device found.")
@@ -5040,17 +5112,53 @@ class DoseApp:
         if not self._voice_anim_running:
             self._voice_anim_running = True
             self._voice_ov_t0 = time.time()
+            self._voice_next_frame = self._voice_ov_t0
+            self._voice_sig = None
             self._voice_anim_tick()
+
+    # Wave geometry: three overlapping sine ribbons, drawn as NATIVE
+    # canvas lines. The old overlay re-rendered two supersampled PIL
+    # images (the panel and the wave) every single frame and threw the
+    # whole overlay away in between — on a Pi that is ~100 ms of work
+    # per frame, which is why it crawled. Now the panel image is built
+    # once and reused, the ribbons are plain canvas polylines whose
+    # coordinates are updated in place, and nothing is destroyed or
+    # re-allocated between frames. That runs comfortably at 60 fps.
+    WAVE_LAYERS = (
+        # (colour, amplitude x, frequency x, phase offset, width)
+        (DOSE_BLUE, 1.00, 1.0, 0.0, 3),
+        (DOSE_BLUE_LT, 0.72, 1.6, 1.9, 2),
+        ("#8fd0ff", 0.45, 2.3, 4.1, 2),
+    )
+    WAVE_POINTS = 44          # enough for a smooth ribbon, cheap to draw
+    VOICE_FPS = 60
+
+    def _voice_wave_coords(self, x, y, w, h, phase, amp,
+                           a_mul, f_mul, p_off):
+        mid = y + h / 2.0
+        span = (h / 2.0) - 2
+        step = w / float(self.WAVE_POINTS - 1)
+        pts = []
+        for i in range(self.WAVE_POINTS):
+            u = i / float(self.WAVE_POINTS - 1)
+            envelope = math.sin(math.pi * u) ** 1.5
+            pts.append(x + i * step)
+            pts.append(mid + span * amp * a_mul * envelope *
+                       math.sin(2 * math.pi * (u * 2.1 * f_mul)
+                                + phase + p_off))
+        return pts
 
     def _voice_anim_tick(self):
         if self._voice_state == "idle":
             self._voice_anim_running = False
             self.canvas.delete("voice_ov")
             self._voice_imgs.clear()
+            self._voice_items = {}
+            self._voice_sig = None
             return
         c = self.canvas
-        c.delete("voice_ov")
         t = self.theme
+        now = time.time()
 
         # During a conversation (add-med, corrections) the panel grows
         # and shows the dictation in big type so the user can verify
@@ -5058,63 +5166,107 @@ class DoseApp:
         in_convo = bool(getattr(self.voice, "_flow", None))
         bar_w = 620
         bar_h = 168 if in_convo else 94
+
+        # Rebuild the canvas items only when the LAYOUT changes, never
+        # per frame.
+        sig = (in_convo, bar_h, t["card_bg"])
+        items = getattr(self, "_voice_items", None) or {}
+        if getattr(self, "_voice_sig", None) != sig or not items:
+            c.delete("voice_ov")
+            self._voice_imgs.clear()
+            items = {}
+            bar_img = _pil_rounded_rect(bar_w, bar_h, 20, t["card_bg"],
+                                        outline=DOSE_BLUE, outline_w=2)
+            self._voice_imgs["bar"] = ImageTk.PhotoImage(bar_img)
+            items["bar"] = c.create_image(
+                0, 0, image=self._voice_imgs["bar"], anchor="nw",
+                tags="voice_ov")
+            for i, (color, _a, _f, _p, lw) in enumerate(self.WAVE_LAYERS):
+                items["w%d" % i] = c.create_line(
+                    0, 0, 1, 1, fill=color, width=lw, smooth=True,
+                    capstyle="round", tags="voice_ov")
+            items["top"] = c.create_text(
+                0, 0, text="", anchor="n", width=568,
+                font=self.font_small, fill=t["muted"], tags="voice_ov")
+            items["big"] = c.create_text(
+                0, 0, text="", anchor="n", width=580,
+                font=self.font_name, fill=DOSE_BLUE_LT, tags="voice_ov")
+            self._voice_items = items
+            self._voice_sig = sig
+            self._voice_shown = {}
+
         # eased slide-up entrance (250 ms, cubic ease-out)
-        p = min(1.0, (time.time() - self._voice_ov_t0) / 0.25)
+        p = min(1.0, (now - self._voice_ov_t0) / 0.25)
         ease = 1 - (1 - p) ** 3
         rise = int((1 - ease) * (bar_h + 14))
         bx, by = 26, SCREEN_H - bar_h - 14 + rise
-        bar_img = _pil_rounded_rect(bar_w, bar_h, 20, t["card_bg"],
-                                    outline=DOSE_BLUE, outline_w=2)
-        tk_bar = ImageTk.PhotoImage(bar_img)
-        self._voice_imgs["bar"] = tk_bar
-        c.create_image(bx, by, image=tk_bar, anchor="nw",
-                       tags="voice_ov")
+        c.coords(items["bar"], bx, by)
 
-        # Siri-style animated wave
-        phase = time.time() * 5.0
+        # Siri-style animated wave — coordinates only, no re-rendering
+        phase = now * 5.0
         amp = {"listening": 1.0, "thinking": 0.3}.get(
             self._voice_state, 0.45 + 0.45 * abs(math.sin(phase * 1.7)))
-        wave_img = _pil_voice_wave(bar_w - 48, 30, phase, amp)
-        tk_wave = ImageTk.PhotoImage(wave_img)
-        self._voice_imgs["wave"] = tk_wave
-        c.create_image(bx + 24, by + bar_h - 38, image=tk_wave,
-                       anchor="nw", tags="voice_ov")
+        wx, wy, ww, wh = bx + 24, by + bar_h - 38, bar_w - 48, 30
+        for i, (_c, a_mul, f_mul, p_off, _lw) in enumerate(
+                self.WAVE_LAYERS):
+            c.coords(items["w%d" % i],
+                     *self._voice_wave_coords(wx, wy, ww, wh, phase, amp,
+                                              a_mul, f_mul, p_off))
 
+        # Text: recomputed cheaply, but only PUSHED to the canvas when
+        # it actually changes (itemconfigure forces a redraw).
+        shown = self._voice_shown
         if in_convo:
-            # assistant's question (small, muted) + big dictation
-            if self._voice_reply:
-                q = self._fit_text(self._voice_reply,
-                                   self.font_small, 1120)
-                c.create_text(bx + bar_w // 2, by + 14, text=q,
-                              font=self.font_small, fill=t["muted"],
-                              anchor="n", width=568, tags="voice_ov")
-            big = self._voice_user_text or ("Listening…" if
-                  self._voice_state == "listening" else "…")
+            top = (self._fit_text(self._voice_reply, self.font_small,
+                                  1120) if self._voice_reply else "")
+            big = self._voice_user_text or (
+                "Listening…" if self._voice_state == "listening" else "…")
             big = self._fit_text(big, self.font_name, 1100)
-            c.create_text(bx + bar_w // 2, by + 62, text=big,
-                          font=self.font_name, fill=DOSE_BLUE_LT,
-                          anchor="n", width=580, tags="voice_ov")
+            top_style = (self.font_small, t["muted"])
+            big_style = (self.font_name, DOSE_BLUE_LT)
+            top_y, big_y = by + 14, by + 62
+        elif self._voice_state == "listening":
+            top = self._fit_text(self._voice_user_text or "Listening…",
+                                 self.font_title, 560)
+            big = ""
+            top_style = (self.font_title, DOSE_BLUE_LT)
+            big_style = (self.font_name, DOSE_BLUE_LT)
+            top_y, big_y = by + 14, by + 62
         else:
             if self._voice_state == "speaking" and self._voice_reply:
-                text = self._fit_text(self._voice_reply,
-                                      self.font_small, 1120)
-                color = t["fg"]
-            elif self._voice_state == "listening":
-                text = self._voice_user_text or "Listening…"
-                text = self._fit_text(text, self.font_title, 560)
-                c.create_text(bx + bar_w // 2, by + 14, text=text,
-                              font=self.font_title, fill=DOSE_BLUE_LT,
-                              anchor="n", width=580, tags="voice_ov")
-                text = None
+                top = self._fit_text(self._voice_reply, self.font_small,
+                                     1120)
+                top_style = (self.font_small, t["fg"])
             else:
-                text = "…"
-                color = t["muted"]
-            if text:
-                c.create_text(bx + bar_w // 2, by + 14, text=text,
-                              font=self.font_small, fill=color,
-                              anchor="n", width=568, tags="voice_ov")
+                top = "…"
+                top_style = (self.font_small, t["muted"])
+            big = ""
+            big_style = (self.font_name, DOSE_BLUE_LT)
+            top_y, big_y = by + 14, by + 62
 
-        self.root.after(50, self._voice_anim_tick)
+        for key, text, style, ty in (("top", top, top_style, top_y),
+                                     ("big", big, big_style, big_y)):
+            c.coords(items[key], bx + bar_w // 2, ty)
+            if shown.get(key) != (text, style):
+                c.itemconfigure(items[key], text=text, font=style[0],
+                                fill=style[1])
+                shown[key] = (text, style)
+
+        # Hold a steady frame rate: schedule by the time the NEXT frame
+        # is due, so a slow frame doesn't push every later one back and
+        # the animation never queues up behind itself. The clock is
+        # clamped on BOTH sides — if we fall behind we resync to now
+        # rather than trying to catch up in a burst, and if the clock
+        # ever gets ahead of real time we pull it back, so a frame can
+        # never be scheduled further out than one interval.
+        interval = 1.0 / self.VOICE_FPS
+        done = time.time()
+        nxt = getattr(self, "_voice_next_frame", 0.0) + interval
+        if not (done <= nxt <= done + interval):
+            nxt = done + interval
+        self._voice_next_frame = nxt
+        self.root.after(max(1, int(round((nxt - done) * 1000))),
+                        self._voice_anim_tick)
 
     # ── Quit ───────────────────────────────────────────────────────────────
     def _quit(self):

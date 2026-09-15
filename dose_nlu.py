@@ -61,15 +61,27 @@ _PATTERNS = [
                r"|\b(cancel (that|it)|stop talking)\b"),
     ("repeat", r"\b(say (that|it) again|repeat (that|it)?|what did you say|come again|pardon)\b|^what\??$"),
     ("medical_question", r"\b(side effects?|interact\w*|alcohol|drink(ing)? with|with food|empty stomach|"
-                         r"is it (ok|okay|safe)|should i (stop|skip|double)|should i take (more|less|another|two|it with|them with|extra)|double (up|dose)|"
+                         r"is it (ok|okay|safe|bad|harmful|dangerous)|"
+                         r"is (this|that|it|my \w+) (medication |medicine |drug )?(bad|safe|harmful|dangerous|ok|okay)|"
+                         r"should i (stop|skip|double|not take|keep taking|wait)|"
+                         r"should i take (more|less|another|two|it with|them with|extra)|"
+                         r"double (up|dose)|"
+                         r"can i (take|have) (two|more|another|an extra|extra|a double|double)|"
+                         r"can i (skip|stop|miss|halve|split|crush)|"
+                         r"what happens if i (take|miss|skip|stop|double)|"
+                         r"(is|are) (it|they|these|those|this) (bad|safe|harmful|addictive)|"
                          r"missed (a|my) dose|what (is|does) \w+ (for|do)|how much should|"
-                         r"can i take .* with|pregnan\w*|dosage)\b"),
+                         r"can i take .* with|pregnan\w*|dosage|overdos\w*|too much)\b"),
     ("unwell", r"\b(don'?t feel (well|good)|feel(ing)? (sick|dizzy|bad|awful)|dizzy|nause\w*|throwing up)\b"),
     ("taken_today", r"\b(what (have|did) i (already )?(taken|take|had)|what'?s been taken|taken today|"
                     r"my history)\b"),
     ("did_take", r"\b(did i (already )?take|have i (already )?taken|did i have|have i had)\b"),
     ("next_dose", r"\b(what'?s next|what is next|next (dose|pill|one|medication|med)|"
                   r"when (do|should) i take|when is my|what time (do|should) i take)\b"),
+    ("adherence", r"\b(how (am|have) i (been )?doing|how'?s it going with my|"
+                  r"my (adherence|score|streak|stats|record)|adherence|"
+                  r"am i (doing (ok|okay|well|good|alright)|on track|keeping up)|"
+                  r"have i been (good|consistent|taking them))\b"),
     ("pills_left", r"\b(how many (\w+ )*(left|remaining)|running (low|out)|refill|left in)\b"),
     ("dispense", r"\b(dispense|release|give me|i need my|can i (have|get)|time for my|ready for my|"
                  r"take my (pills?|meds?|medicine|medication|dose)|"
@@ -77,6 +89,8 @@ _PATTERNS = [
     ("schedule", r"\b(what ((medications?|meds?|pills?|drugs?|doses?) )?(do|should) i "
                  r"(need to )?(take|have)( today| this morning| tonight| now)?|"
                  r"what are my (medications?|meds?|pills?)|what do i take|"
+                 r"what am i (taking|on|due for)|what'?s due|what is due|"
+                 r"anything (to take|due)|"
                  r"my schedule|today'?s (doses?|medications?|pills?))\b"),
     ("time", r"\b(what time is it|what'?s the time|what is the time|tell me the time)\b"),
     ("help", r"\b(what can you do|help( me)?$|how do(es)? (this|you) work)\b"),
@@ -85,8 +99,15 @@ _PATTERNS = [
 ]
 _COMPILED = [(name, re.compile(p)) for name, p in _PATTERNS]
 
-YES = re.compile(r"^(yes|yeah|yep|yup|correct|right|that'?s (it|right)|sure|please do|uh huh|mm hmm)\b")
-NO = re.compile(r"^(no|nope|not that|wrong|neither)\b")
+YES = re.compile(
+    r"^(yes|yeah|yea|yah|yep|yup|correct|right|ok|okay|okey|k|"
+    r"that'?s (it|right|correct)|sure|please do|go ahead|do it|"
+    r"affirmative|absolutely|definitely|of course|indeed|"
+    r"uh huh|mm hmm|mhm)\b")
+NO = re.compile(
+    r"^(no|nope|nah|naw|not that|not quite|not right|wrong|incorrect|"
+    r"neither|negative|don'?t|do not|never ?mind|"
+    r"that'?s (wrong|not (it|right))|cancel)\b")
 
 NEEDS_MED = {"did_take"}                       # can't answer without a med
 OPTIONAL_MED = {"dispense", "pills_left", "next_dose"}

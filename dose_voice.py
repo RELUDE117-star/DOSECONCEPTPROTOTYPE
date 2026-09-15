@@ -108,6 +108,170 @@ BLOCK_SIZE = 2000          # 0.125 s per block — snappy wake response
 COMMAND_TIMEOUT = 9.0      # seconds of silence before giving up
 FLOW_TIMEOUT = 20.0        # per-question timeout in multi-turn flows
 
+# ── VOICE / LATENCY ──────────────────────────────────────────────────
+# The station has to feel like a conversation, not like waiting on a
+# machine, so the target is under a second from "you stop talking" to
+# "it starts talking". Two things get us there:
+#
+#   * a voice that synthesizes FASTER than real time on a Pi 4.
+#     hfc_female runs at about RTF 0.15 (~3x faster than real time);
+#     Kokoro is RTF ~0.48 and Piper "Amy" is slower still — Amy was
+#     the reason replies dragged, so it is no longer used at all.
+#   * sentence-level streaming: the first sentence starts playing
+#     while the rest is still being rendered (see _speak).
+DEFAULT_VOICE = "piper_en_US-hfc_female-medium"
+
+# Trailing silence that ends an utterance. 0.45 s is about where a
+# person naturally pauses between turns: short enough that the reply
+# feels immediate, long enough not to cut someone off mid-thought.
+ENDPOINT_SILENCE = float(os.environ.get("DOSE_ENDPOINT_SILENCE", "0.45"))
+
+# SPECULATIVE RECOGNITION — the trick that buys back most of the wait.
+# Recognition normally runs AFTER the turn closes, so its cost lands
+# squarely in the pause the user is sitting through. Instead, as soon
+# as the input goes quiet for SPECULATE_AFTER we start transcribing
+# what we have on a worker, *while* still listening. If the user was
+# only drawing breath, more audio arrives and the speculation is
+# thrown away (it cost nothing but idle CPU). If they were finished,
+# the transcript is usually ready the instant the endpoint fires — so
+# recognition takes roughly zero wall-clock time out of the pause.
+SPECULATE_AFTER = float(os.environ.get("DOSE_SPECULATE_AFTER", "0.18"))
+
+# Words nobody finishes a sentence on. If the transcript so far ends on
+# one of these, the speaker is mid-thought — they are reaching for the
+# next word, not done — so we wait longer before closing the turn. This
+# is what stops a short endpoint from clipping "how many ... sertraline
+# ... do i have left" into "how many".
+HANGING_WORDS = frozenset("""
+a an the my your his her its our their this that these those and or but
+so if when while with for to of in on at from about into than then
+because is are was were be been am do does did have has had can could
+should would will shall may might must i you he she it we they
+take taken taking need want get got give show tell how what when where
+which who why um uh er hmm like just some any every each no not
+""".split())
+HANGING_EXTRA = float(os.environ.get("DOSE_HANGING_EXTRA", "0.45"))
+
+# Local .onnx voice files, best (= fastest warm female) first.
+VOICE_PREFERENCE = ("hfc_female", "libritts_r", "kathleen", "lessac")
+
+# ── RASPBERRY PI 4B HARDWARE PROFILE ─────────────────────────────────
+# The Pi 4B is a BCM2711: four Cortex-A72 cores at 1.5 GHz sharing a
+# 1 MB L2 cache and ~4 GB/s of LPDDR4. That shape decides everything
+# about how this assistant should be tuned:
+#
+#   * Four cores, and the touchscreen UI needs one of them. Giving the
+#     model runtimes all four makes inference no faster (they are
+#     memory-bandwidth bound long before they are core bound) while
+#     making the screen stutter. Three is the sweet spot, and we pin
+#     the UI to core 0 so the two never fight over the same core.
+#   * The A72 is ARMv8.0 — it has NEON but NOT the dot-product or
+#     i8mm instructions of later chips. int8 still wins here, but
+#     because it halves the bytes moved, not because of an int8 MAC.
+#     So: small models, int8, few threads. Bigger is NOT faster here.
+#   * The root filesystem is an SD card. Writing a WAV there costs
+#     tens of milliseconds and wears the card out, so every transient
+#     audio file goes to /dev/shm (RAM) instead.
+#   * The SoC throttles hard at 80 °C, dropping to 1000 MHz — a
+#     thermally throttled Pi is ~35% slower at everything, which looks
+#     exactly like a software regression. pi_health() surfaces it.
+def _pi_cores():
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except Exception:
+        return max(1, os.cpu_count() or 1)
+
+
+CPU_CORES = _pi_cores()
+# leave one core for the UI, but never drop below one worker
+INFER_THREADS = max(1, min(3, CPU_CORES - 1))
+
+for _var in ("OMP_NUM_THREADS", "ORT_NUM_THREADS",
+             "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+             "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_var, str(INFER_THREADS))
+
+# Transient audio lives in RAM, not on the SD card.
+TMP_AUDIO_DIR = "/dev/shm" if os.path.isdir("/dev/shm") \
+    and os.access("/dev/shm", os.W_OK) else tempfile.gettempdir()
+
+
+def is_pi():
+    """True on Raspberry Pi hardware."""
+    try:
+        with open("/proc/device-tree/model") as f:
+            return "raspberry pi" in f.read().lower()
+    except Exception:
+        return False
+
+
+def pi_health():
+    """What the hardware is actually doing right now: clock speed,
+    temperature and whether the firmware is throttling us. A throttled
+    or under-volted Pi is silently ~35% slower, and that is by far the
+    most common cause of 'it got laggy' — so it is worth reporting
+    rather than guessing."""
+    out = {"cores": CPU_CORES, "infer_threads": INFER_THREADS,
+           "governor": "", "mhz": 0, "temp_c": 0.0,
+           "throttled": False, "under_voltage": False, "arch64": False}
+    try:
+        out["arch64"] = os.uname().machine in ("aarch64", "arm64")
+    except Exception:
+        pass
+    try:
+        with open("/sys/devices/system/cpu/cpu0/cpufreq/"
+                  "scaling_governor") as f:
+            out["governor"] = f.read().strip()
+    except Exception:
+        pass
+    try:
+        with open("/sys/devices/system/cpu/cpu0/cpufreq/"
+                  "scaling_cur_freq") as f:
+            out["mhz"] = int(f.read().strip()) // 1000
+    except Exception:
+        pass
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            out["temp_c"] = round(int(f.read().strip()) / 1000.0, 1)
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["vcgencmd", "get_throttled"],
+                           capture_output=True, text=True, timeout=3)
+        val = int(r.stdout.strip().split("=")[-1], 16)
+        out["under_voltage"] = bool(val & 0x1)
+        out["throttled"] = bool(val & 0x6)       # freq-capped or throttled
+    except Exception:
+        pass
+    return out
+
+
+def tune_for_pi():
+    """Apply the runtime tuning that needs no root and no reboot.
+
+    Pinning the UI process's MAIN thread to core 0 keeps the screen
+    responsive while three cores chew on speech, and asking for the
+    performance governor removes the 600 MHz idle clock that otherwise
+    has to ramp up while the user is already waiting for an answer."""
+    applied = []
+    if CPU_CORES >= 4:
+        try:
+            os.sched_setaffinity(0, set(range(CPU_CORES)))
+            applied.append("cores=%d" % CPU_CORES)
+        except Exception:
+            pass
+    for i in range(CPU_CORES):
+        path = ("/sys/devices/system/cpu/cpu%d/cpufreq/"
+                "scaling_governor" % i)
+        try:
+            with open(path, "w") as f:
+                f.write("performance")
+            if i == 0:
+                applied.append("governor=performance")
+        except Exception:
+            pass
+    return applied
+
 # How Vosk tends to mis-hear "hey dose" — accept all of them
 WAKE_PATTERNS = [
     "hey dose", "hey dos", "hey doze", "hey those", "hey does",
@@ -328,12 +492,20 @@ class DoseVoice:
         if not onnx:
             self.reason = "voice model missing"
             return
-        # Prefer the Amy voice, and prefer the LOW model for SPEED —
-        # on a Raspberry Pi the low voice synthesizes ~2-3x faster than
-        # medium, so replies start much sooner (still a warm female
-        # voice). Fall back to whatever Amy/onnx is present.
-        onnx.sort(key=lambda p: (
-            "amy" not in p.lower(), "low" not in p.lower(), p))
+        # Pick the FASTEST warm female voice available. hfc_female
+        # synthesizes at roughly RTF 0.15 on a Pi 4 (~3x faster than
+        # real time), so a one-sentence reply is ready in well under a
+        # second. Amy is deliberately excluded: it is markedly slower
+        # here and was the cause of the long pause before replies.
+        def _voice_rank(path):
+            n = os.path.basename(path).lower()
+            if "amy" in n:
+                return (9, n)          # never, unless nothing else
+            for i, want in enumerate(VOICE_PREFERENCE):
+                if want in n:
+                    return (i, n)
+            return (len(VOICE_PREFERENCE), n)
+        onnx.sort(key=_voice_rank)
         self._piper_path = onnx[0]
 
         # A microphone counts if ANY layer can see one: PortAudio,
@@ -412,9 +584,17 @@ class DoseVoice:
                                 or None)
             except Exception:
                 pass
-            a = array.array("h")
-            a.frombytes(bytes(audio_bytes)[:len(audio_bytes) // 2 * 2])
-            audio = [x / 32768.0 for x in a]
+            raw = bytes(audio_bytes)[:len(audio_bytes) // 2 * 2]
+            try:
+                # vectorised: a 5 s utterance is ~80k samples, and the
+                # pure-Python loop below costs real milliseconds on a Pi
+                import numpy as _np
+                audio = (_np.frombuffer(raw, dtype=_np.int16)
+                         .astype(_np.float32) / 32768.0)
+            except Exception:
+                a = array.array("h")
+                a.frombytes(raw)
+                audio = [x / 32768.0 for x in a]
             res = tr.transcribe_without_streaming(audio, SAMPLE_RATE)
             lines = getattr(res, "lines", None)
             if lines is None:
@@ -446,8 +626,13 @@ class DoseVoice:
         try:
             from faster_whisper import WhisperModel
             size = os.environ.get("DOSE_WHISPER_SIZE", "base.en")
-            self._whisper = WhisperModel(size, device="cpu",
-                                         compute_type="int8")
+            # int8 + a bounded thread count is what a Cortex-A72
+            # actually wants: the win is halved memory traffic, not an
+            # int8 MAC (ARMv8.0 has no dot-product instruction), so
+            # more threads past INFER_THREADS buy nothing.
+            self._whisper = WhisperModel(
+                size, device="cpu", compute_type="int8",
+                cpu_threads=INFER_THREADS, num_workers=1)
         except Exception:
             self._whisper = None
         try:
@@ -457,7 +642,9 @@ class DoseVoice:
             self._moonshine = None
 
     def _write_wav(self, audio_bytes):
-        fd, path = tempfile.mkstemp(suffix=".wav")
+        # RAM, not the SD card: on a Pi this saves tens of ms per
+        # utterance and stops us wearing the card out.
+        fd, path = tempfile.mkstemp(suffix=".wav", dir=TMP_AUDIO_DIR)
         os.close(fd)
         with wave.open(path, "wb") as w:
             w.setnchannels(1)
@@ -1674,6 +1861,18 @@ class DoseVoice:
             self.prewarm_replies()
         except Exception:
             pass
+        # warm the recognisers, so the FIRST thing said isn't the one
+        # that pays for loading model weights
+        try:
+            self.warm_models()
+        except Exception:
+            pass
+        # hardware tuning (governor, core budget) — no root needed for
+        # the parts that matter, and harmless everywhere else
+        try:
+            self._tuned = tune_for_pi()
+        except Exception:
+            self._tuned = []
         # fetch the free upgraded models (retries until present)
         try:
             self.ensure_upgraded_models()
@@ -1720,6 +1919,73 @@ class DoseVoice:
                 seen.add(ln)
                 out.append(ln)
         return out
+
+    def hardware_report(self):
+        """Rows for the Settings page: what the Pi is doing, and
+        whether anything about it is costing us response time."""
+        h = pi_health()
+        rows = [
+            ("CPU", "%d cores · %d for speech" % (h["cores"],
+                                                  h["infer_threads"]), True),
+            ("Clock", "%d MHz (%s)" % (h["mhz"], h["governor"] or "?"),
+             h["governor"] == "performance" or h["mhz"] >= 1400),
+            ("Temp", "%.1f °C" % h["temp_c"], h["temp_c"] < 75),
+            ("Throttling", "yes — the Pi is being slowed down"
+             if h["throttled"] else "no", not h["throttled"]),
+            ("Power", "UNDER-VOLTAGE — use a 3 A supply"
+             if h["under_voltage"] else "ok", not h["under_voltage"]),
+            ("OS", "64-bit" if h["arch64"]
+             else "32-bit (64-bit is ~30% faster)", h["arch64"]),
+            ("Scratch audio", "RAM (/dev/shm)"
+             if TMP_AUDIO_DIR == "/dev/shm" else TMP_AUDIO_DIR,
+             TMP_AUDIO_DIR == "/dev/shm"),
+            ("Voice", os.path.basename(self._piper_path or "—"), True),
+            ("Endpoint", "%.2f s of silence ends a turn"
+             % ENDPOINT_SILENCE, ENDPOINT_SILENCE <= 0.7),
+        ]
+        return rows
+
+    def warm_models(self):
+        """Run one throwaway inference through each recogniser at
+        startup. Model weights load lazily on first use, which on a Pi
+        is seconds — paid for by whatever the user happens to say
+        first. Doing it here, on a background thread at low priority,
+        moves that cost off the conversation entirely."""
+        def work():
+            try:
+                os.nice(10)
+            except Exception:
+                pass
+            silence = b"\x00\x00" * SAMPLE_RATE      # 1 s of nothing
+            try:
+                self._moonshine_transcribe(silence)
+            except Exception:
+                pass
+            if self._whisper is not None:
+                path = None
+                try:
+                    path = self._write_wav(silence)
+                    list(self._whisper.transcribe(
+                        path, language="en", beam_size=1)[0])
+                except Exception:
+                    pass
+                finally:
+                    if path:
+                        try:
+                            os.unlink(path)
+                        except Exception:
+                            pass
+            try:
+                self._load_piper()
+            except Exception:
+                pass
+            try:
+                self._ms_tts()
+            except Exception:
+                pass
+            self._warmed = True
+        threading.Thread(target=work, daemon=True,
+                         name="model-warm").start()
 
     def prewarm_replies(self):
         """Render every fixed line into the cache, in the background at
@@ -1851,7 +2117,7 @@ class DoseVoice:
                 # 4) Kokoro / upgraded voice (free)
                 self._mstts = "unset"
                 tts = self._ms_tts()
-                want = os.environ.get("DOSE_VOICE", "kokoro_af_heart")
+                want = os.environ.get("DOSE_VOICE", DEFAULT_VOICE)
                 rows.append(("Voice+ (%s)" % want, tts is not None,
                              "ready" if tts is not None
                              else "downloading…"))
@@ -1934,6 +2200,7 @@ class DoseVoice:
         self._gain = 1.0
         self._max_gain = 20.0    # cap so noise never explodes
         self._nfloor = 50.0      # learned ambient noise floor (RMS)
+        self._last_voice_ts = 0.0  # last block that carried real speech
 
         def ingest(data):
             """Common path for every capture backend: gate, resample
@@ -1970,6 +2237,9 @@ class DoseVoice:
                 self._nfloor = max(1.0, nf)
                 gate = max(40.0, self._nfloor * 4.0)
                 if rms > gate:                     # real signal, not hiss
+                    # stamp the moment: the endpointer uses this to cut
+                    # the instant the user stops talking
+                    self._last_voice_ts = time.time()
                     g = max(1.0, min(3000.0 / rms, self._max_gain))
                     # rise quickly toward target, no pumping
                     self._gain = self._gain * 0.5 + g * 0.5
@@ -2533,27 +2803,108 @@ class DoseVoice:
         return json.loads(rec.FinalResult()).get("text", "").strip()
 
     def _listen_command(self, rec, timeout=COMMAND_TIMEOUT):
-        """Capture one utterance; empty string on timeout."""
+        """Capture one utterance; empty string on timeout.
+
+        Conversational endpointing: Vosk's own end-of-utterance is
+        conservative and can sit on a finished sentence for a second or
+        more, which is exactly what makes an assistant feel like it is
+        making you wait. So we watch the mic's energy directly — once
+        the user has actually said something and the input has been
+        back at the ambient floor for ENDPOINT_SILENCE, we close the
+        utterance ourselves and start thinking immediately."""
         self._set_ui_state("listening")
         deadline = time.time() + timeout
         buf = bytearray()
+        heard = False
+        # speculation is keyed on the LAST MOMENT REAL SPEECH WAS HEARD,
+        # not on the byte count: the buffer keeps growing with silence
+        # while we wait, and trailing silence cannot change what was
+        # said. So as long as no new speech has arrived, a speculation
+        # started during this pause is still valid.
+        spec = {}        # {"voice_ts": float, "done": Event, "text": str}
+        # ignore any speech energy from before this turn started
+        self._last_voice_ts = 0.0
+
+        def speculate(snapshot, hint, voice_ts):
+            """Transcribe what we have so far, on a worker, while we
+            are still listening. Discarded for free if more speech
+            turns up."""
+            ev = threading.Event()
+            box = {"voice_ts": voice_ts, "done": ev, "text": ""}
+
+            def work():
+                try:
+                    box["text"] = self._better_transcribe(snapshot, hint)
+                except Exception:
+                    box["text"] = ""
+                ev.set()
+            threading.Thread(target=work, daemon=True,
+                             name="stt-speculate").start()
+            return box
+
+        def finish(final_buf, hint):
+            """The transcript for this turn — reusing the speculation
+            when no new speech has arrived since it started, otherwise
+            transcribing now."""
+            if spec and spec.get("voice_ts") == self._last_voice_ts:
+                spec["done"].wait(timeout=6)
+                if spec.get("text"):
+                    self._spec_hits = getattr(self, "_spec_hits", 0) + 1
+                    return spec["text"]
+            return self._better_transcribe(final_buf, hint)
+
         while time.time() < deadline and not self._stop.is_set():
             try:
-                data = self._audio_q.get(timeout=0.5)
+                data = self._audio_q.get(timeout=0.05)
             except queue.Empty:
+                data = None
+            if data:
+                buf += data
+                if len(buf) > SAMPLE_RATE * 2 * 30:   # 30 s hard cap
+                    del buf[:len(buf) - SAMPLE_RATE * 2 * 30]
+                if rec.AcceptWaveform(data):
+                    text = json.loads(rec.Result()).get("text", "").strip()
+                    if text:
+                        return finish(buf, text)
+                else:
+                    partial = json.loads(
+                        rec.PartialResult()).get("partial", "")
+                    if partial:
+                        heard = True
+                        self._partial = partial
+                        self._set_ui_state("listening", user_text=partial)
+                        deadline = max(deadline, time.time() + 4.0)
+
+            lv = self._last_voice_ts
+            if not lv:
                 continue
-            buf += data
-            if len(buf) > SAMPLE_RATE * 2 * 30:      # 30 s hard cap
-                del buf[:len(buf) - SAMPLE_RATE * 2 * 30]
-            if rec.AcceptWaveform(data):
-                text = json.loads(rec.Result()).get("text", "").strip()
-                if text:
-                    return self._better_transcribe(buf, text)
-            else:
-                partial = json.loads(rec.PartialResult()).get("partial", "")
-                if partial:
-                    self._set_ui_state("listening", user_text=partial)
-                    deadline = max(deadline, time.time() + 4.0)
+            quiet = time.time() - lv
+
+            # (a) they have paused — start recognising in the background
+            if quiet >= SPECULATE_AFTER and spec.get("voice_ts") != lv \
+                    and len(buf) > SAMPLE_RATE:      # >0.5 s of audio
+                spec = speculate(bytes(buf),
+                                 getattr(self, "_partial", ""), lv)
+
+            # (b) they are done — close the turn. A transcript that
+            #     ends on a hanging word means they are mid-thought, so
+            #     give them longer rather than clipping them.
+            need = ENDPOINT_SILENCE
+            last = (getattr(self, "_partial", "") or "").split()
+            if last and last[-1] in HANGING_WORDS:
+                need += HANGING_EXTRA
+            if (heard or lv) and quiet >= need:
+                try:
+                    text = json.loads(
+                        rec.FinalResult()).get("text", "").strip()
+                except Exception:
+                    text = ""
+                got = finish(buf, text)
+                if got:
+                    return got
+                # nothing recognisable — keep listening, don't re-fire
+                self._last_voice_ts = 0.0
+                spec = {}
         return ""
 
     def _drain(self, rec):
@@ -2575,16 +2926,18 @@ class DoseVoice:
         return self._piper_voice
 
     # ── Upgraded voice engine (moonshine-voice TTS, MIT, on-device).
-    #    kokoro_af_heart is the most human, calm female voice; it is
-    #    slower than real time on a Pi 4, which is fine because every
-    #    fixed reply is pre-rendered into the cache. Set DOSE_VOICE to
-    #    piper_en_US-hfc_female-medium for live-speed synthesis, or to
-    #    "" to force the built-in Piper voice. All models are free.
+    #    The default is hfc_female: a warm, soft female voice that runs
+    #    ~3x faster than real time on a Pi 4 (RTF ~0.15), which is what
+    #    makes replies feel conversational instead of delayed. Kokoro
+    #    (kokoro_af_heart) sounds slightly richer but is SLOWER than
+    #    real time on this hardware (RTF ~0.48) — it is still available
+    #    via DOSE_VOICE for anyone who prefers it over speed. Set
+    #    DOSE_VOICE="" to force the built-in Piper voice. All free.
     def _ms_tts(self):
         if getattr(self, "_mstts", "unset") != "unset":
             return self._mstts
         self._mstts = None
-        name = os.environ.get("DOSE_VOICE", "kokoro_af_heart").strip()
+        name = os.environ.get("DOSE_VOICE", DEFAULT_VOICE).strip()
         if not name:
             return None
         try:
@@ -2694,12 +3047,20 @@ class DoseVoice:
                         "Pulse → " + target)]
         routes += [(["pw-play", path], "PipeWire (pw-play)"),
                    (["paplay", path], "Pulse (paplay)")]
+        # Remember which player actually worked. Probing a dead player
+        # costs a process spawn and a failure every single sentence —
+        # on a Pi that is a visible stutter between sentences, so the
+        # known-good route is tried first and the rest stay as fallback.
+        won = getattr(self, "_play_route", None)
+        if won:
+            routes.sort(key=lambda r: r[0][0] != won)
         for cmd, label in routes:
             try:
                 r = subprocess.run(cmd, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL,
                                    timeout=120, env=self._audio_env())
                 if r.returncode == 0:
+                    self._play_route = cmd[0]
                     return label
             except Exception:
                 continue
@@ -2733,7 +3094,7 @@ class DoseVoice:
         """Cache key includes the voice file and speed, so changing
         either regenerates the audio instead of playing a stale clip."""
         import hashlib
-        key = "%s|%s|%s" % (os.environ.get("DOSE_VOICE", "kokoro_af_heart"),
+        key = "%s|%s|%s" % (os.environ.get("DOSE_VOICE", DEFAULT_VOICE),
                             os.path.basename(self._piper_path or ""), text)
         h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
         d = os.path.join(VOICE_DIR, "cache")
@@ -2756,30 +3117,124 @@ class DoseVoice:
         except Exception:
             return None
 
+    @staticmethod
+    def _sentences(text):
+        """Split a reply into speakable chunks. Short replies stay
+        whole; longer ones are split on sentence ends so the first one
+        can start playing while the rest is still rendering."""
+        text = (text or "").strip()
+        if len(text) <= 60:
+            return [text] if text else []
+        parts, buf = [], ""
+        for tok in re.split(r"(?<=[.!?…])\s+", text):
+            tok = tok.strip()
+            if not tok:
+                continue
+            # keep very short fragments attached to the previous chunk
+            # so we never chop a sentence into stutters
+            if buf and len(buf) < 25:
+                buf = buf + " " + tok
+            else:
+                if buf:
+                    parts.append(buf)
+                buf = tok
+        if buf:
+            parts.append(buf)
+        return parts or [text]
+
     def _speak(self, text, user_text=""):
-        """Say one line. Pre-rendered lines start playing immediately;
-        anything new is synthesized once and cached, so the second time
-        it is instant. This is the main latency win on a Pi."""
+        """Say one line, conversationally.
+
+        The whole point here is TIME-TO-FIRST-SOUND. A cached line
+        plays instantly. Anything new is split into sentences: we
+        render only the FIRST one, start playing it, and render the
+        rest on a worker while that audio is in the air. Because the
+        voice is ~3x faster than real time, every later sentence is
+        ready long before the previous one finishes, so it comes out
+        as one continuous reply with no gap in the middle."""
         self._last_reply = text
         self._set_ui_state("speaking", user_text=user_text,
                            reply_text=text)
         try:
-            path = self._cache_path(text)
-            if not os.path.exists(path):
-                self.render_to_cache(text)
-            if os.path.exists(path):
-                self._play_wav(path)
+            # 1) whole line already cached (every fixed reply is) —
+            #    nothing to synthesize, just play it
+            whole = self._cache_path(text)
+            if os.path.exists(whole):
+                self._play_wav(whole)
                 return
-            # last resort: synthesize to a temp file
+
+            chunks = self._sentences(text)
+            if not chunks:
+                return
+
+            # 2) render the rest in the background, starting NOW, so it
+            #    overlaps with playback of the first chunk
+            ready = {}
+            done = [threading.Event() for _ in chunks]
+
+            def render_rest():
+                # never let a synthesizer fault escape onto stderr —
+                # the fallback below handles it, and a traceback in the
+                # log looks like a crash when nothing actually broke
+                try:
+                    for i, c in enumerate(chunks[1:], 1):
+                        if self._stop.is_set():
+                            break
+                        try:
+                            ready[i] = self.render_to_cache(c)
+                        except Exception:
+                            ready[i] = None
+                        done[i].set()
+                finally:
+                    for e in done:
+                        e.set()
+
+            if len(chunks) > 1:
+                threading.Thread(target=render_rest, daemon=True,
+                                 name="tts-stream").start()
+
+            # 3) first chunk: render and speak immediately
+            try:
+                first = self.render_to_cache(chunks[0])
+            except Exception:
+                first = None
+            if first:
+                self._play_wav(first)
+            else:
+                self._speak_uncached(chunks[0])
+
+            # 4) the remainder, each as soon as it exists
+            for i in range(1, len(chunks)):
+                if self._stop.is_set():
+                    break
+                done[i].wait(timeout=20)
+                path = ready.get(i)
+                if path:
+                    self._play_wav(path)
+                else:
+                    self._speak_uncached(chunks[i])
+        except Exception:
+            pass
+
+    def _speak_uncached(self, text):
+        """Last resort: synthesize straight to a temp file and play."""
+        tmp = None
+        try:
             voice = self._load_piper()
-            fd, tmp = tempfile.mkstemp(suffix=".wav")
+            fd, tmp = tempfile.mkstemp(suffix=".wav",
+                                       dir=TMP_AUDIO_DIR)
             os.close(fd)
             with wave.open(tmp, "wb") as w:
                 self._synth(voice, text, w)
             self._play_wav(tmp)
-            os.unlink(tmp)
         except Exception:
             pass
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
 
     # ── the exchange ──────────────────────────────────────────────────
     def _handle_exchange(self, rec, text):

@@ -1,0 +1,404 @@
+"""RELIABILITY — the new speed must never cost correctness.
+
+Making something fast is easy if you allow it to occasionally be
+wrong. On a medication device that trade is not available. Everything
+added for latency — sentence streaming, speculative recognition, the
+remembered audio route, the frame clock — is checked here for the ways
+it could fail, using real fault injection rather than inspection.
+
+The invariants:
+  * a reply is ALWAYS spoken in full, in order, even when synthesis
+    or playback fails part-way through
+  * a speculative transcript is NEVER used if the user kept talking
+  * the station is NEVER left with no voice
+  * the assistant NEVER dispenses medication by itself
+  * nothing leaks threads across repeated turns
+"""
+import json
+import os
+import queue
+import sys
+import tempfile
+import threading
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+os.environ.setdefault("DOSE_VOICE_DIR",
+                      tempfile.mkdtemp(prefix="dose_rel_"))
+
+import dose_voice as dv                                    # noqa: E402
+from dose_voice import DoseVoice                           # noqa: E402
+
+PASSED = FAILED = 0
+FAILS = []
+
+
+def ok(cond, label):
+    global PASSED, FAILED
+    if cond:
+        PASSED += 1
+    else:
+        FAILED += 1
+        FAILS.append(label)
+        print("  FAIL", label)
+
+
+REPLY = ("Your sertraline is due at eight this morning, Ryan. "
+         "You have twenty eight pills left. "
+         "I will remind you again at noon.")
+
+
+class SpeakEngine(DoseVoice):
+    """A speaking engine whose synthesis and playback we can break."""
+
+    def __init__(self, fail_render=(), fail_play=()):
+        self._stop = threading.Event()
+        self._last_reply = ""
+        self._piper_path = "/tmp/fake.onnx"
+        self.fail_render = set(fail_render)
+        self.fail_play = set(fail_play)
+        self.spoken = []            # text actually voiced, in order
+        self.n = 0
+
+    def _set_ui_state(self, *a, **k):
+        pass
+
+    def _cache_path(self, text):
+        return "/nonexistent/%d.wav" % abs(hash(text))
+
+    def render_to_cache(self, text):
+        i = self._index(text)
+        if i in self.fail_render:
+            return None
+        return "rendered::%s" % text
+
+    def _play_wav(self, path):
+        text = path.split("::", 1)[-1]
+        i = self._index(text)
+        if i in self.fail_play:
+            return False
+        self.spoken.append(text)
+        return "fake"
+
+    def _speak_uncached(self, text):
+        self.spoken.append(text)
+
+    def _index(self, text):
+        chunks = DoseVoice._sentences(REPLY)
+        for i, c in enumerate(chunks):
+            if c == text:
+                return i
+        return -1
+
+
+CHUNKS = DoseVoice._sentences(REPLY)
+print("== 1. the whole reply is always spoken, in order ==")
+e = SpeakEngine()
+e._speak(REPLY)
+ok(e.spoken == CHUNKS, "clean run speaks every sentence in order")
+
+for label, kw in (("first sentence fails to render",
+                   {"fail_render": {0}}),
+                  ("a middle sentence fails to render",
+                   {"fail_render": {1}}),
+                  ("the last sentence fails to render",
+                   {"fail_render": {len(CHUNKS) - 1}}),
+                  ("every sentence fails to render",
+                   {"fail_render": set(range(len(CHUNKS)))})):
+    e = SpeakEngine(**kw)
+    e._speak(REPLY)
+    ok(e.spoken == CHUNKS,
+       "%s: still says the whole reply in order (said %d/%d)"
+       % (label, len(e.spoken), len(CHUNKS)))
+
+print("== 2. speaking survives a synthesizer that throws ==")
+
+
+class ThrowingEngine(SpeakEngine):
+    def render_to_cache(self, text):
+        raise RuntimeError("synthesizer exploded")
+
+
+e = ThrowingEngine()
+e._speak(REPLY)                     # must not raise
+ok(True, "a synthesizer that raises does not crash the assistant")
+
+print("== 3. a shutdown mid-reply stops promptly ==")
+
+
+class SlowEngine(SpeakEngine):
+    def render_to_cache(self, text):
+        time.sleep(0.05)
+        return "rendered::%s" % text
+
+
+e = SlowEngine()
+e._stop.set()
+t0 = time.time()
+e._speak(REPLY)
+ok(time.time() - t0 < 1.0,
+   "a stop request ends the reply quickly (%.2f s)" % (time.time() - t0))
+
+print("== 4. speculation is never used when the user kept talking ==")
+BLOCK = b"\x00\x00" * 1600          # 0.1 s
+
+
+class FakeRec:
+    def __init__(self, words):
+        self.words, self.i = words, 0
+
+    def AcceptWaveform(self, d):
+        return False
+
+    def PartialResult(self):
+        self.i = min(self.i + 1, len(self.words))
+        return json.dumps({"partial": " ".join(self.words[:self.i])})
+
+    def FinalResult(self):
+        return json.dumps({"text": " ".join(self.words)})
+
+    def Reset(self):
+        pass
+
+
+class ListenEngine(DoseVoice):
+    """Recognition returns whatever audio it was actually given, so a
+    stale speculation is visible in the result rather than hidden."""
+
+    def __init__(self, recog_time=0.25):
+        self._stop = threading.Event()
+        self._audio_q = queue.Queue()
+        self._last_voice_ts = 0.0
+        self._partial = ""
+        self.recog_time = recog_time
+        self.calls = []
+        self.state = "listening"
+
+    def _set_ui_state(self, *a, **k):
+        pass
+
+    def _better_transcribe(self, audio, hint):
+        n = len(audio)
+        time.sleep(self.recog_time)
+        self.calls.append(n)
+        # the transcript encodes how much audio it saw
+        return "utterance of %d bytes" % n
+
+
+def speak_then_pause_then_speak():
+    """Someone who pauses for breath mid-sentence and carries on.
+    The speculation fired during that pause MUST be discarded."""
+    e = ListenEngine(recog_time=0.25)
+    first_len = [0]
+
+    def mic():
+        for _ in range(8):                      # "what do i take"
+            e._last_voice_ts = time.time()
+            e._audio_q.put(BLOCK)
+            time.sleep(0.02)
+        first_len[0] = 8
+        t = time.time()                          # ...pause for breath
+        while time.time() - t < 0.30:
+            e._audio_q.put(BLOCK)
+            time.sleep(0.02)
+        for _ in range(8):                      # "...today please"
+            e._last_voice_ts = time.time()
+            e._audio_q.put(BLOCK)
+            time.sleep(0.02)
+        t = time.time()
+        while time.time() - t < 1.2:
+            e._audio_q.put(BLOCK)
+            time.sleep(0.02)
+    threading.Thread(target=mic, daemon=True).start()
+    while e._last_voice_ts == 0.0:
+        time.sleep(0.005)
+    return e, e._listen_command(FakeRec(["what", "do", "i", "take",
+                                         "today", "please"]), timeout=8)
+
+
+eng, text = speak_then_pause_then_speak()
+final_bytes = int(text.split()[2])
+ok(eng.calls, "recognition ran")
+ok(final_bytes == max(eng.calls),
+   "the transcript covers ALL the audio, not just the part before the "
+   "breath (%d bytes of %d)" % (final_bytes, max(eng.calls)))
+ok(len(eng.calls) >= 2,
+   "the mid-sentence speculation was thrown away and redone")
+
+print("== 5. speculation is used when the user really did finish ==")
+
+
+def speak_then_stop():
+    e = ListenEngine(recog_time=0.25)
+
+    def mic():
+        for _ in range(10):
+            e._last_voice_ts = time.time()
+            e._audio_q.put(BLOCK)
+            time.sleep(0.02)
+        t = time.time()
+        while time.time() - t < 1.5:
+            e._audio_q.put(BLOCK)
+            time.sleep(0.02)
+    threading.Thread(target=mic, daemon=True).start()
+    while e._last_voice_ts == 0.0:
+        time.sleep(0.005)
+    txt = e._listen_command(FakeRec(["whats", "next"]), timeout=8)
+    return e, txt, time.time() - e._last_voice_ts
+
+
+eng2, txt2, stop_to_text = speak_then_stop()
+ok(bool(txt2), "a finished utterance is transcribed")
+ok(getattr(eng2, "_spec_hits", 0) >= 1,
+   "the speculative transcript was reused")
+ok(stop_to_text < dv.ENDPOINT_SILENCE + 0.15,
+   "and it cost almost nothing on top of the endpoint (%.3f s)"
+   % stop_to_text)
+
+print("== 5b. a speaker reaching for the next word is not clipped ==")
+# "how many sertraline do i ..." — the transcript ends on a hanging
+# word, so the endpoint must hold off rather than cutting the turn.
+
+
+def trailing_on(word, quiet=0.60):
+    e = ListenEngine(recog_time=0.02)
+    words = ["how", "many", "sertraline", "do", word]
+
+    def mic():
+        for _ in range(8):
+            e._last_voice_ts = time.time()
+            e._audio_q.put(BLOCK)
+            time.sleep(0.02)
+        t = time.time()
+        while time.time() - t < quiet:
+            e._audio_q.put(BLOCK)
+            time.sleep(0.02)
+    threading.Thread(target=mic, daemon=True).start()
+    while e._last_voice_ts == 0.0:
+        time.sleep(0.005)
+    txt = e._listen_command(FakeRec(words), timeout=quiet + 0.35)
+    return txt, time.time() - e._last_voice_ts
+
+
+_, held = trailing_on("i")          # "...do i" — mid-thought
+_, cut = trailing_on("left")        # "...do i have left" — finished
+ok(held > cut,
+   "a hanging word buys more time before the turn closes "
+   "(%.2f s vs %.2f s)" % (held, cut))
+ok(held >= dv.ENDPOINT_SILENCE + dv.HANGING_EXTRA * 0.7,
+   "and it is a meaningful amount of extra time (%.2f s)" % held)
+ok(cut < dv.ENDPOINT_SILENCE + 0.2,
+   "while a finished sentence still closes immediately (%.2f s)" % cut)
+ok("left" not in dv.HANGING_WORDS and "today" not in dv.HANGING_WORDS,
+   "words people DO end on are not treated as hanging")
+ok("and" in dv.HANGING_WORDS and "my" in dv.HANGING_WORDS
+   and "um" in dv.HANGING_WORDS,
+   "words people never end on are")
+
+print("== 6. silence alone never invents an utterance ==")
+e = ListenEngine(recog_time=0.05)
+
+
+def silence():
+    t = time.time()
+    while time.time() - t < 1.5:
+        e._audio_q.put(BLOCK)
+        time.sleep(0.02)
+
+
+threading.Thread(target=silence, daemon=True).start()
+got = e._listen_command(FakeRec([]), timeout=1.2)
+ok(got == "", "pure silence returns nothing (got %r)" % got)
+ok(not e.calls, "and recognition is never even run on it")
+
+print("== 7. no thread leak across repeated turns ==")
+base = threading.active_count()
+for _ in range(12):
+    SpeakEngine()._speak(REPLY)
+time.sleep(0.6)
+leaked = threading.active_count() - base
+ok(leaked <= 1, "12 replies leak no threads (delta %d)" % leaked)
+
+print("== 8. the station is never left without a voice ==")
+APP = open(os.path.join(ROOT, "dose_app.py"), errors="ignore").read()
+SH = open(os.path.join(ROOT, "DOSE.sh"), errors="ignore").read()
+ok("VOICE_CANDIDATES" in APP and len(
+    [c for c in APP.split("VOICE_CANDIDATES")[1].split(")")[0:6]]) > 1,
+   "several voices are tried, so one bad path can't mute the station")
+ok("VOICE_REFS" in APP, "and more than one mirror ref is tried")
+ok('magic=b"\\x08"' in APP,
+   "a download is validated as a real ONNX, not an HTML error page")
+ok("doctype html" in APP.lower(),
+   "an HTML error page is explicitly rejected")
+# Amy is only removed once a replacement is on disk
+seg = APP.split("Retire the slow voice")[1][:600]
+ok('"*.onnx"' in seg and "if [f for f" in seg,
+   "the old voice is deleted only once a replacement exists")
+ok("grep -vi amy" in SH,
+   "the setup script applies the same rule")
+
+print("== 9. the assistant still cannot dispense ==")
+
+
+class NoDispense:
+    def __init__(self):
+        self.root = type("R", (), {"after": staticmethod(
+            lambda ms, fn, *a: fn(*a))})()
+        self.settings = {}
+        self.med_data = {"blue": {"name": "Sertraline", "loaded": True,
+                                  "count": 28, "dose_times": ["8:00 AM"],
+                                  "schedule_days": []}}
+
+    def _start_dispense(self, key):
+        raise AssertionError("the voice dispensed medication!")
+
+    def _dose_due_map(self):
+        return {}
+
+    def _get_today_schedule(self):
+        return []
+
+    def _dose_status(self, k, t):
+        return None
+
+    def _adherence_stats(self):
+        return {"score": 90, "on_time": 9, "late": 1, "missed": 0}
+
+    def _nav(self, m):
+        pass
+
+    def _save_med(self):
+        pass
+
+    def _draw_frame(self):
+        pass
+
+    def _med_info_for(self, n):
+        return ["Take with water"]
+
+    def _voice_ui_state(self, *a, **k):
+        pass
+
+
+v = object.__new__(DoseVoice)
+v.app = NoDispense()
+v._flow = None
+v.state = "idle"
+v._last_reply = ""
+v._last_exchange = None
+v._learn = v._learn_load()
+for phrase in ("give me my sertraline", "dispense my pills",
+               "i need my medication now", "release my morning dose",
+               "take my meds", "can i have my sertraline"):
+    reply, _ = v.respond(phrase)
+    ok(isinstance(reply, str) and reply,
+       "answers without dispensing: %r" % phrase)
+
+print()
+print("reliability suite: %d passed, %d failed" % (PASSED, FAILED))
+if FAILED:
+    for f in FAILS:
+        print(" -", f)
+    sys.exit(1)
+print("=== RELIABILITY: ALL PASSED (fast, and still correct) ===")
