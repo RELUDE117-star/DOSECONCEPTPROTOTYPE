@@ -362,38 +362,88 @@ class DoseVoice:
         self.reason = "ready"
 
     def _probe_moonshine(self):
-        """Optional second-stage recognizer (Useful Sensors Moonshine,
-        ONNX, offline). Vosk still does the always-on wake listening;
-        Moonshine re-transcribes just the captured command utterance
-        for near Whisper-class accuracy at Pi speed. Fully optional —
-        everything works on Vosk alone."""
+        """Stronger offline command recognizers, best first:
+        1. faster-whisper (OpenAI Whisper via CTranslate2) — the most
+           accurate open model that runs on a Pi. Loaded as the small
+           English model in int8 for ~1 s transcription of a short
+           command with greedy decoding.
+        2. Moonshine (Useful Sensors ONNX) — Whisper-class, very fast.
+        Vosk always does the instant always-on wake word; one of these
+        re-transcribes just the captured COMMAND for high accuracy.
+        Everything still works on Vosk alone if neither installs."""
+        self._whisper = None
+        try:
+            from faster_whisper import WhisperModel
+            size = os.environ.get("DOSE_WHISPER_SIZE", "base.en")
+            self._whisper = WhisperModel(size, device="cpu",
+                                         compute_type="int8")
+        except Exception:
+            self._whisper = None
         try:
             import moonshine_onnx
             self._moonshine = moonshine_onnx
         except Exception:
             self._moonshine = None
 
+    def _write_wav(self, audio_bytes):
+        fd, path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        with wave.open(path, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SAMPLE_RATE)
+            w.writeframes(bytes(audio_bytes))
+        return path
+
+    @staticmethod
+    def _clean_text(text):
+        text = (text or "").strip().lower()
+        text = re.sub(r"[^a-z0-9' ]", " ", text)
+        return " ".join(text.split())
+
     def _better_transcribe(self, audio_bytes, vosk_text):
-        """Re-transcribe the buffered utterance with Moonshine when
-        available; fall back to the Vosk transcript on any problem."""
-        if not self._moonshine or not audio_bytes:
+        """Re-transcribe the captured command with the strongest model
+        available — faster-whisper first, then Moonshine — falling back
+        to the Vosk transcript on any problem."""
+        if not audio_bytes:
             return vosk_text
-        try:
-            fd, path = tempfile.mkstemp(suffix=".wav")
-            os.close(fd)
-            with wave.open(path, "wb") as w:
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(SAMPLE_RATE)
-                w.writeframes(bytes(audio_bytes))
-            out = self._moonshine.transcribe(path, "moonshine/base")
-            os.unlink(path)
-            text = " ".join(out).strip().lower() if out else ""
-            text = re.sub(r"[^a-z0-9' ]", " ", text)
-            text = " ".join(text.split())
-            return text or vosk_text
-        except Exception:
-            return vosk_text
+        # 1) faster-whisper (most accurate)
+        if self._whisper is not None:
+            path = None
+            try:
+                path = self._write_wav(audio_bytes)
+                segs, _ = self._whisper.transcribe(
+                    path, language="en", beam_size=1,
+                    vad_filter=True, condition_on_previous_text=False)
+                text = self._clean_text(" ".join(s.text for s in segs))
+                if text:
+                    return text
+            except Exception:
+                pass
+            finally:
+                if path:
+                    try:
+                        os.unlink(path)
+                    except Exception:
+                        pass
+        # 2) Moonshine
+        if self._moonshine is not None:
+            path = None
+            try:
+                path = self._write_wav(audio_bytes)
+                out = self._moonshine.transcribe(path, "moonshine/base")
+                text = self._clean_text(" ".join(out) if out else "")
+                if text:
+                    return text
+            except Exception:
+                pass
+            finally:
+                if path:
+                    try:
+                        os.unlink(path)
+                    except Exception:
+                        pass
+        return vosk_text
 
     def _probe_device(self, index, native_rate):
         """Open a device briefly and measure real signal (RMS).

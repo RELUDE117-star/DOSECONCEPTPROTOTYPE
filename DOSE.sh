@@ -163,6 +163,7 @@ if [ ! -f "$VOICE_DIR/.bt_ready3" ]; then
             || echo "  (could not install $PKG — continuing)"
     done
     # Optional stronger command recognizer (Moonshine, offline ONNX)
+    python3 -m pip install --break-system-packages faster-whisper 2>/dev/null || python3 -m pip install faster-whisper 2>/dev/null || true
     python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
         || python3 -m pip install useful-moonshine-onnx 2>/dev/null || true
     touch "$VOICE_DIR/.bt_ready3"
