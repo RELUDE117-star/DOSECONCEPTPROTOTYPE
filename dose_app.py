@@ -4128,6 +4128,28 @@ class DoseApp:
         y += 62
 
         # SPEAKER — tappable list of every output; tap selects + tests
+        # ── VOICE MODELS: proof on the device that the free upgraded
+        #    models actually downloaded (or are still coming).
+        try:
+            rows = v.model_status() if v else []
+        except Exception:
+            rows = []
+        if rows:
+            parts = []
+            for label, ok_, detail in rows[:4]:
+                mark = "OK" if ok_ else ("…" if ok_ is None else "X")
+                short = label.split(" (")[0]
+                parts.append("%s %s" % (short, mark))
+            allok = all(r[1] for r in rows)
+            c.create_text(56, y,
+                          text=self._fit_text(
+                              "MODELS: " + "  ·  ".join(parts),
+                              self.font_tiny, 556),
+                          font=self.font_tiny,
+                          fill="#2ECC71" if allok else DOSE_BLUE_LT,
+                          anchor="nw")
+            y += 18
+
         c.create_text(56, y, text="SPEAKER  (tap one to use + hear it)",
                       font=self.font_label, fill=t["muted"], anchor="nw")
         y += 22

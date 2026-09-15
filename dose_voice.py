@@ -1674,6 +1674,11 @@ class DoseVoice:
             self.prewarm_replies()
         except Exception:
             pass
+        # fetch the free upgraded models (retries until present)
+        try:
+            self.ensure_upgraded_models()
+        except Exception:
+            pass
 
     # Every fixed sentence the engine can say. Pre-rendered in the
     # background so these ALWAYS start playing instantly (the build
@@ -1794,6 +1799,80 @@ class DoseVoice:
             return fired
         except Exception:
             return False
+
+    # ── Upgraded-model status + self-healing download ────────────────
+    #    You should be able to SEE on the device whether the free
+    #    upgraded models actually landed, not take it on faith. This
+    #    reports each model's real state and keeps retrying in the
+    #    background until they're present (network may come up later).
+    def model_status(self):
+        """[(label, ok, detail)] for every model the voice uses."""
+        st = getattr(self, "_model_status", None)
+        if st:
+            return st
+        return [("checking models…", None, "")]
+
+    def ensure_upgraded_models(self, tries=6):
+        """Download the free Moonshine speech model and the Kokoro/Piper
+        voice if missing, retrying with backoff. Safe to call anytime."""
+        if getattr(self, "_model_dl_running", False):
+            return
+        self._model_dl_running = True
+
+        def work():
+            try:
+                os.nice(10)
+            except Exception:
+                pass
+            delay = 5
+            for attempt in range(tries):
+                rows = []
+
+                # 1) Vosk (wake word / fallback recogniser) — local dir
+                vok = bool(self._vosk_dir and os.path.isdir(self._vosk_dir))
+                rows.append(("Speech (Vosk)", vok,
+                             os.path.basename(self._vosk_dir or "")
+                             if vok else "missing"))
+
+                # 2) Piper voice file — local .onnx
+                pok = bool(self._piper_path
+                           and os.path.exists(self._piper_path))
+                rows.append(("Voice (Piper)", pok,
+                             os.path.basename(self._piper_path or "")
+                             if pok else "missing"))
+
+                # 3) Moonshine v2 streaming recogniser (free, MIT)
+                self._ms_v2 = "unset"
+                ms = self._moonshine_v2()
+                rows.append(("Speech+ (Moonshine)", ms is not None,
+                             "ready" if ms is not None
+                             else "downloading…"))
+
+                # 4) Kokoro / upgraded voice (free)
+                self._mstts = "unset"
+                tts = self._ms_tts()
+                want = os.environ.get("DOSE_VOICE", "kokoro_af_heart")
+                rows.append(("Voice+ (%s)" % want, tts is not None,
+                             "ready" if tts is not None
+                             else "downloading…"))
+
+                self._model_status = rows
+                if all(r[1] for r in rows):
+                    # everything present — re-render cached replies in
+                    # the upgraded voice, then stop retrying
+                    try:
+                        self.prewarm_replies()
+                    except Exception:
+                        pass
+                    break
+                if self._stop.is_set():
+                    break
+                time.sleep(delay)
+                delay = min(delay * 2, 120)
+            self._model_dl_running = False
+
+        threading.Thread(target=work, daemon=True,
+                         name="model-fetch").start()
 
     def _vosk_grammar(self):
         """Constrain recognition to the words Dose actually expects —
