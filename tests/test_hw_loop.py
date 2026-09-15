@@ -133,7 +133,7 @@ while time.time() - t0 < 60:
 print("mic_name:", v.mic_name)
 for ln in getattr(v, "mic_trail", []):
     print("trail:", ln)
-assert any("noise floor 0" in ln for ln in v.mic_trail), \
+assert any("floor 0" in ln for ln in v.mic_trail), \
     "dead route not detected"
 assert "parec" in v.mic_name and "hearing OK" in v.mic_name, v.mic_name
 

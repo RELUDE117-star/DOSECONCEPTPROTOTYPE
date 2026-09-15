@@ -4191,6 +4191,9 @@ class DoseApp:
         engine does automatically on hot-plug, on demand."""
         bt = self._bt_state()
         bt["status"] = "Re-scanning USB audio devices…"
+        # a rescan supersedes any earlier mic-test verdict
+        self._mic_test_result = None
+        self._mic_diag = None
         self._draw_frame()
         if self.voice:
             self.voice.request_reopen()

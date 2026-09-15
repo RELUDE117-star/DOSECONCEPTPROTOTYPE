@@ -402,6 +402,17 @@ class DoseVoice:
                                     "cm108", "cm106", "audio device"))
 
     @staticmethod
+    def _looks_like_speaker(desc):
+        """Does this card look like a pure OUTPUT device (a USB
+        speaker) that might expose a dead capture endpoint? Used to
+        deprioritize it so a real mic wins. Jieli 'UACDemo' boards
+        are the common cheap USB speaker."""
+        d = (desc or "").lower()
+        return any(k in d for k in ("jieli", "uacdemo", "uac demo",
+                                    "speaker", "headphone", "output",
+                                    "playback"))
+
+    @staticmethod
     def _alsa_capture_cards():
         """ALSA card numbers that can CAPTURE, USB mic first. Read
         straight from the kernel (/proc/asound) — no tools, no
@@ -1033,10 +1044,13 @@ class DoseVoice:
 
         self._native_rate = SAMPLE_RATE
         self._ratecv_state = None
+        self._gain = 1.0
+        self._max_gain = 20.0    # cap so noise never explodes
 
         def ingest(data):
             """Common path for every capture backend: gate, resample
-            to 16 kHz, feed the queue, service the live level meter."""
+            to 16 kHz, apply auto-gain, feed the queue, service the
+            live level meter."""
             if self._muted or self.state == "speaking":
                 return
             if self._native_rate != SAMPLE_RATE:
@@ -1047,6 +1061,24 @@ class DoseVoice:
                         self._ratecv_state)
                 except Exception:
                     return
+            # NOISE-GATED AUTO-GAIN: cheap USB mics (C-Media/CM108)
+            # capture very quietly — raw speech can sit near the noise
+            # floor where Vosk hears nothing. When a block carries real
+            # sound (peak well above the noise floor), boost it toward
+            # a healthy level; when it's just the idle hiss, leave it
+            # alone so amplified noise never triggers false wakes.
+            # Hard-limited so it can never clip into distortion.
+            try:
+                import audioop
+                peak = audioop.max(data, 2)
+                if peak > 220:            # real sound, not idle hiss
+                    want = 9000.0         # target peak amplitude
+                    g = max(1.0, min(want / peak, self._max_gain))
+                    self._gain = self._gain * 0.7 + g * 0.3
+                    if self._gain > 1.05:
+                        data = audioop.mul(data, 2, self._gain)
+            except Exception:
+                pass
             lp = self._level_probe
             if lp and time.time() < lp["until"]:
                 try:
@@ -1260,6 +1292,11 @@ class DoseVoice:
             # zero PipeWire in the path — lowest latency, and the
             # method the mic's own vendor documents. Every capture
             # card the kernel sees, USB ahead of the built-ins.
+            # Each route: (label, opener, is_speakerish). A card whose
+            # name looks like a pure OUTPUT device (a USB speaker such
+            # as the Jieli UAC demo) may also expose a dead capture
+            # endpoint — it is deprioritized so a real microphone on
+            # another card always wins the tie.
             routes = []
             for card_num, desc in self._alsa_capture_cards():
                 tag = "card %d %s" % (
@@ -1267,37 +1304,39 @@ class DoseVoice:
                     "(USB)" if self._is_usb_name(desc) else "")
                 routes.append(
                     ("arecord %s" % tag.strip(),
-                     lambda c=card_num: open_arecord(c)))
+                     (lambda c=card_num: open_arecord(c)),
+                     self._looks_like_speaker(desc)))
             routes += [
                 ("system default (pw-record)", lambda: open_pipe_cmd(
                     ["pw-record", "--rate", "16000", "--channels",
                      "1", "--format", "s16", "-"],
-                    "system default (pw-record)")),
+                    "system default (pw-record)"), False),
                 ("system default (parec)", lambda: open_pipe_cmd(
                     ["parec", "--rate=16000", "--format=s16le",
                      "--channels=1", "--latency-msec=20"],
-                    "system default (parec)")),
-                ("USB hardware direct", open_usb_portaudio),
-                ("portaudio default", open_portaudio),
+                    "system default (parec)"), False),
+                ("USB hardware direct", open_usb_portaudio, False),
+                ("portaudio default", open_portaudio, False),
             ]
             if target:
                 routes += [
                     ("targeted %s (pw-record)" % target,
-                     lambda: open_pipe_cmd(
+                     (lambda: open_pipe_cmd(
                          ["pw-record", "--target", target, "--rate",
                           "16000", "--channels", "1", "--format",
-                          "s16", "-"], "targeted " + target)),
+                          "s16", "-"], "targeted " + target)), False),
                     ("targeted %s (parec)" % target,
-                     lambda: open_pipe_cmd(
+                     (lambda: open_pipe_cmd(
                          ["parec", "-d", target, "--rate=16000",
                           "--format=s16le", "--channels=1",
                           "--latency-msec=50"],
-                         "targeted " + target)),
+                         "targeted " + target)), False),
                 ]
             self.mic_trail = []
-            live = None
+            live = None          # best real-signal route (non-speaker)
+            live_speaker = None  # live but looks like a speaker's endpoint
             first_openable = None
-            for label, opener in routes:
+            for label, opener, speakerish in routes:
                 cap = opener()
                 if not cap:
                     self.mic_trail.append(label + ": could not open")
@@ -1305,21 +1344,28 @@ class DoseVoice:
                 floor = route_floor()
                 close_capture(cap)
                 self.mic_trail.append(
-                    "%s: opened, noise floor %d" % (label, floor))
+                    "%s: opened, floor %d%s" % (
+                        label, floor,
+                        " (output device?)" if speakerish else ""))
                 if first_openable is None:
                     first_openable = (label, opener)
                 if floor > 1:
-                    live = (label, opener)
-                    break
-            choice = live or first_openable
+                    if speakerish:
+                        if live_speaker is None:
+                            live_speaker = (label, opener)
+                    else:
+                        live = (label, opener)
+                        break   # a real mic with signal — take it
+            choice = live or live_speaker or first_openable
+            is_live = bool(live or live_speaker)
             if not choice:
                 self.mic_trail.append("no capture route opened at all")
                 return None
             cap = choice[1]()
             if cap:
                 self.mic_name = choice[0] + (
-                    " · hearing OK" if live else " · SILENT")
-                if not live:
+                    " · hearing OK" if is_live else " · SILENT")
+                if not is_live:
                     self.mic_trail.append(
                         "every route was digitally silent — kept "
                         + choice[0])
