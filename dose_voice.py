@@ -29,6 +29,11 @@ import time
 import wave
 from datetime import datetime
 
+try:                       # strong deterministic NLU (phonetic drug matcher)
+    import dose_nlu as _nlu_mod
+except Exception:
+    _nlu_mod = None
+
 # ── audioop shim ──────────────────────────────────────────────────────
 # Python 3.13 REMOVED the stdlib 'audioop' module. Every audio
 # measurement here (rms/max/mul/tomono/ratecv) depends on it — without
@@ -2591,11 +2596,53 @@ class DoseVoice:
             return ("nav:settings", None)
         if has(" my stats ", " user screen ", " show my adherence "):
             return ("nav:user", None)
+
+        # ── NLU FALLBACK: nothing above understood this. The
+        #    deterministic pattern set + phonetic drug matcher catch
+        #    phrasings the keyword rules miss ("what medication do I
+        #    need to take today"). Informational intents only — voice
+        #    can never dispense; _intent_dispense just guides to the
+        #    screen. Handlers take a spoken string, never None.
+        nlu_i = self._nlu(t)
+        if nlu_i is not None and nlu_i.name != "unknown":
+            arg = nlu_i.med or ""
+            mapping = {
+                "schedule": ("remaining_today", None),
+                "taken_today": ("adherence", None),
+                "next_dose": ("schedule", arg) if arg else ("next_dose", None),
+                "pills_left": ("count", arg),
+                "did_take": ("taken_check", arg),
+                "dispense": ("dispense", arg),
+                "time": ("time", None),
+            }
+            hit = mapping.get(nlu_i.name)
+            if hit and (arg or nlu_i.name not in ("pills_left", "did_take",
+                                                  "dispense")):
+                return hit
         return None
 
     # ══════════════════════════════════════════════════════════════════
     #  THE BRAIN — intent engine with BT-7274's personality
     # ══════════════════════════════════════════════════════════════════
+    def _med_names(self):
+        """Medication names loaded on THIS device — used as key terms for
+        recognition and for the phonetic matcher."""
+        try:
+            return [md.get("name", "") for md in self.app.med_data.values()
+                    if md.get("loaded") and md.get("name")]
+        except Exception:
+            return []
+
+    def _nlu(self, text):
+        """Deterministic understanding with phonetic drug matching that
+        REFUSES to guess between similar names. None if unavailable."""
+        if _nlu_mod is None:
+            return None
+        try:
+            return _nlu_mod.parse(text, self._med_names())
+        except Exception:
+            return None
+
     def respond(self, text):
         """(reply_text, keep_listening). Pure logic — fully testable.
 
@@ -2610,6 +2657,16 @@ class DoseVoice:
         t = " " + re.sub(r"[^a-z0-9' ]", " ", text.lower()).strip() + " "
 
         # ── SAFETY GATE — always first ──
+        # Self-harm is checked BEFORE the generic emergency line so it
+        # gets the suicide & crisis lifeline (988), not just 911.
+        _crisis = self._nlu(text) if _nlu_mod is not None else None
+        if _crisis is not None and _crisis.name == "crisis":
+            return ("I am really glad you told me, Ryan. You do not have "
+                    "to go through this alone. You can call or text "
+                    "9 8 8, the Suicide and Crisis Lifeline, any time, to "
+                    "talk with someone right now. If you are in danger, "
+                    "please call 9 1 1."), False
+
         if self._is_emergency(t):
             return ("This sounds like an emergency, Ryan. I am "
                     "only an assistant — please call 9 1 1, or "
@@ -2622,6 +2679,26 @@ class DoseVoice:
                     "advice. Never change a dose on your own — "
                     "please contact your pharmacist or doctor. "
                     "Protocol three: protect the patient."), False
+
+        # ── STRONG NLU SAFETY UNION (adds to the gates above, never
+        #    weakens them): self-harm crisis, emergency and medical
+        #    advice are also caught by the deterministic pattern set,
+        #    and a drug name we are not SURE of is never guessed.
+        nlu_i = None if self._flow else self._nlu(text)
+        if nlu_i is not None:
+            if nlu_i.name == "emergency":
+                return ("This sounds like an emergency, Ryan. I am only "
+                        "an assistant — please call 9 1 1 right now."), False
+            if nlu_i.name == "medical_question":
+                return ("Safety protocol, Ryan: I cannot give medical "
+                        "advice. Never change a dose on your own — "
+                        "please contact your pharmacist or doctor."), False
+            # Refuse to guess between similar medication names.
+            if (nlu_i.suggestion and not nlu_i.med
+                    and nlu_i.name in ("did_take", "pills_left",
+                                       "dispense", "next_dose")):
+                return ("I want to be certain before I answer, Ryan — "
+                        "did you mean %s?" % nlu_i.suggestion), True
 
         if self._flow:
             if time.time() - self._flow.get("ts", time.time()) > 120:
