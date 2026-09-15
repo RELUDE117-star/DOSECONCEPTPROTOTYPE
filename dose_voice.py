@@ -224,6 +224,7 @@ class DoseVoice:
         self._pause_capture = False   # full self-test holds the devices
         self._paused_ack = False      # capture loop released the device
         self._forced_card = None      # (card, device) the self-test found
+        self._forced_sink = None      # user-picked speaker output
         self._probe()
         self._probe_moonshine()
 
@@ -805,6 +806,12 @@ class DoseVoice:
         if cached and now - cached[0] < 5:
             return cached[1]
         sinks = self._list_sinks()
+        # user's explicit pick wins, if it's still present
+        forced = getattr(self, "_forced_sink", None)
+        if forced and forced in sinks:
+            self._make_default(forced, "Audio/Sink", 0.9)
+            self._out_cache = (now, forced)
+            return forced
         target = None
         for s in sinks:
             if self._is_usb_name(s):
@@ -1053,38 +1060,87 @@ class DoseVoice:
         self._ptt_requested = True
         return True
 
+    def list_capture_devices(self):
+        """All recordable devices as [(card, device, short_name,
+        is_mic)], for the on-screen mic picker."""
+        out = []
+        try:
+            for card, dev, desc in self._alsa_capture_cards():
+                short = desc.split("[")[0].strip() or desc[:28]
+                out.append((card, dev, short[:34],
+                            self._looks_like_mic(desc)
+                            and not self._card_has_playback(card)))
+        except Exception:
+            pass
+        return out
+
+    def force_card(self, card, device):
+        """User picked a specific mic in Settings — use exactly it and
+        reopen capture now."""
+        self._forced_card = (int(card), int(device))
+        self.request_reopen()
+
+    def list_output_devices(self):
+        """All audio OUTPUTS as [(sink_name, short_label)], for the
+        on-screen speaker picker."""
+        out = []
+        for s in self._list_sinks():
+            short = s
+            for p in ("alsa_output.", "bluez_output."):
+                if short.startswith(p):
+                    short = short[len(p):]
+            out.append((s, short[:40]))
+        return out
+
+    def force_sink(self, sink):
+        """User picked a specific speaker — make it the output and
+        play everything through it from now on."""
+        self._forced_sink = sink
+        self._out_cache = None
+        try:
+            self._make_default(sink, "Audio/Sink", 0.9)
+        except Exception:
+            pass
+
     def _arecord_probe(self, card, device, seconds=2.5):
-        """Record DIRECTLY from one ALSA capture device with arecord
-        and return (rms, note). rms>0 means the hardware delivered
-        real audio; 0 means silence; -1 means arecord errored (note
-        holds the reason). Tries the device's native rates."""
-        for rate in (48000, 44100, 16000):
-            fd, path = tempfile.mkstemp(suffix=".wav")
-            os.close(fd)
-            try:
-                r = subprocess.run(
-                    ["arecord", "-D", "plughw:%d,%d" % (card, device),
-                     "-f", "S16_LE", "-r", str(rate), "-c", "1",
-                     "-d", str(int(seconds)), path],
-                    capture_output=True, text=True,
-                    timeout=seconds + 6, env=self._audio_env())
-                if r.returncode != 0:
-                    note = (r.stderr or "").strip().splitlines()
-                    note = note[-1][:90] if note else "arecord failed"
-                    continue
-                import audioop
-                with wave.open(path) as w:
-                    data = w.readframes(w.getnframes())
-                rms = audioop.rms(data, 2) if data else 0
-                return (rms, "ok @%dHz" % rate)
-            except Exception as e:
-                note = str(e)[:90]
-            finally:
+        """Record DIRECTLY from one capture device and return
+        (rms, note). rms>0 = real audio, 0 = silence, -1 = every open
+        failed. Tries several device spellings AND rates, because on a
+        PipeWire Pi raw plughw can be busy/silent while the ALSA
+        'default'/'sysdefault' paths (which go through PipeWire) work."""
+        note = "no capture"
+        devs = ["plughw:%d,%d" % (card, device),
+                "hw:%d,%d" % (card, device),
+                "sysdefault:CARD=%d" % card,
+                "default"]
+        import audioop
+        for dev in devs:
+            for rate in (48000, 44100, 16000):
+                fd, path = tempfile.mkstemp(suffix=".wav")
+                os.close(fd)
                 try:
-                    os.unlink(path)
-                except Exception:
-                    pass
-        return (-1, note if 'note' in dir() else "no capture")
+                    r = subprocess.run(
+                        ["arecord", "-D", dev, "-f", "S16_LE",
+                         "-r", str(rate), "-c", "1",
+                         "-d", str(int(seconds)), path],
+                        capture_output=True, text=True,
+                        timeout=seconds + 6, env=self._audio_env())
+                    if r.returncode != 0:
+                        e = (r.stderr or "").strip().splitlines()
+                        note = e[-1][:80] if e else "arecord failed"
+                        continue
+                    with wave.open(path) as w:
+                        data = w.readframes(w.getnframes())
+                    rms = audioop.rms(data, 2) if data else 0
+                    return (rms, "%s @%dHz" % (dev, rate))
+                except Exception as e:
+                    note = str(e)[:80]
+                finally:
+                    try:
+                        os.unlink(path)
+                    except Exception:
+                        pass
+        return (-1, note)
 
     def full_mic_test(self, seconds=2.5):
         """THE definitive test: pause our capture, then directly

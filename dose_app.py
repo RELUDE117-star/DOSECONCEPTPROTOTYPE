@@ -4097,28 +4097,50 @@ class DoseApp:
         for p in ("alsa_output.", "alsa_input."):
             if str(spk_name).startswith(p):
                 spk_name = str(spk_name)[len(p):]
-        for label, value, key in (("USB MICROPHONE", mic_name, "mic"),
-                                  ("USB SPEAKER", spk_name, "spk")):
-            row_img = _pil_rounded_rect(560, 62, 12, t["elevated_bg"])
-            tk_row = self._get_tk_image(f"bta_dev_{key}", row_img)
-            c.create_image(56, y, image=tk_row, anchor="nw")
-            c.create_text(72, y + 18, text=label,
-                          font=self.font_label, fill=t["muted"],
-                          anchor="w")
-            c.create_text(72, y + 42,
-                          text=self._fit_text(str(value),
-                                              self.font_small_bold,
+        # MICROPHONE row (tap → live meter + mic picker)
+        row_img = _pil_rounded_rect(560, 52, 12, t["elevated_bg"])
+        tk_row = self._get_tk_image("bta_dev_mic", row_img)
+        c.create_image(56, y, image=tk_row, anchor="nw")
+        c.create_text(72, y + 14, text="MICROPHONE  (tap to pick + test)",
+                      font=self.font_label, fill=t["muted"], anchor="w")
+        c.create_text(72, y + 36,
+                      text=self._fit_text(str(mic_name),
+                                          self.font_small_bold, 520),
+                      font=self.font_small_bold, fill=t["fg"], anchor="w")
+        self._click_zones.append((56, y, 616, y + 52,
+                                  self._open_mic_meter))
+        y += 62
+
+        # SPEAKER — tappable list of every output; tap selects + tests
+        c.create_text(56, y, text="SPEAKER  (tap one to use + hear it)",
+                      font=self.font_label, fill=t["muted"], anchor="nw")
+        y += 22
+        outs = []
+        try:
+            outs = v.list_output_devices() if v else []
+        except Exception:
+            outs = []
+        cur_sink = getattr(v, "_forced_sink", None) if v else None
+        if not outs:
+            c.create_text(64, y, text="(no output devices found)",
+                          font=self.font_tiny, fill="#FF6B6B", anchor="nw")
+            y += 20
+        for sink, short in outs[:3]:
+            sel = (sink == cur_sink)
+            r_img = _pil_rounded_rect(560, 30, 9,
+                                      DOSE_BLUE if sel else t["btn_bg"])
+            tkr = self._get_tk_image(f"spk_{abs(hash(sink)) % 99999}",
+                                     r_img)
+            c.create_image(56, y, image=tkr, anchor="nw")
+            c.create_text(72, y + 15,
+                          text=self._fit_text(short, self.font_small_bold,
                                               520),
-                          font=self.font_small_bold, fill=t["fg"],
-                          anchor="w")
-            y += 72
-        c.create_text(56, y + 6,
-                      text=self._fit_text(
-                          "Fully automatic — whatever you plug in "
-                          "is used.",
-                          self.font_small, 556),
-                      font=self.font_small, fill=t["muted"],
-                      anchor="nw")
+                          font=self.font_small_bold,
+                          fill="#06101E" if sel else t["fg"], anchor="w")
+            self._click_zones.append(
+                (56, y, 616, y + 30,
+                 lambda sk=sink: self._pick_speaker(sk)))
+            y += 34
 
         # bottom actions
         r = getattr(self, "_mic_test_result", None)
@@ -4331,24 +4353,45 @@ class DoseApp:
                       fill=(DOSE_BLUE_LT if peak > 40 else "#FF6B6B"),
                       anchor="nw")
 
-        # route trail: exactly which capture devices were tried + heard
-        trail = getattr(v, "mic_trail", None) if v else None
-        c.create_text(56, 242, text="What it tried:",
+        # ── TAP TO PICK A MICROPHONE — the active one drives the meter
+        c.create_text(56, 214, text="Tap a microphone to use it:",
                       font=self.font_small, fill=t["muted"], anchor="nw")
-        y = 262
-        for ln in (trail or ["(no capture attempt recorded yet)"])[:6]:
-            c.create_text(64, y,
-                          text=self._fit_text("• " + ln,
-                                               self.font_tiny, 548),
-                          font=self.font_tiny, fill=t["fg"], anchor="nw")
-            y += 16
+        devs = []
+        try:
+            devs = v.list_capture_devices() if v else []
+        except Exception:
+            devs = []
+        active = getattr(v, "mic_card", None) if v else None
+        y = 236
+        if not devs:
+            c.create_text(64, y, text="(no capture devices found — "
+                          "plug in a USB mic)",
+                          font=self.font_tiny, fill="#FF6B6B", anchor="nw")
+        for card, dev, short, is_mic in devs[:4]:
+            sel = (active == card)
+            row = _pil_rounded_rect(
+                560, 30, 9,
+                DOSE_BLUE if sel else t["elevated_bg"])
+            tkr = self._get_tk_image(f"micpick_{card}_{dev}", row)
+            c.create_image(56, y, image=tkr, anchor="nw")
+            tag = "  ●MIC" if is_mic else "  ○"
+            c.create_text(72, y + 15,
+                          text=self._fit_text(
+                              "card %d,%d  %s%s" % (card, dev, short, tag),
+                              self.font_small_bold, 520),
+                          font=self.font_small_bold,
+                          fill="#06101E" if sel else t["fg"], anchor="w")
+            self._click_zones.append(
+                (56, y, 616, y + 30,
+                 lambda cd=card, dv=dev: self._meter_pick(cd, dv)))
+            y += 34
 
         # status line from the last full self-test
         ft = getattr(self, "_full_test_status", None)
         if ft:
-            c.create_text(56, 360,
-                          text=self._fit_text(ft, self.font_small, 556),
-                          font=self.font_small_bold, fill=DOSE_BLUE_LT,
+            c.create_text(56, y + 4,
+                          text=self._fit_text(ft, self.font_tiny, 556),
+                          font=self.font_tiny, fill=DOSE_BLUE_LT,
                           anchor="nw", width=556)
 
         # buttons: FULL TEST (records every device), RESET, DONE
@@ -4365,6 +4408,23 @@ class DoseApp:
                           fill="#06101E" if label == "DONE" else t["fg"],
                           anchor="center")
             self._click_zones.append((x0, 398, x0 + 120, 444, cb))
+
+    def _pick_speaker(self, sink):
+        """User tapped a speaker — make it the output and immediately
+        play a test so they can hear which one it is."""
+        if self.voice:
+            self.voice.force_sink(sink)
+        self._speaker_test()
+
+    def _meter_pick(self, card, dev):
+        """User tapped a microphone in the list — use exactly it and
+        watch the live meter to see if it works."""
+        self._meter_peak = 0
+        self._full_test_status = ("Switched to card %d,%d — speak and "
+                                  "watch the bar." % (card, dev))
+        if self.voice:
+            self.voice.force_card(card, dev)
+        self._draw_frame()
 
     def _meter_reset(self):
         self._meter_peak = 0
@@ -4395,16 +4455,21 @@ class DoseApp:
 
         def worker():
             summary = "test failed"
+            report = []
             try:
-                summary, _ = self.voice.full_mic_test(2.5)
+                summary, report = self.voice.full_mic_test(2.5)
             except Exception as e:
                 summary = "test error: %s" % e
 
             def done():
                 self._full_test_busy = False
                 self._full_test_status = summary
-                if self.mode == "micmeter":
-                    self._draw_frame()
+                # show the FULL report on the readable report screen
+                self._mic_report_lines = [ln.rstrip()
+                                          for ln in report][:40]
+                self._prev_mode = "micmeter"
+                self.mode = "micreport"
+                self._draw_frame()
             try:
                 self.root.after(0, done)
             except Exception:
