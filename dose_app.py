@@ -728,6 +728,7 @@ class DoseApp:
             self._poll_touch()
 
         self.root.after(2000, lambda: self._do_update_check(silent=True))
+        self.root.after(30000, self._livefix_tick)
         self.root.focus_force()
 
     # ── Safe widget raising ────────────────────────────────────────────────
@@ -3057,13 +3058,15 @@ class DoseApp:
         threading.Thread(target=self._do_update_check, daemon=True).start()
 
     @staticmethod
-    def _fetch_repo_file(fname, timeout=20):
+    def _fetch_repo_file(fname, timeout=20, api_only=False):
         """Fetch a repo file, freshest source first.
 
         1. GitHub API (application/vnd.github.raw) — authoritative,
            never CDN-stale, so the UPDATE button always sees the
            newest push immediately.
-        2. raw.githubusercontent with a cache-busting query string.
+        2. raw.githubusercontent with a cache-busting query string
+           (skipped when api_only — auto-applied updates must never
+           risk a stale-CDN downgrade).
         """
         from urllib.request import Request
         api = ("https://api.github.com/repos/relude117-star/"
@@ -3075,7 +3078,8 @@ class DoseApp:
                 "User-Agent": "dose-home-station"})
             return urlopen(req, timeout=timeout).read()
         except Exception:
-            pass
+            if api_only:
+                raise
         url = RAW_URL + "/" + fname + "?nocache=%d" % int(time.time())
         return urlopen(url, timeout=timeout).read()
 
@@ -3131,6 +3135,56 @@ class DoseApp:
         self._update_status_text = msg
         if self.mode == "settings":
             self._draw_frame()
+
+    def _livefix_tick(self):
+        """LIVE-FIX mode: while livefix.flag in the repo says 'on',
+        the station applies pushed updates BY ITSELF every few
+        minutes and restarts — fixes land with nobody pressing
+        UPDATE. Both the flag and the code are fetched through the
+        GitHub API only (never the raw CDN), so a stale mirror can
+        never downgrade the app."""
+        def worker():
+            wait = 600   # flag off/unreadable: look again in 10 min
+            try:
+                flag = self._fetch_repo_file("livefix.flag",
+                                             api_only=True)
+                on = flag.decode("utf-8", "ignore").strip() \
+                    .lower().startswith("on")
+            except Exception:
+                on = False
+            if on:
+                wait = 180
+                try:
+                    remote = self._fetch_repo_file("dose_app.py",
+                                                   api_only=True)
+                    rh = hashlib.md5(remote).hexdigest()
+                    with open(os.path.abspath(__file__), "rb") as f:
+                        lh = hashlib.md5(f.read()).hexdigest()
+                    differs = rh != lh
+                    if not differs:
+                        vr = hashlib.md5(self._fetch_repo_file(
+                            "dose_voice.py",
+                            api_only=True)).hexdigest()
+                        vpath = os.path.join(os.path.dirname(
+                            os.path.abspath(__file__)),
+                            "dose_voice.py")
+                        with open(vpath, "rb") as f:
+                            differs = vr != hashlib.md5(
+                                f.read()).hexdigest()
+                    if differs:
+                        self.root.after(
+                            0, self._update_result,
+                            "LIVE FIX: applying build %s…" % rh[:7])
+                        self.root.after(0, self._apply_update,
+                                        remote)
+                        return   # restarting — no re-arm needed
+                except Exception:
+                    pass
+            try:
+                self.root.after(wait * 1000, self._livefix_tick)
+            except Exception:
+                pass
+        threading.Thread(target=worker, daemon=True).start()
 
     def _apply_update(self, remote_data):
         self._update_status_text = "Downloading..."
@@ -3785,12 +3839,12 @@ class DoseApp:
                     r = subprocess.run(
                         [sys.executable, "-m", "pip", "install",
                          "--break-system-packages", "sounddevice",
-                         "vosk", "piper-tts"],
+                         "vosk", "piper-tts", "qrcode"],
                         capture_output=True, timeout=900, env=env)
                     if r.returncode != 0:
                         subprocess.run(
                             [sys.executable, "-m", "pip", "install",
-                             "sounddevice", "vosk", "piper-tts"],
+                             "sounddevice", "vosk", "piper-tts", "qrcode"],
                             capture_output=True, timeout=900, env=env)
                 except Exception:
                     pass

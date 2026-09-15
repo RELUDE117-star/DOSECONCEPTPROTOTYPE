@@ -258,11 +258,30 @@ class DoseVoice:
             "medium" not in p.lower(), "amy" not in p.lower(), p))
         self._piper_path = onnx[0]
 
+        # A microphone counts if ANY layer can see one: PortAudio,
+        # the PipeWire/Pulse source list, or the kernel's own card
+        # list. (PortAudio alone is not enough — when PipeWire owns
+        # the hardware, PortAudio can show nothing while pw-record
+        # captures perfectly.)
+        has_mic = False
         try:
             dev = self._sd.query_devices(kind="input")
-            if not dev or dev.get("max_input_channels", 0) < 1:
-                raise RuntimeError
+            has_mic = bool(dev) and dev.get("max_input_channels",
+                                            0) >= 1
         except Exception:
+            pass
+        if not has_mic:
+            try:
+                has_mic = bool(self._list_sources())
+            except Exception:
+                pass
+        if not has_mic:
+            try:
+                with open("/proc/asound/cards") as f:
+                    has_mic = "[" in f.read()
+            except Exception:
+                pass
+        if not has_mic:
             self.reason = "no microphone detected"
             return
 
@@ -775,6 +794,8 @@ class DoseVoice:
         lines = ["DOSE mic report", time.ctime(), ""]
         lines.append("chosen backend: %s (rms %s)"
                      % (self.mic_name, self.mic_rms))
+        for tline in getattr(self, "mic_trail", []):
+            lines.append("route: " + tline)
         try:
             for i, d in enumerate(self._sd.query_devices()):
                 if d.get("max_input_channels", 0) > 0:
@@ -1022,59 +1043,33 @@ class DoseVoice:
                     continue
             return None
 
-        def open_pipewire():
-            """Capture through PipeWire/Pulse itself (parec /
-            pw-record), aimed straight at the plugged-in USB mic.
-            This works even while PipeWire owns the hardware — the
-            normal state on Raspberry Pi OS, and the reason a direct
-            hardware open can fail with 'device busy'. No Bluetooth
-            anything: only what is physically plugged in."""
-            target = self._pick_input_target()
-            cmds = []
-            if target:
-                cmds += [
-                    ["pw-record", "--target", target, "--rate",
-                     "16000", "--channels", "1", "--format", "s16",
-                     "-"],
-                    ["parec", "-d", target, "--rate=16000",
-                     "--format=s16le", "--channels=1",
-                     "--latency-msec=50"],
-                ]
-            cmds += [
-                ["pw-record", "--rate", "16000", "--channels", "1",
-                 "--format", "s16", "-"],
-                ["parec", "--rate=16000", "--format=s16le",
-                 "--channels=1", "--latency-msec=50"],
-            ]
-            for cmd in cmds:
-                try:
-                    p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                         stderr=subprocess.DEVNULL,
-                                         env=self._audio_env())
-                except Exception:
-                    continue
-                time.sleep(0.3)
-                if p.poll() is not None:
-                    continue
-                self._native_rate = SAMPLE_RATE
-                self._ratecv_state = None
+        def open_pipe_cmd(cmd, name):
+            """One PipeWire/Pulse recorder subprocess as a capture."""
+            try:
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL,
+                                     env=self._audio_env())
+            except Exception:
+                return None
+            time.sleep(0.3)
+            if p.poll() is not None:
+                return None
+            self._native_rate = SAMPLE_RATE
+            self._ratecv_state = None
 
-                def reader(proc=p):
-                    while (proc.poll() is None
-                           and not self._stop.is_set()):
-                        try:
-                            data = proc.stdout.read(BLOCK_SIZE * 2)
-                        except Exception:
-                            break
-                        if not data:
-                            break
-                        ingest(data)
-                threading.Thread(target=reader, daemon=True).start()
-                self.mic_name = "PipeWire (%s → %s)" % (
-                    cmd[0], ("--target" in cmd or "-d" in cmd)
-                    and target or "default")
-                return ("pipe", p)
-            return None
+            def reader(proc=p):
+                while (proc.poll() is None
+                       and not self._stop.is_set()):
+                    try:
+                        data = proc.stdout.read(BLOCK_SIZE * 2)
+                    except Exception:
+                        break
+                    if not data:
+                        break
+                    ingest(data)
+            threading.Thread(target=reader, daemon=True).start()
+            self.mic_name = name
+            return ("pipe", p)
 
         def capture_is_live(seconds=1.4):
             """Drain the queue for a moment and measure real signal."""
@@ -1165,24 +1160,98 @@ class DoseVoice:
                         continue
             return None
 
+        def route_floor(seconds=1.6):
+            """Peak level from the just-opened route. A real
+            microphone ALWAYS has an analog noise floor above zero;
+            a wrong or dead route delivers perfect digital silence.
+            This tells them apart with nobody speaking."""
+            try:
+                import audioop
+            except Exception:
+                return 999
+            try:
+                while True:
+                    self._audio_q.get_nowait()
+            except queue.Empty:
+                pass
+            end = time.time() + seconds
+            peak = 0
+            while time.time() < end:
+                try:
+                    data = self._audio_q.get(timeout=0.4)
+                    peak = max(peak, audioop.rms(data, 2))
+                except queue.Empty:
+                    continue
+            return peak
+
         def open_capture():
-            """DETERMINISTIC, ZERO-SETUP: whatever is physically
-            plugged in wins. The USB mic is found, boosted, and made
-            the default; capture goes through PipeWire aimed straight
-            at it, or straight at the hardware, in that order. No
-            saved selections consulted, no Bluetooth hunting, no
-            liveness gauntlet that could discard a quiet mic."""
+            """WHAT THE PI HAS SET UP, first: the system-default
+            capture route, exactly what the OS's own tools use. Then
+            every other route in turn — and the FIRST one that shows
+            a real noise floor is kept. No guessing: a live mic is
+            never digitally silent; a wrong route always is. The
+            full trail of what was tried and what each route heard
+            goes into the mic report."""
             self._kick_audio_services()
             self._unmute_alsa_inputs()
             self._pa_refresh()   # see USB devices plugged in after launch
-            self._pick_input_target()   # USB → default, unmuted, boosted
-            cap = open_pipewire()
+            target = self._pick_input_target()   # unmute + boost USB
+            routes = [
+                ("system default (pw-record)", lambda: open_pipe_cmd(
+                    ["pw-record", "--rate", "16000", "--channels",
+                     "1", "--format", "s16", "-"],
+                    "system default (pw-record)")),
+                ("system default (parec)", lambda: open_pipe_cmd(
+                    ["parec", "--rate=16000", "--format=s16le",
+                     "--channels=1", "--latency-msec=50"],
+                    "system default (parec)")),
+                ("USB hardware direct", open_usb_portaudio),
+                ("portaudio default", open_portaudio),
+            ]
+            if target:
+                routes += [
+                    ("targeted %s (pw-record)" % target,
+                     lambda: open_pipe_cmd(
+                         ["pw-record", "--target", target, "--rate",
+                          "16000", "--channels", "1", "--format",
+                          "s16", "-"], "targeted " + target)),
+                    ("targeted %s (parec)" % target,
+                     lambda: open_pipe_cmd(
+                         ["parec", "-d", target, "--rate=16000",
+                          "--format=s16le", "--channels=1",
+                          "--latency-msec=50"],
+                         "targeted " + target)),
+                ]
+            self.mic_trail = []
+            live = None
+            first_openable = None
+            for label, opener in routes:
+                cap = opener()
+                if not cap:
+                    self.mic_trail.append(label + ": could not open")
+                    continue
+                floor = route_floor()
+                close_capture(cap)
+                self.mic_trail.append(
+                    "%s: opened, noise floor %d" % (label, floor))
+                if first_openable is None:
+                    first_openable = (label, opener)
+                if floor > 1:
+                    live = (label, opener)
+                    break
+            choice = live or first_openable
+            if not choice:
+                self.mic_trail.append("no capture route opened at all")
+                return None
+            cap = choice[1]()
             if cap:
-                return cap
-            cap = open_usb_portaudio()
-            if cap:
-                return cap
-            return open_portaudio()
+                self.mic_name = choice[0] + (
+                    " · hearing OK" if live else " · SILENT")
+                if not live:
+                    self.mic_trail.append(
+                        "every route was digitally silent — kept "
+                        + choice[0])
+            return cap
 
         stream = open_capture()
         if stream is None:
@@ -1208,9 +1277,10 @@ class DoseVoice:
                     self._force_reopen = True
                 if sig is not None:
                     dev_sig = sig
-                # a mic with no signal yet: keep re-trying — the live
-                # one may have just been plugged in
-                if ("(no signal" in (self.mic_name or "")
+                # a silent mic: keep re-trying — the live one may
+                # have just been plugged in
+                if (any(k in (self.mic_name or "")
+                        for k in ("(no signal", "SILENT"))
                         and now - last_reselect > 20):
                     self._force_reopen = True
             if self._force_reopen:
