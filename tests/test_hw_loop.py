@@ -135,7 +135,7 @@ for ln in getattr(v, "mic_trail", []):
     print("trail:", ln)
 assert any("floor 0" in ln for ln in v.mic_trail), \
     "dead route not detected"
-assert "parec" in v.mic_name and "hearing OK" in v.mic_name, v.mic_name
+assert "parec" in v.mic_name and "selected" in v.mic_name, v.mic_name
 
 lvl = v.mic_level(2.0)
 print("idle mic level:", lvl)

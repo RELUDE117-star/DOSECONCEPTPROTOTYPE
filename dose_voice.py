@@ -1110,6 +1110,7 @@ class DoseVoice:
         'default'/'sysdefault' paths (which go through PipeWire) work."""
         note = "no capture"
         devs = ["plughw:%d,%d" % (card, device),
+                "plughw:%d,1" % card,   # some mics capture on subdev 1
                 "hw:%d,%d" % (card, device),
                 "sysdefault:CARD=%d" % card,
                 "default"]
@@ -1636,19 +1637,27 @@ class DoseVoice:
             through PipeWire. Ships in alsa-utils."""
             self.mic_card = card      # remember for the mixer readout
             self._max_capture(card)   # unmute + max this card's capture
-            for base in ("plughw", "hw"):
-                dev = "%s:%d,%d" % (base, card, device)
-                for rate in (48000, 44100, 16000):
-                    for ch in (1, 2):
-                        cmd = ["arecord", "-D", dev, "-f", "S16_LE",
-                               "-r", str(rate), "-c", str(ch),
-                               "-t", "raw", "-q", "-"]
-                        cap = open_pipe_cmd(
-                            cmd,
-                            "mic arecord %s @%d %dch" % (dev, rate, ch),
-                            native_rate=rate, channels=ch)
-                        if cap:
-                            return cap
+            # Try the requested SUBDEVICE first, then the card's other
+            # capture subdevices — some USB mics put the working capture
+            # on subdevice 1, not 0, so plughw:card,0 records silence.
+            subdevs = []
+            for d in (device, 0, 1, 2, 3):
+                if d not in subdevs:
+                    subdevs.append(d)
+            for sd in subdevs:
+                for base in ("plughw", "hw"):
+                    dev = "%s:%d,%d" % (base, card, sd)
+                    for rate in (48000, 44100, 16000):
+                        for ch in (1, 2):
+                            cmd = ["arecord", "-D", dev, "-f", "S16_LE",
+                                   "-r", str(rate), "-c", str(ch),
+                                   "-t", "raw", "-q", "-"]
+                            cap = open_pipe_cmd(
+                                cmd, "mic arecord %s @%d %dch"
+                                % (dev, rate, ch),
+                                native_rate=rate, channels=ch)
+                            if cap:
+                                return cap
             return None
 
         def capture_is_live(seconds=1.4):
@@ -1889,12 +1898,11 @@ class DoseVoice:
                 return None
             cap = choice[1]()
             if cap:
-                self.mic_name = choice[0] + (
-                    " · hearing OK" if is_live else " · SILENT")
-                if not is_live:
-                    self.mic_trail.append(
-                        "every route was digitally silent — kept "
-                        + choice[0])
+                # Honest label: the idle floor is NOT proof the mic
+                # hears you — only the live meter (speaking) is. So we
+                # never claim 'hearing OK' from selection; the meter's
+                # Loudest value is the sole verdict.
+                self.mic_name = choice[0] + " · selected (speak to test)"
             return cap
 
         stream = open_capture()
