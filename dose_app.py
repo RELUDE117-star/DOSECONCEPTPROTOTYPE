@@ -4263,133 +4263,79 @@ class DoseApp:
         card_img = _pil_rounded_rect(620, 440, 22, t["card_bg"])
         tk_card = self._get_tk_image("meter_card", card_img)
         c.create_image(26, 20, image=tk_card, anchor="nw")
-        c.create_text(56, 40, text="LIVE MIC LEVEL",
+        c.create_text(56, 36, text="LIVE MIC LEVEL — tap a mic, then speak",
                       font=self.font_label, fill=t["muted"], anchor="nw")
 
-        # ── engine + route diagnostics (so one screenshot explains it) ──
         v = self.voice
-        if not v:
-            eng = "voice engine not started"
-        elif not getattr(v, "available", False):
-            eng = "NOT available: %s" % getattr(v, "reason", "?")
-        else:
-            eng = "ready"
-        c.create_text(56, 62, text="Engine: " + eng,
-                      font=self.font_small, fill=t["fg"], anchor="nw")
-        route = getattr(v, "mic_name", "?") if v else "?"
-        c.create_text(56, 80,
-                      text=self._fit_text("Recording from: " + str(route),
-                                          self.font_small, 556),
-                      font=self.font_small, fill=DOSE_BLUE_LT, anchor="nw")
-        mix = ""
-        try:
-            mix = v.mixer_summary() if v else ""
-        except Exception:
-            mix = ""
-        if mix:
-            c.create_text(56, 96,
-                          text=self._fit_text("Capture mixer: " + mix,
-                                              self.font_tiny, 556),
-                          font=self.font_tiny, fill=t["muted"],
-                          anchor="nw")
-        # plain-language diagnosis: mute (fixable) vs dead hardware
-        peak_now = getattr(self, "_meter_peak", 0)
-        diag = ""
-        if v and getattr(v, "available", False):
-            no_dev = (not getattr(v, "mic_card", None)
-                      and "arecord" not in str(route))
-            if no_dev:
-                diag = ("No USB microphone detected — plug one in "
-                        "(any USB mic).")
-            elif peak_now > 40:
-                diag = "Mic is working — you're good."
-            elif mix and ("[off]" in mix or "0%[" in mix):
-                diag = ("Capture is MUTED at the mixer — tap FULL TEST "
-                        "to force it on.")
-            elif mix:
-                diag = ("Mixer is OPEN but the mic sends no audio → the "
-                        "mic itself, its cable, or USB power. Try a "
-                        "powered USB hub or another mic.")
-        if diag:
-            c.create_text(56, 110,
-                          text=self._fit_text("Diagnosis: " + diag,
-                                              self.font_tiny, 556),
-                          font=self.font_tiny, fill=DOSE_BLUE_LT,
-                          anchor="nw", width=556)
-
         raw = getattr(self, "_meter_raw", 0)
         boost = getattr(self, "_meter_boost", 0)
         peak = getattr(self, "_meter_peak", 0)
 
-        bar_x, bar_w, bar_h = 56, 560, 46
+        # compact live bars
+        bar_x, bar_w, bar_h = 56, 560, 34
         full = 4000.0
 
         def bar(y, val, color, label):
-            track = _pil_rounded_rect(bar_w, bar_h, 12, t["elevated_bg"])
+            track = _pil_rounded_rect(bar_w, bar_h, 10, t["elevated_bg"])
             tk_tr = self._get_tk_image(f"meter_tr_{label}", track)
             c.create_image(bar_x, y, image=tk_tr, anchor="nw")
-            frac = max(0.0, min(val / full, 1.0))
-            fw = int(bar_w * frac)
+            fw = int(bar_w * max(0.0, min(val / full, 1.0)))
             if fw > 6:
-                fill = _pil_rounded_rect(fw, bar_h, 12, color)
+                fill = _pil_rounded_rect(fw, bar_h, 10, color)
                 tk_f = self._get_tk_image(f"meter_fill_{label}", fill)
                 c.create_image(bar_x, y, image=tk_f, anchor="nw")
-            c.create_text(bar_x + 12, y + bar_h // 2,
-                          text=f"{label}: {int(val)}",
+            c.create_text(bar_x + 10, y + bar_h // 2,
+                          text="%s: %d" % (label, int(val)),
                           font=self.font_small_bold, fill=t["fg"],
                           anchor="w")
 
         raw_color = ("#2ECC71" if raw > 200 else
                      "#F1C40F" if raw > 40 else "#7F8C8D")
-        bar(104, raw, raw_color, "MIC")
-        bar(158, boost, DOSE_BLUE, "TO RECOGNIZER")
-
-        verdict = ("Great — it hears you clearly." if peak > 200 else
-                   "Faint — speak closer / louder." if peak > 40 else
-                   "No sound yet — say something.")
-        c.create_text(56, 216,
-                      text="Loudest so far: %d — %s" % (int(peak), verdict),
+        bar(58, raw, raw_color, "MIC (raw)")
+        bar(98, boost, DOSE_BLUE, "TO RECOGNIZER")
+        verdict = ("WORKING — it hears you!" if peak > 120 else
+                   "faint — speak louder" if peak > 30 else
+                   "silent — try the next mic")
+        c.create_text(56, 142,
+                      text="Loudest so far: %d  (%s)" % (int(peak), verdict),
                       font=self.font_small_bold,
-                      fill=(DOSE_BLUE_LT if peak > 40 else "#FF6B6B"),
+                      fill=(DOSE_BLUE_LT if peak > 30 else "#FF6B6B"),
                       anchor="nw")
 
-        # ── TAP TO PICK A MICROPHONE — the active one drives the meter
-        c.create_text(56, 214, text="Tap a microphone to use it:",
-                      font=self.font_small, fill=t["muted"], anchor="nw")
+        # ── EVERY capture device, tappable (no truncation) ──
+        c.create_text(56, 166, text="Microphones — tap each until one moves:",
+                      font=self.font_tiny, fill=t["muted"], anchor="nw")
         devs = []
         try:
             devs = v.list_capture_devices() if v else []
         except Exception:
             devs = []
         active = getattr(v, "mic_card", None) if v else None
-        y = 236
+        y = 184
         if not devs:
-            c.create_text(64, y, text="(no capture devices found — "
-                          "plug in a USB mic)",
+            c.create_text(64, y, text="(no capture devices found)",
                           font=self.font_tiny, fill="#FF6B6B", anchor="nw")
-        for card, dev, short, is_mic in devs[:4]:
+            y += 22
+        for card, dev, short, is_mic in devs[:7]:
             sel = (active == card)
-            row = _pil_rounded_rect(
-                560, 30, 9,
-                DOSE_BLUE if sel else t["elevated_bg"])
+            row = _pil_rounded_rect(560, 26, 8,
+                                    DOSE_BLUE if sel else t["elevated_bg"])
             tkr = self._get_tk_image(f"micpick_{card}_{dev}", row)
             c.create_image(56, y, image=tkr, anchor="nw")
-            tag = "  ●MIC" if is_mic else "  ○"
-            c.create_text(72, y + 15,
+            tag = " ●MIC" if is_mic else ""
+            c.create_text(70, y + 13,
                           text=self._fit_text(
                               "card %d,%d  %s%s" % (card, dev, short, tag),
-                              self.font_small_bold, 520),
-                          font=self.font_small_bold,
+                              self.font_tiny, 530),
+                          font=self.font_tiny,
                           fill="#06101E" if sel else t["fg"], anchor="w")
             self._click_zones.append(
-                (56, y, 616, y + 30,
+                (56, y, 616, y + 26,
                  lambda cd=card, dv=dev: self._meter_pick(cd, dv)))
-            y += 34
-
-        # status line from the last full self-test
+            y += 29
         ft = getattr(self, "_full_test_status", None)
         if ft:
-            c.create_text(56, y + 4,
+            c.create_text(56, min(y + 2, 392),
                           text=self._fit_text(ft, self.font_tiny, 556),
                           font=self.font_tiny, fill=DOSE_BLUE_LT,
                           anchor="nw", width=556)
@@ -4503,17 +4449,22 @@ class DoseApp:
                           font=self.font_small, fill=DOSE_BLUE_LT,
                           anchor="ne")
         lines = getattr(self, "_mic_report_lines", None) or             ["No report yet — run a mic test first."]
-        y = 70
-        for ln in lines[:24]:
+        y = 66
+        for ln in lines[:40]:
             if not ln.strip():
-                y += 6
+                y += 4
                 continue
-            color = DOSE_BLUE_LT if ln.startswith("$") else t["fg"]
+            low = ln.lower()
+            color = ("#2ECC71" if "verdict" in low or "found the working"
+                     in low else "#FF6B6B" if ("silent" in low
+                     or "no audio" in low or "failed" in low
+                     or "no capture" in low) else
+                     DOSE_BLUE_LT if ln.startswith("$") else t["fg"])
             c.create_text(56, y,
-                          text=self._fit_text(ln, self.font_small, 556),
-                          font=self.font_small, fill=color, anchor="nw")
-            y += 14
-            if y > 380:
+                          text=self._fit_text(ln, self.font_tiny, 560),
+                          font=self.font_tiny, fill=color, anchor="nw")
+            y += 11
+            if y > 384:
                 break
 
         for label, x0, cb in (("RETEST", 56, self._mic_retest),
