@@ -144,11 +144,21 @@ fi  # end TOUCH_SENSOR_ENABLED
 mkdir -p "$APP_DIR"
 cp "$SCRIPT_DIR/dose_app.py" "$APP_DIR/dose_app.py" 2>/dev/null || true
 cp "$SCRIPT_DIR/dose_voice.py" "$APP_DIR/dose_voice.py" 2>/dev/null || true
+cp "$SCRIPT_DIR/dose_nlu.py" "$APP_DIR/dose_nlu.py" 2>/dev/null || true
 cp "$SCRIPT_DIR/DOSE.sh" "$APP_DIR/DOSE.sh" 2>/dev/null || true
 cp "$SCRIPT_DIR/dose_logo.png" "$APP_DIR/dose_logo.png" 2>/dev/null || true
 cp "$SCRIPT_DIR/demo_qr.png" "$APP_DIR/demo_qr.png" 2>/dev/null || true
 chmod +x "$APP_DIR"/*.py "$APP_DIR"/*.sh 2>/dev/null || true
 touch "$APP_DIR/.ready"
+
+# Self-heal: if a companion module is missing (e.g. a brand-new file on
+# a device that updated before it existed), fetch it from the repo.
+for MOD in dose_voice.py dose_nlu.py; do
+    if [ ! -f "$APP_DIR/$MOD" ]; then
+        curl -fsSL "$RAW_URL/$MOD?nocache=$(date +%s)" -o "$APP_DIR/$MOD" \
+            2>/dev/null && echo "  fetched missing $MOD" || true
+    fi
+done
 
 # ── Voice assistant ("Hey Dose") — offline models, one-time setup ──
 VOICE_DIR="$APP_DIR/voice"

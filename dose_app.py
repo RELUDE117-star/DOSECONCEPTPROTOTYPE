@@ -3133,6 +3133,11 @@ class DoseApp:
         self._draw_frame()
         threading.Thread(target=self._do_update_check, daemon=True).start()
 
+    # Every python module the app imports besides itself. The updater
+    # downloads each one, and a change in any of them triggers an
+    # update — so adding a new module can never silently miss devices.
+    COMPANION_MODULES = ("dose_voice.py", "dose_nlu.py")
+
     @staticmethod
     def _fetch_repo_file(fname, timeout=20, api_only=False):
         """Fetch a repo file, freshest source first.
@@ -3175,20 +3180,26 @@ class DoseApp:
         except Exception:
             pass
 
-        # a voice-engine-only change must also count as an update
+        # a change in ANY companion module also counts as an update
+        # (a missing module locally counts too — that is how a brand new
+        # file like dose_nlu.py reaches a device that has never had it)
         if remote_hash == local_hash:
-            try:
-                vremote = hashlib.md5(
-                    self._fetch_repo_file("dose_voice.py")).hexdigest()
-                vpath = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)),
-                    "dose_voice.py")
-                with open(vpath, "rb") as f:
-                    vlocal = hashlib.md5(f.read()).hexdigest()
-                if vremote != vlocal:
-                    local_hash = "voice-outdated"
-            except Exception:
-                pass
+            here = os.path.dirname(os.path.abspath(__file__))
+            for mod in self.COMPANION_MODULES:
+                try:
+                    mremote = hashlib.md5(
+                        self._fetch_repo_file(mod)).hexdigest()
+                    mpath = os.path.join(here, mod)
+                    if not os.path.exists(mpath):
+                        local_hash = "module-missing"
+                        break
+                    with open(mpath, "rb") as f:
+                        mlocal = hashlib.md5(f.read()).hexdigest()
+                    if mremote != mlocal:
+                        local_hash = "module-outdated"
+                        break
+                except Exception:
+                    pass
 
         if remote_hash == local_hash:
             if not silent:
@@ -3218,35 +3229,69 @@ class DoseApp:
             self._draw_frame()
 
         def do_download():
+            """ATOMIC update: fetch and VALIDATE everything first, and
+            only write once every required file is known good. A failed
+            or truncated download can therefore never leave a broken
+            app (new dose_app.py against a stale/missing module)."""
             try:
                 local_path = os.path.abspath(__file__)
-                with open(local_path, "wb") as f:
-                    f.write(remote_data)
-                try:
-                    vdata = self._fetch_repo_file("dose_voice.py")
-                    vpath = os.path.join(os.path.dirname(local_path),
-                                         "dose_voice.py")
-                    with open(vpath, "wb") as f:
-                        f.write(vdata)
-                except Exception:
-                    pass
-                os.makedirs(APP_DIR, exist_ok=True)
-                with open(os.path.join(APP_DIR, "dose_app.py"), "wb") as f:
-                    f.write(remote_data)
-                for fname in ["DOSE.sh", "dose_voice.py",
-                              "dose_logo.png", "demo_qr.png"]:
+                here = os.path.dirname(local_path)
+
+                # 1) collect — required python first, then extras
+                payload = {"dose_app.py": remote_data}
+                for mod in self.COMPANION_MODULES:
+                    payload[mod] = self._fetch_repo_file(mod)
+
+                # 2) validate: real python, not an error page or a
+                #    truncated body. Anything bad aborts the update.
+                for name, data in payload.items():
+                    if not data or len(data) < 500:
+                        raise ValueError("%s download too small" % name)
                     try:
-                        fdata = self._fetch_repo_file(fname)
-                        fpath = os.path.join(APP_DIR, fname)
-                        with open(fpath, "wb") as f:
-                            f.write(fdata)
-                        if fname.endswith(".sh"):
-                            os.chmod(fpath, 0o755)
+                        compile(data.decode("utf-8"), name, "exec")
+                    except Exception as e:
+                        raise ValueError("%s is not valid python (%s)"
+                                         % (name, e))
+
+                # 3) optional extras — never block the update
+                extras = {}
+                for fname in ("DOSE.sh", "dose_logo.png", "demo_qr.png"):
+                    try:
+                        d = self._fetch_repo_file(fname)
+                        if d:
+                            extras[fname] = d
                     except Exception:
                         pass
+
+                # 4) commit — write everything, app LAST so a crash
+                #    mid-write never leaves a new app beside old modules
+                os.makedirs(APP_DIR, exist_ok=True)
+                for name, data in payload.items():
+                    if name == "dose_app.py":
+                        continue
+                    for d in (here, APP_DIR):
+                        tmp = os.path.join(d, name + ".tmp")
+                        with open(tmp, "wb") as f:
+                            f.write(data)
+                        os.replace(tmp, os.path.join(d, name))
+                for name, data in extras.items():
+                    fpath = os.path.join(APP_DIR, name)
+                    tmp = fpath + ".tmp"
+                    with open(tmp, "wb") as f:
+                        f.write(data)
+                    os.replace(tmp, fpath)
+                    if name.endswith(".sh"):
+                        os.chmod(fpath, 0o755)
+                for d in (here, APP_DIR):
+                    tmp = os.path.join(d, "dose_app.py.tmp")
+                    with open(tmp, "wb") as f:
+                        f.write(remote_data)
+                    os.replace(tmp, os.path.join(d, "dose_app.py"))
+
                 self.root.after(0, self._finish_update)
             except Exception as e:
-                self.root.after(0, self._update_result, f"Update failed: {e}")
+                self.root.after(0, self._update_result,
+                                "Update failed (nothing changed): %s" % e)
 
         threading.Thread(target=do_download, daemon=True).start()
 
