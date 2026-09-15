@@ -443,14 +443,14 @@ class DoseVoice:
                 n = (d.get("name") or "").lower()
                 if self._is_usb_name(n):
                     pri = 0
-                elif any(k in n for k in ("airpod", "bluez", "headset",
-                                          "hands-free", "hfp")):
-                    pri = 1
                 elif n in ("default", "pipewire", "pulse",
                            "sysdefault"):
-                    pri = 2
+                    pri = 1
+                elif any(k in n for k in ("airpod", "bluez", "headset",
+                                          "hands-free", "hfp")):
+                    pri = 3          # Bluetooth last — plugged-in wins
                 else:
-                    pri = 3
+                    pri = 2
                 cands.append((pri, i, d.get("name", "?"),
                               int(d.get("default_samplerate")
                                   or SAMPLE_RATE)))
@@ -542,39 +542,31 @@ class DoseVoice:
         return sinks
 
     def _pick_output_target(self):
-        """The sink Dose should speak through: a USB speaker the
-        moment it's plugged in, else Bluetooth, else anything that
-        isn't the Pi's (usually silent) HDMI port. Chosen fresh so a
-        speaker plugged in mid-session is used on the very next
-        sentence. None = trust the system default. Fully independent
-        of the microphone choice — separate USB units are fine."""
+        """The sink Dose speaks through: a USB speaker the moment
+        it's plugged in, else any physical output that isn't the
+        Pi's (usually silent) HDMI port. Chosen fresh so a speaker
+        plugged in mid-session is used on the very next sentence.
+        None = trust the system default. Fully independent of the
+        microphone choice — separate USB units are fine."""
         now = time.time()
         cached = getattr(self, "_out_cache", None)
         if cached and now - cached[0] < 5:
             return cached[1]
-        target = None
         sinks = self._list_sinks()
-        for want in ("usb", "bluez"):
-            for s in sinks:
-                if want in s.lower():
-                    target = s
-                    break
-            if target:
+        target = None
+        for s in sinks:
+            if self._is_usb_name(s):
+                target = s
                 break
         if target is None:
-            non_hdmi = [s for s in sinks if "hdmi" not in s.lower()]
-            if non_hdmi and len(non_hdmi) < len(sinks):
-                target = non_hdmi[0]
+            physical = [s for s in sinks
+                        if "hdmi" not in s.lower()
+                        and "bluez" not in s.lower()]
+            if physical and len(physical) < len(sinks):
+                target = physical[0]
         if target:
             # make it the system default too, unmuted and audible
-            for cmd in (["pactl", "set-default-sink", target],
-                        ["pactl", "set-sink-mute", target, "0"],
-                        ["pactl", "set-sink-volume", target, "90%"]):
-                try:
-                    subprocess.run(cmd, capture_output=True, timeout=5,
-                                   env=self._audio_env())
-                except Exception:
-                    pass
+            self._make_default(target, "Audio/Sink", 0.9)
         self._out_cache = (now, target)
         return target
 
@@ -604,33 +596,70 @@ class DoseVoice:
                 continue
         return srcs
 
+    def _pw_node_id(self, name, media_class):
+        """PipeWire node id for a node name, via pw-dump."""
+        for obj in self._pw_dump():
+            try:
+                props = (obj.get("info") or {}).get("props") or {}
+                if (props.get("media.class") == media_class
+                        and props.get("node.name") == name):
+                    return obj.get("id")
+            except Exception:
+                continue
+        return None
+
+    def _make_default(self, target, media_class, boost):
+        """Make a node the system default, unmuted, at the given
+        gain — via pactl when present, else wpctl (ships with
+        WirePlumber on every Pi OS install, so one of the two is
+        always there)."""
+        kind = ("source" if media_class == "Audio/Source" else "sink")
+        env = self._audio_env()
+        got = False
+        for cmd in (["pactl", "set-default-" + kind, target],
+                    ["pactl", "set-%s-mute" % kind, target, "0"],
+                    ["pactl", "set-%s-volume" % kind, target,
+                     "%d%%" % int(boost * 100)]):
+            try:
+                r = subprocess.run(cmd, capture_output=True, timeout=5,
+                                   env=env)
+                got = got or r.returncode == 0
+            except Exception:
+                pass
+        if not got:
+            nid = self._pw_node_id(target, media_class)
+            if nid is not None:
+                for cmd in (["wpctl", "set-default", str(nid)],
+                            ["wpctl", "set-mute", str(nid), "0"],
+                            ["wpctl", "set-volume", str(nid),
+                             "%.2f" % boost]):
+                    try:
+                        subprocess.run(cmd, capture_output=True,
+                                       timeout=5, env=env)
+                    except Exception:
+                        pass
+
     def _pick_input_target(self):
-        """The capture source Dose should listen through: a USB mic
-        the moment it's plugged in, else Bluetooth. Made the system
-        default, unmuted, at 90% — so every capture route (PortAudio
-        'default' included) hears the right microphone with zero
-        setup. Independent of the speaker choice."""
-        target = None
+        """The capture source Dose listens through: the plugged-in
+        USB mic, else any other physical (non-Bluetooth) mic. Made
+        the system default, unmuted, gain-boosted — so every capture
+        route hears the right microphone with zero setup. Fully
+        independent of the speaker choice."""
         srcs = self._list_sources()
-        for want in ("usb", "bluez"):
-            for s in srcs:
-                if want in s.lower():
-                    target = s
-                    break
-            if target:
+        target = None
+        for s in srcs:
+            if self._is_usb_name(s):
+                target = s
                 break
+        if target is None:
+            physical = [s for s in srcs if "bluez" not in s.lower()]
+            target = physical[0] if physical else None
         if target:
             # C-Media USB mini mics (SunFounder etc.) are very quiet
             # at stock gain — boost them well past unity
-            vol = "150%" if self._is_usb_name(target) else "90%"
-            for cmd in (["pactl", "set-default-source", target],
-                        ["pactl", "set-source-mute", target, "0"],
-                        ["pactl", "set-source-volume", target, vol]):
-                try:
-                    subprocess.run(cmd, capture_output=True, timeout=5,
-                                   env=self._audio_env())
-                except Exception:
-                    pass
+            self._make_default(target, "Audio/Source",
+                               1.5 if self._is_usb_name(target)
+                               else 1.0)
         return target
 
     def _engage_bt_mic(self):
@@ -714,10 +743,9 @@ class DoseVoice:
         self._force_reopen = True
 
     def _mic_pref(self):
-        try:
-            return self.app.settings.get("mic_device", "auto")
-        except Exception:
-            return "auto"
+        # Selection is fully automatic now — whatever is physically
+        # plugged in wins; stale saved choices are ignored.
+        return "auto"
 
     def speaker_test(self):
         """Play a short spoken line on the current speaker. Returns
@@ -803,34 +831,32 @@ class DoseVoice:
         except Exception:
             pass
 
-        if self._is_usb_name(self.mic_name):
-            self._pick_input_target()   # re-boost gain to 150%
-            return ("USB mic selected but silent — I unmuted it and "
-                    "boosted its gain; tap RETEST while speaking "
-                    "about 6 inches from it")
+        # Every silent-mic verdict now ends the same way: force a
+        # full USB-first reselection and have the user retest.
         usb_src = [s for s in self._list_sources()
                    if self._is_usb_name(s)]
+        self._pick_input_target()
+        self.request_reopen()
+        if self._is_usb_name(self.mic_name):
+            return ("USB mic selected but silent — I unmuted it, "
+                    "boosted its gain, and reconnected; tap RETEST "
+                    "while speaking about 6 inches from it")
         if usb_src:
-            self._pick_input_target()
-            self.request_reopen()
-            return ("A USB microphone is plugged in but wasn't "
-                    "selected — switching to it now; tap RETEST "
-                    "in a few seconds")
-        if not devices:
-            return ("No Bluetooth device visible to PipeWire — "
-                    "re-pair the AirPods (SCAN & PAIR), or use "
-                    "a USB mic")
-        has_head = any("head" in (p["name"] or "").lower()
-                       for d in devices for p in d["profiles"])
-        if not has_head:
-            return ("Your AirPods offer NO microphone profile to "
-                    "this Pi — a known AirPods-on-Linux limit. "
-                    "Use a USB mic; AirPods stay as the speaker")
-        if not sources:
-            return ("Mic profile exists — switching it now; tap "
-                    "RETEST in a few seconds")
-        return ("A mic source exists but was silent — tap RETEST "
-                "while speaking close to the mic")
+            return ("USB microphone found — reconnecting to it now; "
+                    "wait 5 seconds, then tap RETEST while speaking")
+        try:
+            has_inputs = any(
+                d.get("max_input_channels", 0) > 0
+                and self._is_usb_name(d.get("name"))
+                for d in self._sd.query_devices())
+        except Exception:
+            has_inputs = False
+        if has_inputs:
+            return ("USB microphone found — reconnecting to it now; "
+                    "wait 5 seconds, then tap RETEST while speaking")
+        return ("No USB microphone is visible to the system — "
+                "reseat it in its USB port (or try another port), "
+                "wait 5 seconds, then tap RETEST")
 
     def mic_level(self, seconds=2.0):
         """Live mic test for the Settings screen: taps the RUNNING
@@ -998,16 +1024,12 @@ class DoseVoice:
 
         def open_pipewire():
             """Capture through PipeWire/Pulse itself (parec /
-            pw-record), aimed straight at the best real source — a
-            USB mic first. The default source is NOT trusted: it can
-            point at a dead Bluetooth route or a speaker monitor.
-            Bluetooth profile-poking only happens when no USB mic
-            exists (it's an AirPods workaround, not a USB need)."""
+            pw-record), aimed straight at the plugged-in USB mic.
+            This works even while PipeWire owns the hardware — the
+            normal state on Raspberry Pi OS, and the reason a direct
+            hardware open can fail with 'device busy'. No Bluetooth
+            anything: only what is physically plugged in."""
             target = self._pick_input_target()
-            if not target or "bluez" in target.lower():
-                self._engage_bt_mic()
-                self._engage_bt_mic_pw()
-                target = self._pick_input_target() or target
             cmds = []
             if target:
                 cmds += [
@@ -1110,47 +1132,57 @@ class DoseVoice:
                 pass
             return None
 
+        def open_usb_portaudio():
+            """Open the plugged-in USB microphone's hardware directly
+            by name. Fails when PipeWire has the device claimed —
+            which is why the PipeWire route runs first."""
+            try:
+                devs = self._sd.query_devices()
+            except Exception:
+                return None
+            for i, d in enumerate(devs):
+                if d.get("max_input_channels", 0) < 1:
+                    continue
+                name = d.get("name", "")
+                if not self._is_usb_name(name):
+                    continue
+                for rate in (int(d.get("default_samplerate") or 48000),
+                             48000, 44100, SAMPLE_RATE, 8000):
+                    try:
+                        s = self._sd.RawInputStream(
+                            device=i, samplerate=rate,
+                            blocksize=int(BLOCK_SIZE * rate
+                                          / SAMPLE_RATE),
+                            dtype="int16", channels=1,
+                            callback=callback)
+                        s.start()
+                        self._native_rate = rate
+                        self._ratecv_state = None
+                        self.mic_name = name
+                        self.mic_index = i
+                        return ("portaudio", s)
+                    except Exception:
+                        continue
+            return None
+
         def open_capture():
-            """Selection honors the user's choice in Settings first,
-            then falls back to LIVENESS-based automatic picking."""
+            """DETERMINISTIC, ZERO-SETUP: whatever is physically
+            plugged in wins. The USB mic is found, boosted, and made
+            the default; capture goes through PipeWire aimed straight
+            at it, or straight at the hardware, in that order. No
+            saved selections consulted, no Bluetooth hunting, no
+            liveness gauntlet that could discard a quiet mic."""
             self._kick_audio_services()
             self._unmute_alsa_inputs()
             self._pa_refresh()   # see USB devices plugged in after launch
-            pref = self._mic_pref()
-            if pref == "pipewire":
-                cap = open_pipewire()
-                if cap:
-                    return cap
-            elif pref not in ("auto", "", None):
-                cap = open_named(pref)
-                if cap:
-                    return cap
-            cap = open_portaudio()
-            # A USB microphone that OPENED is trusted even if the room
-            # is silent right now — the liveness probe would otherwise
-            # discard a perfectly good quiet mic and go hunting through
-            # Bluetooth routes. Plug in a USB mic, it wins. Period.
-            if cap and self._is_usb_name(self.mic_name):
-                self.mic_name = (self.mic_name or "").replace(
-                    " (no signal yet)", "")
-                self._pick_input_target()   # boost gain, set default
-                return cap
-            if cap and capture_is_live():
-                return cap
-            pa_cap, pa_rms = cap, self.mic_rms
-            pa_name = self.mic_name
-            close_capture(cap)
+            self._pick_input_target()   # USB → default, unmuted, boosted
             cap = open_pipewire()
-            if cap and capture_is_live():
-                return cap
-            close_capture(cap)
-            # nothing live anywhere — keep PortAudio open so a mic
-            # that comes alive later is heard; label it honestly
-            cap = open_portaudio()
             if cap:
-                self.mic_name = pa_name + " (no signal)"
-                self.mic_rms = pa_rms
-            return cap
+                return cap
+            cap = open_usb_portaudio()
+            if cap:
+                return cap
+            return open_portaudio()
 
         stream = open_capture()
         if stream is None:

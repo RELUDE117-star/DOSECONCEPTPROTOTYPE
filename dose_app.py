@@ -3597,7 +3597,10 @@ class DoseApp:
 
     def _start_voice(self):
         self._ensure_audio_packages()
-        self._ensure_bt_mic_config()
+        # Bluetooth audio is retired: USB mic + USB speaker only.
+        # (_ensure_bt_mic_config kept in the code but no longer run —
+        # its user-service restarts could disrupt live USB audio.)
+        self.settings["mic_device"] = "auto"
         try:
             from dose_voice import DoseVoice
         except Exception:
@@ -3815,8 +3818,8 @@ class DoseApp:
         "piper not installed": "run DOSE.sh to finish setup",
         "speech model missing": "run DOSE.sh to download models",
         "voice model missing": "run DOSE.sh to download models",
-        "no microphone detected": "connect a mic (USB or Bluetooth)",
-        "microphone failed to open": "reconnect the microphone",
+        "no microphone detected": "plug the USB microphone in",
+        "microphone failed to open": "reseat the USB microphone",
     }
 
     def _voice_status_text(self):
@@ -3983,7 +3986,7 @@ class DoseApp:
         card_img = _pil_rounded_rect(620, 440, 22, t["card_bg"])
         tk_card = self._get_tk_image("bta_card", card_img)
         c.create_image(26, 20, image=tk_card, anchor="nw")
-        c.create_text(56, 44, text="VOICE & BLUETOOTH",
+        c.create_text(56, 44, text="VOICE & AUDIO",
                       font=self.font_label, fill=t["muted"],
                       anchor="nw")
 
@@ -4001,76 +4004,40 @@ class DoseApp:
                           font=self.font_small, fill=DOSE_BLUE_LT,
                           anchor="nw")
 
-        # device list
-        y = 112
-        for d in bt["devices"][:3]:
-            row_img = _pil_rounded_rect(560, 44, 12, t["elevated_bg"])
-            tk_row = self._get_tk_image(f"bta_row_{d['mac']}", row_img)
+        # ── zero-setup: what's plugged in is what's used ──────────
+        y = 122
+        v = self.voice
+        mic_name = (getattr(v, "mic_name", None) or
+                    "searching for USB microphone…") if v else \
+            "voice engine starting…"
+        out_cache = getattr(v, "_out_cache", None) if v else None
+        spk_name = (out_cache and out_cache[1]) or \
+            "system default (press TEST SPKR)"
+        for p in ("alsa_output.", "alsa_input."):
+            if str(spk_name).startswith(p):
+                spk_name = str(spk_name)[len(p):]
+        for label, value, key in (("USB MICROPHONE", mic_name, "mic"),
+                                  ("USB SPEAKER", spk_name, "spk")):
+            row_img = _pil_rounded_rect(560, 62, 12, t["elevated_bg"])
+            tk_row = self._get_tk_image(f"bta_dev_{key}", row_img)
             c.create_image(56, y, image=tk_row, anchor="nw")
-            state = ("Connected" if d["connected"] else
-                     "Paired" if d["paired"] else "Found")
-            c.create_text(72, y + 22,
-                          text=self._fit_text(
-                              f"{d['name']}  ·  {state}",
-                              self.font_small_bold, 330),
+            c.create_text(72, y + 18, text=label,
+                          font=self.font_label, fill=t["muted"],
+                          anchor="w")
+            c.create_text(72, y + 42,
+                          text=self._fit_text(str(value),
+                                              self.font_small_bold,
+                                              520),
                           font=self.font_small_bold, fill=t["fg"],
                           anchor="w")
-            act = ("connect" if d["paired"] and not d["connected"]
-                   else "pair" if not d["paired"] else None)
-            bx = 420
-            if act:
-                b_img = _pil_rounded_rect(88, 32, 10, DOSE_BLUE)
-                tk_b = self._get_tk_image(f"bta_a_{d['mac']}", b_img)
-                c.create_image(bx, y + 6, image=tk_b, anchor="nw")
-                c.create_text(bx + 44, y + 22, text=act.upper(),
-                              font=self.font_small_bold,
-                              fill="#06101E", anchor="center")
-                self._click_zones.append(
-                    (bx, y + 6, bx + 88, y + 38,
-                     lambda m=d["mac"], a=act: self._bt_action(m, a)))
-            fb_img = _pil_rounded_rect(84, 32, 10, t["btn_bg"])
-            tk_fb = self._get_tk_image(f"bta_f_{d['mac']}", fb_img)
-            c.create_image(520, y + 6, image=tk_fb, anchor="nw")
-            c.create_text(562, y + 22, text="FORGET",
-                          font=self.font_small_bold, fill="#FF6B6B",
-                          anchor="center")
-            self._click_zones.append(
-                (520, y + 6, 604, y + 38,
-                 lambda m=d["mac"]: self._bt_action(m, "remove")))
-            y += 52
-
-        # ── microphone selector: tap to choose which mic Dose uses ──
-        mic_y = max(y + 6, 278)
-        c.create_text(56, mic_y, text="MICROPHONE",
-                      font=self.font_label, fill=t["muted"],
+            y += 72
+        c.create_text(56, y + 6,
+                      text=self._fit_text(
+                          "Fully automatic — whatever you plug in "
+                          "is used.",
+                          self.font_small, 556),
+                      font=self.font_small, fill=t["muted"],
                       anchor="nw")
-        options = [("Auto — picks the live mic", "auto")]
-        if self.voice:
-            for n in self.voice.list_inputs()[:1]:   # USB-first sorted
-                options.append((n, n))
-        options.append(("Bluetooth via PipeWire", "pipewire"))
-        current = self.settings.get("mic_device", "auto")
-        oy = mic_y + 20
-        for label, value in options[:3]:
-            sel = (value == current)
-            row_img = _pil_rounded_rect(
-                560, 30, 10,
-                t["elevated_bg"],
-                outline=DOSE_BLUE if sel else None,
-                outline_w=2 if sel else 0)
-            tk_row = self._get_tk_image(f"mic_opt_{value}", row_img)
-            c.create_image(56, oy, image=tk_row, anchor="nw")
-            c.create_text(72, oy + 15,
-                          text=self._fit_text(
-                              ("●  " if sel else "○  ") + label,
-                              self.font_small_bold, 520),
-                          font=self.font_small_bold,
-                          fill=DOSE_BLUE_LT if sel else t["fg"],
-                          anchor="w")
-            self._click_zones.append(
-                (56, oy, 616, oy + 30,
-                 lambda v=value: self._set_mic_device(v)))
-            oy += 34
 
         # bottom actions
         r = getattr(self, "_mic_test_result", None)
@@ -4078,8 +4045,7 @@ class DoseApp:
                        and getattr(self, "_mic_report_lines", None))
         buttons = [("TEST MIC", self._voice_mic_test, False),
                    ("TEST SPKR", self._speaker_test, False),
-                   ("SCAN",
-                    lambda: self._bt_refresh(scan=True), False)]
+                   ("RESCAN", self._audio_rescan, False)]
         if show_report:
             buttons.append(("DETAILS", self._open_mic_report, False))
         buttons.append(("CLOSE", self._bt_close, True))
@@ -4214,7 +4180,28 @@ class DoseApp:
         self.mode = "btaudio"
         self._ensure_audio_packages()
         self._draw_frame()
-        self._bt_refresh(scan=False)
+
+    def _audio_rescan(self):
+        """Redo USB device selection right now — same thing the
+        engine does automatically on hot-plug, on demand."""
+        bt = self._bt_state()
+        bt["status"] = "Re-scanning USB audio devices…"
+        self._draw_frame()
+        if self.voice:
+            self.voice.request_reopen()
+
+        def clear():
+            bt["status"] = ("Re-scan done — mic: %s" %
+                            (getattr(self.voice, "mic_name", None)
+                             or "none found")
+                            if self.voice else "Voice engine not "
+                            "running yet")
+            if self.mode == "btaudio":
+                self._draw_frame()
+        try:
+            self.root.after(6000, clear)
+        except Exception:
+            pass
 
     def _voice_mic_test(self):
         """Tap the Voice Assistant row: 2-second live mic check with
