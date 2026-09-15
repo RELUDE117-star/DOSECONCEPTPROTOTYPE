@@ -358,7 +358,7 @@ class DoseVoice:
                 name = m.group(1)
                 low = name.lower()
                 if any(k in low for k in ("mic", "capture", "input")):
-                    args = ["90%", "on", "cap"]
+                    args = ["100%", "on", "cap"]
                 elif any(k in low for k in ("speaker", "master",
                                             "pcm", "headphone")):
                     args = ["90%", "on"]
@@ -371,6 +371,16 @@ class DoseVoice:
                         capture_output=True, timeout=5)
                 except Exception:
                     pass
+
+    @staticmethod
+    def _is_usb_name(name):
+        """Does this device name look like a plugged-in USB unit?
+        Cheap Pi mics (SunFounder mini and friends) enumerate as
+        C-Media 'USB PnP Sound Device' — sometimes without the word
+        USB in the name PortAudio shows."""
+        n = (name or "").lower()
+        return any(k in n for k in ("usb", "pnp", "c-media", "cmedia",
+                                    "cm108", "cm106"))
 
     def _pa_refresh(self):
         """Re-scan PortAudio's device list. PortAudio snapshots the
@@ -387,24 +397,34 @@ class DoseVoice:
     def _audio_sig(self):
         """Fingerprint of the machine's audio devices. It changes the
         moment a USB or Bluetooth mic/speaker is plugged in or pulled,
-        which is how the engine notices hot-plugs. Names only — state
-        columns flip constantly and would cause spurious reopens."""
+        which is how the engine notices hot-plugs. The kernel's own
+        card list (/proc/asound/cards) is the primary source — it
+        needs no tools installed and every USB audio device appears
+        there instantly. Names only — state columns flip constantly
+        and would cause spurious reopens."""
         names = []
+        try:
+            with open("/proc/asound/cards") as f:
+                for ln in f:
+                    if "[" in ln and "]" in ln:
+                        names.append(
+                            ln.split("[")[1].split("]")[0].strip())
+        except Exception:
+            pass
         env = self._audio_env()
         for what in ("sources", "sinks"):
             try:
                 r = subprocess.run(["pactl", "list", "short", what],
                                    capture_output=True, text=True,
                                    timeout=5, env=env)
-                if r.returncode != 0:
-                    return None
-                for ln in (r.stdout or "").splitlines():
-                    parts = ln.split()
-                    if len(parts) > 1:
-                        names.append(parts[1])
+                if r.returncode == 0:
+                    for ln in (r.stdout or "").splitlines():
+                        parts = ln.split()
+                        if len(parts) > 1:
+                            names.append(parts[1])
             except Exception:
-                return None
-        return "|".join(sorted(names))
+                pass
+        return "|".join(sorted(names)) if names else None
 
     def _pick_input_device(self):
         """Choose the input whose audio actually FLOWS. Bluetooth
@@ -421,7 +441,7 @@ class DoseVoice:
                 if d.get("max_input_channels", 0) < 1:
                     continue
                 n = (d.get("name") or "").lower()
-                if "usb" in n:
+                if self._is_usb_name(n):
                     pri = 0
                 elif any(k in n for k in ("airpod", "bluez", "headset",
                                           "hands-free", "hfp")):
@@ -558,6 +578,61 @@ class DoseVoice:
         self._out_cache = (now, target)
         return target
 
+    def _list_sources(self):
+        """Names of real capture sources (speaker monitors excluded)."""
+        try:
+            out = subprocess.run(["pactl", "list", "short", "sources"],
+                                 capture_output=True, text=True,
+                                 timeout=8,
+                                 env=self._audio_env()).stdout
+            srcs = [ln.split()[1] for ln in out.splitlines()
+                    if len(ln.split()) > 1
+                    and ".monitor" not in ln.split()[1]]
+            if srcs:
+                return srcs
+        except Exception:
+            pass
+        srcs = []
+        for obj in self._pw_dump():
+            try:
+                props = (obj.get("info") or {}).get("props") or {}
+                if props.get("media.class") == "Audio/Source":
+                    n = props.get("node.name", "")
+                    if n:
+                        srcs.append(n)
+            except Exception:
+                continue
+        return srcs
+
+    def _pick_input_target(self):
+        """The capture source Dose should listen through: a USB mic
+        the moment it's plugged in, else Bluetooth. Made the system
+        default, unmuted, at 90% — so every capture route (PortAudio
+        'default' included) hears the right microphone with zero
+        setup. Independent of the speaker choice."""
+        target = None
+        srcs = self._list_sources()
+        for want in ("usb", "bluez"):
+            for s in srcs:
+                if want in s.lower():
+                    target = s
+                    break
+            if target:
+                break
+        if target:
+            # C-Media USB mini mics (SunFounder etc.) are very quiet
+            # at stock gain — boost them well past unity
+            vol = "150%" if self._is_usb_name(target) else "90%"
+            for cmd in (["pactl", "set-default-source", target],
+                        ["pactl", "set-source-mute", target, "0"],
+                        ["pactl", "set-source-volume", target, vol]):
+                try:
+                    subprocess.run(cmd, capture_output=True, timeout=5,
+                                   env=self._audio_env())
+                except Exception:
+                    pass
+        return target
+
     def _engage_bt_mic(self):
         """Force Bluetooth cards into their headset (mic-capable)
         profile — AirPods stay in playback-only A2DP until asked."""
@@ -627,7 +702,7 @@ class DoseVoice:
         except Exception:
             pass
         out.sort(key=lambda n: (
-            0 if "usb" in n.lower() else
+            0 if self._is_usb_name(n) else
             1 if any(k in n.lower() for k in
                      ("airpod", "bluez", "headset")) else 2,
             n.lower()))
@@ -728,10 +803,19 @@ class DoseVoice:
         except Exception:
             pass
 
-        if "usb" in (self.mic_name or "").lower():
-            return ("USB mic selected but silent — capture volume "
-                    "was probably muted; I've unmuted it, tap "
-                    "RETEST while speaking")
+        if self._is_usb_name(self.mic_name):
+            self._pick_input_target()   # re-boost gain to 150%
+            return ("USB mic selected but silent — I unmuted it and "
+                    "boosted its gain; tap RETEST while speaking "
+                    "about 6 inches from it")
+        usb_src = [s for s in self._list_sources()
+                   if self._is_usb_name(s)]
+        if usb_src:
+            self._pick_input_target()
+            self.request_reopen()
+            return ("A USB microphone is plugged in but wasn't "
+                    "selected — switching to it now; tap RETEST "
+                    "in a few seconds")
         if not devices:
             return ("No Bluetooth device visible to PipeWire — "
                     "re-pair the AirPods (SCAN & PAIR), or use "
@@ -914,17 +998,32 @@ class DoseVoice:
 
         def open_pipewire():
             """Capture through PipeWire/Pulse itself (parec /
-            pw-record). This is the path that makes Bluetooth
-            headsets engage their hands-free mic profile — ALSA/
-            PortAudio alone often sees only a dead route."""
-            self._engage_bt_mic()
-            self._engage_bt_mic_pw()
-            cmds = (
+            pw-record), aimed straight at the best real source — a
+            USB mic first. The default source is NOT trusted: it can
+            point at a dead Bluetooth route or a speaker monitor.
+            Bluetooth profile-poking only happens when no USB mic
+            exists (it's an AirPods workaround, not a USB need)."""
+            target = self._pick_input_target()
+            if not target or "bluez" in target.lower():
+                self._engage_bt_mic()
+                self._engage_bt_mic_pw()
+                target = self._pick_input_target() or target
+            cmds = []
+            if target:
+                cmds += [
+                    ["pw-record", "--target", target, "--rate",
+                     "16000", "--channels", "1", "--format", "s16",
+                     "-"],
+                    ["parec", "-d", target, "--rate=16000",
+                     "--format=s16le", "--channels=1",
+                     "--latency-msec=50"],
+                ]
+            cmds += [
                 ["pw-record", "--rate", "16000", "--channels", "1",
                  "--format", "s16", "-"],
                 ["parec", "--rate=16000", "--format=s16le",
                  "--channels=1", "--latency-msec=50"],
-            )
+            ]
             for cmd in cmds:
                 try:
                     p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
@@ -949,7 +1048,9 @@ class DoseVoice:
                             break
                         ingest(data)
                 threading.Thread(target=reader, daemon=True).start()
-                self.mic_name = "Bluetooth/PipeWire (%s)" % cmd[0]
+                self.mic_name = "PipeWire (%s → %s)" % (
+                    cmd[0], ("--target" in cmd or "-d" in cmd)
+                    and target or "default")
                 return ("pipe", p)
             return None
 
@@ -1025,6 +1126,15 @@ class DoseVoice:
                 if cap:
                     return cap
             cap = open_portaudio()
+            # A USB microphone that OPENED is trusted even if the room
+            # is silent right now — the liveness probe would otherwise
+            # discard a perfectly good quiet mic and go hunting through
+            # Bluetooth routes. Plug in a USB mic, it wins. Period.
+            if cap and self._is_usb_name(self.mic_name):
+                self.mic_name = (self.mic_name or "").replace(
+                    " (no signal yet)", "")
+                self._pick_input_target()   # boost gain, set default
+                return cap
             if cap and capture_is_live():
                 return cap
             pa_cap, pa_rms = cap, self.mic_rms
