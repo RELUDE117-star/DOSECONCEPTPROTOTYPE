@@ -3853,8 +3853,12 @@ class DoseApp:
     def _voice_mic_subtext(self):
         if getattr(self, "_mic_testing", False):
             return "Testing mic — say something…"
+        # If the running capture is currently hearing signal, that live
+        # truth wins over any older test verdict — no stale "silent".
+        live = self.voice and self.voice.available and "hearing OK" in (
+            getattr(self.voice, "mic_name", "") or "")
         r = getattr(self, "_mic_test_result", None)
-        if r is not None:
+        if r is not None and not (live and r <= 5):
             if r > 60:
                 verdict = "mic is LIVE (tap to retest)"
             elif r > 5:

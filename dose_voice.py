@@ -1046,6 +1046,7 @@ class DoseVoice:
         self._ratecv_state = None
         self._gain = 1.0
         self._max_gain = 20.0    # cap so noise never explodes
+        self._nfloor = 50.0      # learned ambient noise floor (RMS)
 
         def ingest(data):
             """Common path for every capture backend: gate, resample
@@ -1061,22 +1062,33 @@ class DoseVoice:
                         self._ratecv_state)
                 except Exception:
                     return
-            # NOISE-GATED AUTO-GAIN: cheap USB mics (C-Media/CM108)
-            # capture very quietly — raw speech can sit near the noise
-            # floor where Vosk hears nothing. When a block carries real
-            # sound (peak well above the noise floor), boost it toward
-            # a healthy level; when it's just the idle hiss, leave it
-            # alone so amplified noise never triggers false wakes.
-            # Hard-limited so it can never clip into distortion.
+            # ADAPTIVE AGC with a self-calibrating noise gate: cheap USB
+            # mics (C-Media/CM108) capture so quietly that raw speech
+            # sits near the noise floor where Vosk hears nothing. We
+            # continuously learn the mic's own ambient floor (fast down,
+            # very slow up), leave ambient hiss untouched so amplified
+            # noise never confuses recognition, and boost only blocks
+            # that rise clearly above that floor — toward a healthy RMS
+            # for Vosk. This adapts to ANY mic quietness with no fixed
+            # threshold a faint mic could never cross.
             try:
                 import audioop
-                peak = audioop.max(data, 2)
-                if peak > 220:            # real sound, not idle hiss
-                    want = 9000.0         # target peak amplitude
-                    g = max(1.0, min(want / peak, self._max_gain))
-                    self._gain = self._gain * 0.7 + g * 0.3
-                    if self._gain > 1.05:
-                        data = audioop.mul(data, 2, self._gain)
+                rms = audioop.rms(data, 2)
+                nf = self._nfloor
+                if rms < nf:
+                    nf = rms                       # track quietest fast
+                else:
+                    nf = nf * 0.9995 + rms * 0.0005  # rise very slowly
+                self._nfloor = max(1.0, nf)
+                gate = max(40.0, self._nfloor * 4.0)
+                if rms > gate:                     # real signal, not hiss
+                    g = max(1.0, min(3000.0 / rms, self._max_gain))
+                    # rise quickly toward target, no pumping
+                    self._gain = self._gain * 0.5 + g * 0.5
+                else:
+                    self._gain = 1.0               # ambient: leave clean
+                if self._gain > 1.05:
+                    data = audioop.mul(data, 2, self._gain)
             except Exception:
                 pass
             lp = self._level_probe
