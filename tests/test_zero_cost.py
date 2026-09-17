@@ -65,12 +65,34 @@ for blob, who in ((VOICE, "dose_voice.py"), (NLU, "dose_nlu.py")):
 # ── 3. The voice engine makes NO outbound web requests ───────────────
 ok("requests.post" not in VOICE and "requests.get" not in VOICE,
    "voice engine makes no HTTP requests")
-ok("urlopen" not in VOICE, "voice engine opens no URLs")
 ok("socket." not in VOICE, "voice engine opens no sockets")
+
+# The engine opens exactly ONE url, and only to fetch the 2.3 MB voice
+# detector. Everything else it needs is downloaded by the app or the
+# setup script. This is checked precisely rather than by banning
+# urlopen outright, because the ban is what the property is FOR: no
+# telemetry, no paid API, nothing metered.
+import re as _re                                            # noqa: E402
+_urls = _re.findall(r"urlopen\(([^)]*)", VOICE)
+ok(len(_urls) <= 1,
+   "voice engine opens at most one URL (found %d)" % len(_urls))
+for _u in _urls:
+    ok("VAD_MODEL_URL" in _u,
+       "and it is the voice-detector model, nothing else: %r"
+       % _u.strip()[:40])
+# read the constant itself rather than scraping source lines — the
+# URL is split across two of them
+import dose_voice as _dvz                                   # noqa: E402
+_vad_url = getattr(_dvz, "VAD_MODEL_URL", "")
+ok("githubusercontent.com" in _vad_url or "github.com" in _vad_url,
+   "from GitHub — free, open, no account: %s" % _vad_url[:48])
+ok("silero" in _vad_url.lower(), "the Silero VAD model (MIT)")
+ok(_vad_url.endswith(".onnx"), "a single model file, not a package")
 
 # ── 4. Network use is limited to FREE hosts: the GitHub update and
 #      free, open model downloads. No paid or metered service.
 FREE_HOSTS = ("github.com", "githubusercontent.com", "api.github.com",
+              "raw.githubusercontent.com",   # Silero VAD model (MIT)
               "alphacephei.com",        # Vosk models (Apache-2.0)
               "huggingface.co",         # Piper voices (MIT)
               "moonshine.ai")           # Moonshine models (MIT)

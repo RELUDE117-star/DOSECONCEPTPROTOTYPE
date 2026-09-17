@@ -432,6 +432,15 @@ VAD_THRESHOLD = float(os.environ.get("DOSE_VAD_THRESHOLD", "0.5"))
 # enough that a cupboard door is not a sentence.
 VAD_MIN_SPEECH_FRAMES = int(os.environ.get("DOSE_VAD_MIN_FRAMES", "2"))
 
+# Fetched as a plain file, NOT as the pip package. `pip install
+# silero-vad` requires torch and torchaudio: hundreds of megabytes,
+# which on a 4 GB Pi failed to install AND drove the load average to
+# 5.0 while it tried. All that is actually needed is this one model
+# and onnxruntime, which is already present for the speech models.
+VAD_MODEL_URL = ("https://raw.githubusercontent.com/snakers4/"
+                 "silero-vad/master/src/silero_vad/data/silero_vad.onnx")
+VAD_MODEL_MIN_BYTES = 500_000
+
 # ── BARGE-IN ─────────────────────────────────────────────────────────
 # Talking over her stops her. People interrupt each other constantly;
 # an assistant you have to wait out is the thing that feels like a
@@ -990,23 +999,29 @@ class DoseVoice:
         except Exception as e:
             self._vad_reason = "onnxruntime missing (%s)" % str(e)[:40]
             return None
+        # Our own copy first — the normal case. The pip package is
+        # only used if it happens to be present already; we never ask
+        # for it, because it would bring torch with it.
         path = None
-        try:
-            import silero_vad
-            base = os.path.dirname(silero_vad.__file__)
-            for name in ("silero_vad_16k_op15.onnx", "silero_vad.onnx"):
-                cand = os.path.join(base, "data", name)
-                if os.path.exists(cand):
-                    path = cand
-                    break
-        except Exception:
-            pass
+        cand = os.path.join(VOICE_DIR, "silero_vad.onnx")
+        if os.path.exists(cand) and os.path.getsize(cand) > \
+                VAD_MODEL_MIN_BYTES:
+            path = cand
         if path is None:
-            cand = os.path.join(VOICE_DIR, "silero_vad.onnx")
-            if os.path.exists(cand):
-                path = cand
+            try:
+                import silero_vad
+                base = os.path.dirname(silero_vad.__file__)
+                for name in ("silero_vad_16k_op15.onnx",
+                             "silero_vad.onnx"):
+                    c2 = os.path.join(base, "data", name)
+                    if os.path.exists(c2):
+                        path = c2
+                        break
+            except Exception:
+                pass
         if path is None:
-            self._vad_reason = "model not installed"
+            self._vad_reason = "downloading…"
+            self.fetch_vad_model()
             return None
         try:
             opts = ort.SessionOptions()
@@ -1024,6 +1039,47 @@ class DoseVoice:
             self._vad = None
             self._vad_reason = str(e)[:60]
         return self._vad
+
+    def fetch_vad_model(self):
+        """Download the 2.3 MB voice detector, once, in the background.
+
+        A plain file fetch — no package, no torch, no build step."""
+        if getattr(self, "_vad_fetching", False):
+            return
+        self._vad_fetching = True
+
+        def work():
+            try:
+                os.nice(15)
+            except Exception:
+                pass
+            dest = os.path.join(VOICE_DIR, "silero_vad.onnx")
+            tmp = dest + ".part"
+            try:
+                os.makedirs(VOICE_DIR, exist_ok=True)
+                import urllib.request
+                with urllib.request.urlopen(VAD_MODEL_URL,
+                                            timeout=120) as r:
+                    data = r.read()
+                if len(data) < VAD_MODEL_MIN_BYTES:
+                    raise ValueError("short download (%d bytes)"
+                                     % len(data))
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, dest)
+                self._vad = "unset"          # pick it up next time
+                self._vad_reason = ""
+            except Exception as e:
+                self._vad_reason = "download failed: %s" % str(e)[:40]
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
+            finally:
+                self._vad_fetching = False
+
+        threading.Thread(target=work, daemon=True,
+                         name="vad-fetch").start()
 
     VAD_FRAME = 512          # samples at 16 kHz = 32 ms
 
@@ -2606,10 +2662,7 @@ class DoseVoice:
             # a high floor means the room is the problem, not the
             # software or even the microphone.
             ("Room noise", self._room_note(), self._nfloor < 250),
-            ("Voice detector",
-             ("Silero · listening" if self._vad_trusted
-              and getattr(self, "_vad", None) not in (None, "unset")
-              else (getattr(self, "_vad_reason", "") or "energy only")),
+            ("Voice detector", self._vad_note(),
              bool(self._vad_trusted
                   and getattr(self, "_vad", None) not in (None, "unset"))),
             ("Talk over me", "yes — it stops" if BARGE_IN else "off",
@@ -2829,6 +2882,19 @@ class DoseVoice:
                     pass
             return self._capture_level
         return None
+
+    def _vad_note(self):
+        """What the voice detector is doing, in words. It is a file we
+        fetch, not a package we install, so "missing" here means the
+        download has not landed yet — not that something is broken."""
+        live = (self._vad_trusted
+                and getattr(self, "_vad", None) not in (None, "unset"))
+        if live:
+            return "Silero · listening"
+        reason = getattr(self, "_vad_reason", "")
+        if reason:
+            return reason[:34]
+        return "energy only (2 MB model pending)"
 
     def _room_note(self):
         """Plain words for what the microphone is actually getting, so

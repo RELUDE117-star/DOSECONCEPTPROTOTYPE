@@ -3635,9 +3635,37 @@ class DoseApp:
             self.camera = None
             self.camera_running = False
 
+    # How often the EXPENSIVE decode passes may run, at most.
+    HARD_PASS_PERIOD = 1.0
+
+    def _expected_codes(self):
+        """How many of our codes we currently believe are in view."""
+        try:
+            return sum(1 for v in self._qr_held.values() if v)
+        except Exception:
+            return 0
+
     def _decode_passes(self, pil_img):
-        """Run progressively harder decode passes tuned for glossy /
-        glary stickers, merging unique codes across all of them."""
+        """Decode the frame, escalating only when it is actually needed.
+
+        There are five passes here: a plain scan, then an adaptive
+        threshold, autocontrast, a contrast stretch and a sharpen, each
+        followed by its own zbar scan. They exist because glossy
+        stickers under a bright internal light are genuinely hard to
+        read, and they work.
+
+        They were ALL running five times a second, whenever fewer than
+        four codes were visible — which is nearly always, since most
+        people do not have four bottles in view. Measured on a 640x480
+        frame that is 14.5 ms of image processing per frame before any
+        scanning, about 58% of a Pi core, and roughly three times that
+        at 720p. It is the single biggest thing running on this device.
+
+        Now: the cheap pass runs every frame. The expensive ones run
+        only when the cheap pass came back with less than we already
+        believe is in there — and then at most once a second, not five
+        times. In the steady state, where the plain scan finds what is
+        there, they never run at all."""
         from PIL import ImageEnhance, ImageFilter, ImageOps
         found = {}
 
@@ -3651,12 +3679,30 @@ class DoseApp:
             absorb(_scan_qr(pil_img))
         except Exception:
             pass
+
+        # Good enough? Then stop — this is the common case.
+        if found and len(found) >= self._expected_codes():
+            return list(found.values())
+
+        now = time.time()
+        if now - getattr(self, "_last_hard_pass", 0) < self.HARD_PASS_PERIOD:
+            return list(found.values())
+        self._last_hard_pass = now
+
         gray = pil_img.convert("L")
+
+        def enough():
+            """Stop escalating once we have what we expect. The passes
+            get more expensive as they go — the sharpen at the end is
+            the costliest single operation here — so there is no point
+            running the hard ones after the answer is already in."""
+            want = max(1, self._expected_codes())
+            return len(found) >= want
 
         # Adaptive (local) threshold — the key pass for specular glare:
         # each pixel is compared to its local neighborhood, so QR modules
         # survive even inside a washed-out highlight
-        if len(found) < 4:
+        if not enough():
             try:
                 import numpy as np
                 g = np.asarray(gray, dtype=np.int16)
@@ -3669,19 +3715,19 @@ class DoseApp:
 
         # Autocontrast with clipping — re-stretches frames the glare
         # has washed out
-        if len(found) < 4:
+        if not enough():
             try:
                 absorb(_scan_qr(ImageOps.autocontrast(gray, cutoff=3)))
             except Exception:
                 pass
 
-        if len(found) < 4:
+        if not enough():
             try:
                 absorb(_scan_qr(ImageEnhance.Contrast(gray).enhance(2.0)))
             except Exception:
                 pass
 
-        if len(found) < 4:
+        if not enough():
             try:
                 absorb(_scan_qr(pil_img.filter(ImageFilter.SHARPEN)))
             except Exception:
@@ -4025,8 +4071,13 @@ class DoseApp:
         # with something that does not parse. Giving up quickly is not
         # an accuracy strategy.
         ("faster_whisper", "faster-whisper"),
-        # the voice detector: 1.3 MB, tells a person from a tap
-        ("silero_vad", "silero-vad"),
+        # NOTE: silero-vad is deliberately NOT a pip dependency. The
+        # package requires torch and torchaudio — hundreds of
+        # megabytes, and installing them on a 4 GB Pi drove the load
+        # average to 5.0 and the install failed anyway. We need one
+        # 2.3 MB ONNX file and onnxruntime, which is already here for
+        # the speech models. It is fetched directly; see
+        # VAD_MODEL_URL in dose_voice.py.
     )
 
     def _swap_voice_engine(self):
@@ -4654,8 +4705,7 @@ class DoseApp:
                             [sys.executable, "-m", "pip", "install",
                              "sounddevice", "vosk", "piper-tts", "qrcode", "audioop-lts",
                              "rapidfuzz", "jellyfish", "moonshine-voice",
-                             "faster-whisper", "useful-moonshine-onnx",
-                             "silero-vad"],
+                             "faster-whisper", "useful-moonshine-onnx"],
                             capture_output=True, timeout=900, env=env)
                 except Exception:
                     pass

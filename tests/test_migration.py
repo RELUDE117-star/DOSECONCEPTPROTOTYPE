@@ -263,9 +263,14 @@ for blob in (src, sh):
         h = u.split("//", 1)[-1].split("/")[0].lower()
         if any(k in u for k in ("model", "voice", ".zip", ".onnx")):
             hosts.add(h)
-ok(hosts <= {"huggingface.co", "alphacephei.com"},
-   "models come from exactly two free hosts: her voice and the live "
-   "listener (found %s)" % ", ".join(sorted(hosts)))
+ok(hosts <= {"huggingface.co", "alphacephei.com",
+             "raw.githubusercontent.com"},
+   "models come from three free, open hosts — her voice, the live "
+   "listener, and the voice detector (found %s)"
+   % ", ".join(sorted(hosts)))
+ok("raw.githubusercontent.com" in hosts or "silero" not in sh.lower(),
+   "the voice detector is a plain file from GitHub, not a pip "
+   "package that would drag in torch")
 
 print("== 10. 'Speech: downloading...' must not be a dead end ==")
 # Reported from the device: Speech sat on "downloading..." forever.

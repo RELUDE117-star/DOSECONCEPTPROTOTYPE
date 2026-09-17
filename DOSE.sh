@@ -34,7 +34,6 @@ probe "piper"              || PIP_PKGS="$PIP_PKGS piper-tts"
 probe "rapidfuzz"          || PIP_PKGS="$PIP_PKGS rapidfuzz"
 probe "jellyfish"          || PIP_PKGS="$PIP_PKGS jellyfish"
 probe "moonshine_voice"    || PIP_PKGS="$PIP_PKGS moonshine-voice"
-probe "silero_vad"         || PIP_PKGS="$PIP_PKGS silero-vad"
 # Python 3.13 removed stdlib audioop; audioop-lts restores it
 python3 -c "import audioop" 2>/dev/null || PIP_PKGS="$PIP_PKGS audioop-lts"
 command -v pip3 >/dev/null 2>&1 || APT_PKGS="$APT_PKGS python3-pip"
@@ -185,10 +184,8 @@ if [ ! -f "$VOICE_DIR/.bt_ready3" ]; then
     # what was said. Accuracy matters more than the extra download.
     python3 -m pip install --break-system-packages faster-whisper 2>/dev/null \
         || python3 -m pip install faster-whisper 2>/dev/null || true
-    # Silero VAD — a real speech/not-speech model. 1.3 MB, and it is
-    # what lets the station tell your voice from a running tap.
-    python3 -m pip install --break-system-packages silero-vad 2>/dev/null \
-        || python3 -m pip install silero-vad 2>/dev/null || true
+    # Silero VAD is fetched as a plain ONNX file below — NOT as the
+    # pip package, which drags in torch and torchaudio.
     python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
         || python3 -m pip install useful-moonshine-onnx 2>/dev/null || true
     touch "$VOICE_DIR/.bt_ready3"
@@ -473,6 +470,24 @@ print("  Speech model could not be downloaded — the app will keep "
       "retrying in the background.")
 PYEOF
 
+# ── Voice detector: one file, no package ──
+# `pip install silero-vad` requires torch and torchaudio. On a 4 GB Pi
+# that failed to install AND pushed the load average past 5 while it
+# tried. All we need is the model itself; onnxruntime is already here.
+VAD_MODEL="$VOICE_DIR/silero_vad.onnx"
+if [ ! -s "$VAD_MODEL" ] || [ "$(stat -c%s "$VAD_MODEL" 2>/dev/null || echo 0)" -lt 500000 ]; then
+    echo "  Downloading the voice detector (2 MB)..."
+    if curl -sSL -o "$VAD_MODEL.part" \
+        "https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx" \
+        && [ "$(stat -c%s "$VAD_MODEL.part" 2>/dev/null || echo 0)" -gt 500000 ]; then
+        mv "$VAD_MODEL.part" "$VAD_MODEL"
+        echo "  Voice detector ready."
+    else
+        rm -f "$VAD_MODEL.part"
+        echo "  (voice detector will be fetched by the app)"
+    fi
+fi
+
 # ── Pi tuning for a conversational assistant ──
 # On a stock Raspberry Pi the CPU sits in "ondemand" and idles at
 # 600 MHz. Speech recognition and speech synthesis are short bursts,
@@ -490,6 +505,40 @@ done
 # touchscreen UI always keeps one and stays at full frame rate.
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-3}
 export ORT_NUM_THREADS=${ORT_NUM_THREADS:-3}
+
+# ── EVERYTHING READY? ──
+# A single gate before launch. The app used to open while pieces were
+# still arriving, so the first screen you saw listed things as MISSING
+# or "installing" and the first thing you said went to whatever
+# happened to be loaded. Anything still missing here is retried ONCE,
+# in the foreground, and then reported plainly — the app still starts
+# either way, because a station that will not open is worse than one
+# that is missing its best recogniser.
+echo ""
+echo "  Checking everything is in place..."
+MISSING=""
+for SPEC in "sounddevice:sounddevice" "vosk:vosk" "piper:piper-tts"             "rapidfuzz:rapidfuzz" "jellyfish:jellyfish"             "onnxruntime:onnxruntime" "numpy:numpy"             "faster_whisper:faster-whisper"             "moonshine_voice:moonshine-voice"; do
+    MOD=${SPEC%%:*}; PKG=${SPEC##*:}
+    if ! python3 -c "import $MOD" 2>/dev/null; then
+        echo "    installing $PKG..."
+        python3 -m pip install --break-system-packages "$PKG" 2>/dev/null             || python3 -m pip install "$PKG" 2>/dev/null || true
+        python3 -c "import $MOD" 2>/dev/null || MISSING="$MISSING $PKG"
+    fi
+done
+[ -s "$VOICE_DIR/silero_vad.onnx" ] || MISSING="$MISSING voice-detector"
+ls "$VOICE_DIR"/*.onnx >/dev/null 2>&1 || MISSING="$MISSING voice-model"
+ls -d "$VOICE_DIR"/vosk-model* >/dev/null 2>&1 || MISSING="$MISSING speech-model"
+
+if [ -n "$MISSING" ]; then
+    echo ""
+    echo "  ┌──────────────────────────────────────────────────┐"
+    echo "  │  Starting without:$(printf '%-31s' "$MISSING")│"
+    echo "  │  DOSE will keep trying in the background.        │"
+    echo "  │  Check Settings -> Update Software for details.  │"
+    echo "  └──────────────────────────────────────────────────┘"
+else
+    echo "  Everything is in place."
+fi
 
 # ── Launch ──
 echo "  Starting DOSE..."
