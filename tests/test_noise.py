@@ -144,21 +144,51 @@ ok(dv.NOISE_GATE_RATIO >= 2.5,
    "speech must stand %.1fx clear of the room, not merely be audible "
    "in it" % dv.NOISE_GATE_RATIO)
 
-print("== 6. a distant, quiet voice is brought up to a usable level ==")
-# The recogniser wants blocks around RMS 3000. Gain only ever applies
-# to audio that already cleared the noise gate, so a bigger ceiling
-# lifts a far-off voice without lifting the room with it.
-MAX_GAIN = float(os.environ.get("DOSE_MAX_GAIN", "40"))
-for label, rms in (("right at the mic", 1200.0),
-                   ("a foot away", 200.0),
-                   ("a foot away, partly blocked", 90.0)):
-    g = max(1.0, min(3000.0 / rms, MAX_GAIN))
-    ok(rms * g >= 2400,
-       "%s: RMS %.0f x%.0f = %.0f, close to the ~3000 the recogniser "
-       "wants" % (label, rms, g, rms * g))
+print("== 6. a microphone that hears properly is LEFT ALONE ==")
+# The ceiling was pushed to 40x chasing a weak far-field capsule. That
+# was the wrong lever: every quiet block between words is multiplied
+# too, so the room comes up with the voice and the recogniser gets an
+# overdriven mix of everything instead of a person talking. A decent
+# USB mic does its own conditioning; stacking ours on top fights it.
+from dose_voice import DoseVoice as _DV                      # noqa: E402
 
-# ...but the room is never amplified: gain is applied only above the
-# gate, so ambient noise passes through untouched
+agc = object.__new__(_DV)
+agc._max_gain = float(os.environ.get("DOSE_MAX_GAIN", "4"))
+ok(agc._max_gain <= 6,
+   "the auto-gain ceiling is a modest %.0fx, not a boost"
+   % agc._max_gain)
+
+for label, lvl in (("a good mic, close", 2600.0),
+                   ("a good mic, a foot away", 1800.0),
+                   ("right at the healthy threshold",
+                    _DV.HEALTHY_SPEECH_RMS)):
+    agc._speech_level = lvl
+    ok(abs(agc._agc_ceiling() - 1.0) < 0.001,
+       "%s (RMS %.0f): gain 1.0x — the audio is untouched"
+       % (label, lvl))
+
+# ...but a genuinely weak capsule still gets help
+for label, lvl in (("a weak capsule", 900.0),
+                   ("a very weak capsule", 300.0)):
+    agc._speech_level = lvl
+    c = agc._agc_ceiling()
+    ok(1.0 < c <= agc._max_gain,
+       "%s (RMS %.0f) still gets a modest %.2fx" % (label, lvl, c))
+
+# and the boost eases in rather than switching on abruptly
+agc._speech_level = _DV.HEALTHY_SPEECH_RMS * 0.99
+just_under = agc._agc_ceiling()
+ok(just_under < 1.1,
+   "just below the threshold the boost is still nearly nothing "
+   "(%.3fx) — no cliff" % just_under)
+
+agc._speech_level = 0.0
+ok(agc._agc_ceiling() == agc._max_gain,
+   "before anything is known it allows the full %.0fx, then settles"
+   % agc._max_gain)
+
+# and the room is never amplified either way: gain is applied only
+# above the gate, so ambient noise passes through untouched
 f = Floor()
 f.run(TAP, int(10 / BLOCK_S))
 ok(not f.feed(TAP),
@@ -171,18 +201,26 @@ print("== 7. the microphone is not turned up past clipping ==")
 from dose_voice import DoseVoice                            # noqa: E402
 
 VSRC = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
-cap = VSRC.split("attempts = []")[1][:900]
+cap = VSRC.split("attempts = []")[1][:1400]
 ok('"100%", "cap"' not in cap,
    "capture gain is no longer slammed to 100%")
-ok("self._capture_level" in cap,
-   "it is set from a measured level instead")
+ok('["cap", "unmute"]' in cap,
+   "the device is only unmuted and selected — its level is left alone")
+ok("if self._capture_level:" in cap,
+   "a percentage is forced ONLY when something asks for one")
+
+# with nothing asking, nothing is forced
+import importlib                                            # noqa: E402
+os.environ.pop("DOSE_CAPTURE_LEVEL", None)
+importlib.reload(dv)
+fresh = object.__new__(dv.DoseVoice)
+_lvl = os.environ.get("DOSE_CAPTURE_LEVEL", "").strip()
+ok(not _lvl, "no capture level is set by default")
 
 trim = object.__new__(DoseVoice)
-trim._capture_level = 80
+trim._capture_level = None
 trim._forced_card = None
 trim._clip_recent = 0.0
-ok(trim._capture_level <= 85,
-   "the starting level leaves headroom (%d%%)" % trim._capture_level)
 
 # not enough audio yet -> no judgement
 trim._blocks_seen, trim._clip_blocks = 10, 10
@@ -193,7 +231,8 @@ ok(trim.trim_capture_if_clipping() is None,
 trim._blocks_seen, trim._clip_blocks = 200, 0
 ok(trim.trim_capture_if_clipping() is None,
    "a clean input is left alone")
-ok(trim._capture_level == 80, "and the level is unchanged")
+ok(trim._capture_level is None,
+   "and the hardware level is never touched")
 
 # an occasional loud moment is NOT a level problem
 trim._blocks_seen, trim._clip_blocks = 200, 3      # 1.5%
@@ -203,7 +242,9 @@ ok(trim.trim_capture_if_clipping() is None,
 # persistent clipping -> stepped down, and it keeps stepping
 trim._blocks_seen, trim._clip_blocks = 200, 40     # 20%
 lvl = trim.trim_capture_if_clipping()
-ok(lvl == 70, "persistent clipping turns the mic down (80 -> %s)" % lvl)
+ok(lvl == 70,
+   "persistent clipping DOES step it down as a safety net (-> %s%%)"
+   % lvl)
 for _ in range(10):
     trim._blocks_seen, trim._clip_blocks = 200, 40
     trim.trim_capture_if_clipping()
@@ -217,6 +258,8 @@ ok("audioop.max" in VSRC and "31000" in VSRC,
 print("== 8. it says when the input is too hot ==")
 hot = object.__new__(DoseVoice)
 hot._capture_level = 70
+hot._speech_level = 0.0
+hot._max_gain = 4.0
 hot._nfloor = 50.0
 hot._clip_recent = __import__("time").time()
 note = hot._room_note()

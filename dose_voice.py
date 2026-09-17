@@ -902,22 +902,27 @@ class DoseVoice:
                                                "input source"))
             attempts = []
             if not playbackish:
-                # NOT 100%. A cheap USB capsule (C-Media CM108 and
-                # friends) is already past its clipping point at full
-                # capture gain: a clap saturates, room tone reads hot,
-                # and a clipped waveform is worse for the recogniser
-                # than a quiet one. Start with headroom and let
-                # _trim_capture() measure its way down from here if it
-                # still clips. The software auto-gain makes up the
-                # difference for a distant voice, and it cannot clip
-                # because it only lifts what is already below target.
-                lvl = "%d%%" % self._capture_level
-                attempts += [
-                    [lvl, "cap", "unmute"],
-                    [lvl, "on", "cap"],
-                    ["cap"],
-                    [lvl, "unmute"],
-                ]
+                # LEAVE THE LEVEL ALONE. All we do here is make sure
+                # the device is unmuted and selected as a capture
+                # source — we do not turn it up.
+                #
+                # It used to be forced to 100%, then to 80%. Both were
+                # wrong for the same reason: a microphone that works
+                # properly arrives at a sensible level, and overriding
+                # it only overdrives the input. A decent USB mic does
+                # its own conditioning, so stacking our gain on top of
+                # it is how you end up hearing the whole room and none
+                # of the person.
+                #
+                # DOSE_CAPTURE_LEVEL forces a percentage if a
+                # particular capsule really does need one, and the
+                # clipping watchdog can still step it down. Neither
+                # runs by default.
+                attempts += [["cap", "unmute"], ["on", "cap"], ["cap"],
+                             ["unmute"]]
+                if self._capture_level:
+                    lvl = "%d%%" % self._capture_level
+                    attempts = [[lvl] + a for a in attempts] + attempts
             else:
                 attempts += [["90%", "unmute", "on"]]
             # An input-source/mux enum: try selecting a mic/line item
@@ -2102,6 +2107,28 @@ class DoseVoice:
         ]
         return rows
 
+    # Speech at or above this RMS needs no help at all.
+    HEALTHY_SPEECH_RMS = 1400.0
+
+    def _agc_ceiling(self):
+        """How much the auto-gain is allowed to lift, right now.
+
+        A microphone that already delivers speech at a healthy level
+        gets NOTHING — gain 1.0, the audio passes through untouched.
+        Boosting a good signal is how the room ends up as loud as the
+        person. The boost exists only for a capsule that genuinely
+        cannot reach a usable level on its own, and it fades in as the
+        measured speech level falls rather than switching on abruptly.
+        """
+        lvl = self._speech_level
+        if lvl <= 0:
+            return self._max_gain          # nothing learned yet
+        if lvl >= self.HEALTHY_SPEECH_RMS:
+            return 1.0                     # a good mic: hands off
+        # between "quiet" and "healthy", ease the ceiling in
+        frac = 1.0 - (lvl / self.HEALTHY_SPEECH_RMS)
+        return 1.0 + (self._max_gain - 1.0) * frac
+
     def watch_input_level(self):
         """Keep an eye on the microphone level for the first few
         minutes, on its own worker.
@@ -2147,8 +2174,15 @@ class DoseVoice:
         self._blocks_seen = 0
         # more than 2% of blocks saturating is not a loud moment, it is
         # a level that is set too high
-        if ratio > 0.02 and self._capture_level > 40:
-            self._capture_level = max(40, self._capture_level - 10)
+        if ratio <= 0.02:
+            return None
+        # We do not normally set the level at all. If the input is
+        # genuinely saturating, start from a sensible number and work
+        # down from there — this is a safety net for a capsule that
+        # arrives overdriven, not the normal path.
+        cur = self._capture_level if self._capture_level else 80
+        if cur > 40:
+            self._capture_level = max(40, cur - 10)
             card = (self._forced_card or (None,))[0]
             if card is not None:
                 try:
@@ -2164,8 +2198,9 @@ class DoseVoice:
         nf = getattr(self, "_nfloor", 0.0)
         # clipping is the more useful thing to say when it applies
         if time.time() - getattr(self, "_clip_recent", 0) < 30:
-            return "input too hot (%d%%) — turning it down" % \
-                self._capture_level
+            return "input too hot (%s) — turning it down" % (
+                "%d%%" % self._capture_level if self._capture_level
+                else "device level")
         if nf < 120:
             word = "quiet"
         elif nf < 400:
@@ -2174,7 +2209,11 @@ class DoseVoice:
             word = "noisy — speak closer"
         else:
             word = "too loud to hear you"
-        return "%s (%.0f, mic %d%%)" % (word, nf, self._capture_level)
+        # Say what we are doing to the signal, not just what the room
+        # sounds like — "boost 1.0x" means the microphone is being left
+        # alone, which is the healthy state.
+        return "%s (%.0f, boost %.1fx)" % (
+            word, nf, self._agc_ceiling())
 
     def warm_models(self):
         """Run one throwaway inference through each recogniser at
@@ -2426,20 +2465,32 @@ class DoseVoice:
         self._native_rate = SAMPLE_RATE
         self._ratecv_state = None
         self._gain = 1.0
-        # Cap on the auto-gain. 20x was not enough for a voice a foot
-        # from a microphone rated for six inches, with part of the
-        # product in the way: a block at RMS 80 only reached 1600, well
-        # under the ~3000 the recogniser wants. This only ever applies
-        # to blocks that ALREADY cleared the noise gate, so raising it
-        # amplifies distant speech without amplifying the room.
-        self._max_gain = float(os.environ.get("DOSE_MAX_GAIN", "40"))
+        # Ceiling on the software auto-gain — deliberately modest.
+        #
+        # This was 20x, then 40x, chasing a weak far-field capsule.
+        # That was the wrong lever. A microphone that hears properly
+        # needs no help, and a big ceiling actively hurts: every quiet
+        # block between words gets multiplied too, so the room comes up
+        # with the voice and the recogniser is handed an overdriven mix
+        # of everything instead of a person talking. A good USB mic
+        # does its own conditioning; stacking ours on top fights it.
+        #
+        # 4x is enough to rescue genuinely quiet input and small enough
+        # that it cannot blow anything out. It also switches itself OFF
+        # entirely once the microphone is shown to be healthy — see
+        # _agc_ceiling().
+        self._max_gain = float(os.environ.get("DOSE_MAX_GAIN", "4"))
+        self._speech_level = 0.0   # typical RMS of actual speech
         self._nfloor = 50.0      # learned ambient noise floor (RMS)
         self._snr = 0.0          # how far the last block stood above it
         self._clip_blocks = 0    # blocks where the input saturated
         self._blocks_seen = 0
         self._clip_recent = 0.0
-        self._capture_level = int(os.environ.get("DOSE_CAPTURE_LEVEL",
-                                                 "80"))
+        # None = leave the hardware level exactly as it is. Only set
+        # when DOSE_CAPTURE_LEVEL asks, or when the clipping watchdog
+        # has had to pull it down.
+        _lvl = os.environ.get("DOSE_CAPTURE_LEVEL", "").strip()
+        self._capture_level = int(_lvl) if _lvl.isdigit() else None
         self._last_voice_ts = 0.0  # last block that carried real speech
 
         def ingest(data):
@@ -2510,7 +2561,12 @@ class DoseVoice:
                     # stamp the moment: the endpointer uses this to cut
                     # the instant the user stops talking
                     self._last_voice_ts = time.time()
-                    g = max(1.0, min(3000.0 / rms, self._max_gain))
+                    # learn how loud this microphone actually hears
+                    # speech, so we can stop boosting once it is clear
+                    # that it does not need boosting
+                    self._speech_level = (self._speech_level * 0.97
+                                          + rms * 0.03)
+                    g = max(1.0, min(3000.0 / rms, self._agc_ceiling()))
                     # rise quickly toward target, no pumping
                     self._gain = self._gain * 0.5 + g * 0.5
                 else:
