@@ -633,6 +633,24 @@ class DoseApp:
 
     def __init__(self):
         self.root = tk.Tk()
+        # NEVER let a single callback error abort the whole station. Tk
+        # would otherwise print the traceback and, for some errors, tear
+        # down the loop. We log it and carry on — a medication device
+        # that keeps running with one broken repaint is far safer than
+        # one that exits because of it.
+        def _guard(exc, val, tb):
+            try:
+                import traceback as _tb
+                msg = "".join(_tb.format_exception(exc, val, tb))
+                with open(os.path.join(APP_DIR, "crash.log"), "a") as f:
+                    f.write("\n[callback %s]\n%s"
+                            % (datetime.now().isoformat(), msg))
+            except Exception:
+                pass
+        try:
+            self.root.report_callback_exception = _guard
+        except Exception:
+            pass
         self.root.title("DOSE")
         self.root.geometry(f"{SCREEN_W}x{SCREEN_H}+0+0")
         try:
@@ -841,7 +859,12 @@ class DoseApp:
         if self.has_touch:
             self._poll_touch()
 
-        self.root.after(2000, lambda: self._do_update_check(silent=True))
+        # Auto-update on launch, unless self-install is disabled (the
+        # same flag developers use to keep a working tree from being
+        # overwritten by the published build).
+        if not os.environ.get("DOSE_DISABLE_SELF_INSTALL"):
+            self.root.after(2000,
+                            lambda: self._do_update_check(silent=True))
         self.root.focus_force()
 
     # ── Safe widget raising ────────────────────────────────────────────────
@@ -5874,6 +5897,27 @@ class DoseApp:
                              % (label, value, "" if good else "<-- CHECK"))
             lines.append("")
 
+        # RECENT CRASHES. If the station has been aborting, the reason is
+        # here — the Python traceback and/or the native faulthandler dump
+        # — so a crash can be READ instead of described. This is what
+        # turns "it just crashes" into an actual stack to fix.
+        crash_bits = []
+        for name, path in (("crash.log", os.path.join(APP_DIR,
+                                                       "crash.log")),
+                           ("faulthandler.log",
+                            os.path.join(APP_DIR, "faulthandler.log"))):
+            try:
+                if os.path.isfile(path) and os.path.getsize(path) > 0:
+                    tail = open(path, errors="ignore").read()[-1500:]
+                    crash_bits.append("### %s (tail)\n%s" % (name, tail))
+            except Exception:
+                pass
+        lines.append("## RECENT CRASHES")
+        lines.append("\n".join(crash_bits) if crash_bits
+                     else "  none recorded — no aborts since the logs "
+                     "were last cleared")
+        lines.append("")
+
         # EVERY TURN. This is the part worth reading: what was said,
         # what it heard, whether it worked it out, and how long each
         # one took. A run of bad turns can be read here instead of
@@ -6952,6 +6996,19 @@ class DoseApp:
 
 
 if __name__ == "__main__":
+    # Catch NATIVE crashes too. A segfault in onnxruntime / ctranslate2
+    # or an OOM kill leaves no Python traceback — faulthandler dumps the
+    # C stack to a file so the next audit can show WHY it aborted instead
+    # of us guessing. This is what turns "it just crashes" into a fact.
+    try:
+        import faulthandler
+        os.makedirs(APP_DIR, exist_ok=True)
+        _fh = open(os.path.join(APP_DIR, "faulthandler.log"), "a")
+        _fh.write("\n[boot %s]\n" % datetime.now().isoformat())
+        _fh.flush()
+        faulthandler.enable(file=_fh, all_threads=True)
+    except Exception:
+        pass
     try:
         app = DoseApp()
         app.run()
@@ -6961,8 +7018,11 @@ if __name__ == "__main__":
         log_path = os.path.join(APP_DIR, "crash.log")
         try:
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
-            with open(log_path, "w") as f:
-                f.write(err)
+            # append with a timestamp — a crash LOOP leaves a history,
+            # not just the last line, so we can see it is looping
+            with open(log_path, "a") as f:
+                f.write("\n[crash %s]\n%s" % (datetime.now().isoformat(),
+                                              err))
         except Exception:
             pass
         print(f"\n  DOSE crashed:\n\n{err}")

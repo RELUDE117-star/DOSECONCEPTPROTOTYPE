@@ -329,8 +329,16 @@ ok("_synth(" in wm,
    "Piper is warmed with a REAL synth, not just loaded — the first "
    "synthesize_wav pays the ONNX graph cost (device: first words out "
    "3.59 s), so it happens at boot, not in the first reply")
-ok("_load_whisper_fast" in wm and "_race_fast_engines" in wm,
-   "the fast recogniser is warmed and raced at startup too")
+ok("_load_whisper_fast" in wm,
+   "the fast recogniser (tiny.en) is warmed at startup")
+# reliability: startup must NOT load every model at once on a 4 GB Pi —
+# the escalation model loads on a delay, and moonshine is not resident.
+ok("_load_whisper()" not in wm.split("time.sleep")[0],
+   "the base.en escalation model is NOT loaded alongside the fast one")
+ok("time.sleep" in wm and "_load_whisper()" in wm,
+   "it is loaded LATER, after a delay, so RAM never spikes at boot")
+ok("_moonshine_transcribe" not in wm,
+   "moonshine is not warmed/loaded in the runtime (faster-whisper won)")
 ok("_play_route" in VOICE_SRC,
    "the working audio player is remembered, not re-probed per sentence")
 ok("_np.frombuffer" in VOICE_SRC,

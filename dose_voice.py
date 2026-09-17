@@ -867,6 +867,29 @@ class DoseVoice:
         self.app = app
         self.available = False
         self.reason = ""
+        # SAFE DEFAULTS FIRST — before any of the early returns below.
+        # __init__ bails out early on a missing library or a
+        # not-yet-downloaded model, but the app still starts background
+        # self-heal threads (model download, audit) that read these.
+        # When they were left unset, those threads crashed with
+        # AttributeError on a fresh device — the voice/STT could then
+        # never arrive. Every attribute other code may read at any time
+        # gets a safe default here so a half-initialised engine is inert,
+        # not a crash.
+        self._piper_path = None
+        self._vosk_dir = None
+        self._ms_arch_used = ""
+        self._ms_reason = ""
+        self._ms_v2 = "unset"
+        self._fast_choice = "whisper"
+        self._whisper = None
+        self._whisper_loaded = False
+        self._whisper_size = (WHISPER_MODELS[0] if WHISPER_MODELS else "")
+        self._whisper_fast = None
+        self._whisper_fast_loaded = False
+        self._whisper_fast_size = FAST_WHISPER_MODEL
+        self._moonshine = None
+        self._warmed = False
         self.state = "idle"          # idle | listening | thinking | speaking
         self._flow = None            # active multi-turn conversation
         self._stop = threading.Event()
@@ -3355,55 +3378,33 @@ class DoseVoice:
             word, nf, self._agc_ceiling())
 
     def warm_models(self):
-        """Run one throwaway inference through each recogniser at
-        startup. Model weights load lazily on first use, which on a Pi
-        is seconds — paid for by whatever the user happens to say
-        first. Doing it here, on a background thread at low priority,
-        moves that cost off the conversation entirely."""
+        """Warm the models the conversation needs — LEANLY and in
+        STAGES, so a 4 GB Pi is never asked to load everything at once.
+
+        The previous version loaded faster-whisper tiny.en AND base.en
+        AND moonshine and then RAN all three in a startup race. On a Pi
+        4 that is a memory-and-heat spike big enough to trip the OOM
+        killer or thermal throttling — which looks like the app
+        'crashing and aborting itself'. Moonshine is gone from the
+        runtime (faster-whisper tiny.en is the fast path and it won);
+        the escalation model loads on a delay AFTER the fast one, never
+        alongside it. No race, no third model resident in RAM."""
+        self._fast_choice = "whisper"
+
         def work():
             try:
                 os.nice(10)
             except Exception:
                 pass
             silence = b"\x00\x00" * SAMPLE_RATE      # 1 s of nothing
-            # WARM WHISPER — both the fast tiny.en and the base.en
-            # escalation — in the background, at low priority.
-            #
-            # Lazy loading moved this cost into the middle of a
-            # conversation: the device logged a 26.6-second turn where
-            # it "heard nothing", which was the first escalation paying
-            # to load the model while somebody stood there waiting.
-            # Loading it here costs nothing anyone can feel.
+            # 1) the FAST model (tiny.en) + Piper — the two things the
+            #    very first turn needs. Warm Piper with a real synth so
+            #    the first reply does not pay the ONNX graph cost.
             try:
                 self._load_whisper_fast()
                 self._fw_transcribe(self._whisper_fast, silence)
             except Exception:
                 pass
-            try:
-                self._moonshine_transcribe(silence)
-            except Exception:
-                pass
-            try:
-                self._load_whisper()
-                self._whisper_transcribe(silence)
-            except Exception:
-                pass
-            # Now RACE them on this board and pin the winner as the
-            # fast path — the fix for "moonshine says it's faster but
-            # clocked 4.47 s here". Done last, after both are warm, so
-            # the timing is inference cost, not model loading.
-            try:
-                self._race_fast_engines()
-            except Exception:
-                pass
-            # WARM PIPER WITH A REAL SYNTH — not just a load.
-            #
-            # Loading the voice does not touch the ONNX graph; the
-            # FIRST synthesize_wav pays the graph-optimisation cost, and
-            # the device measured that as "first words out 3.59 s" on
-            # the very first reply. Running one throwaway synth here
-            # moves that entire cost to boot, so the first thing the
-            # user hears comes out immediately.
             try:
                 voice = self._load_piper()
                 fd, wp = tempfile.mkstemp(suffix=".wav",
@@ -3420,6 +3421,18 @@ class DoseVoice:
             except Exception:
                 pass
             self._warmed = True
+            # 2) the escalation model (base.en) LATER and separately, so
+            #    it never spikes RAM at the same moment as the fast one.
+            #    It is only needed on the minority of turns the fast
+            #    model cannot make out, so a short delay costs nothing.
+            try:
+                time.sleep(float(os.environ.get(
+                    "DOSE_ESCALATION_WARM_DELAY", "25")))
+                if not self._stop.is_set():
+                    self._load_whisper()
+                    self._whisper_transcribe(silence)
+            except Exception:
+                pass
         threading.Thread(target=work, daemon=True,
                          name="model-warm").start()
 
