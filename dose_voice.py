@@ -470,8 +470,14 @@ BARGE_FRAMES = int(os.environ.get("DOSE_BARGE_FRAMES", "4"))  # ~128 ms
 # not run continuously, and it is over before either of them would
 # notice. This is the "use the whole Pi" lever, and a burst is the
 # right place to pull it.
+# One core stays free even for the burst. The device reported a load
+# average of 6.66 on four cores — 167% oversubscribed — with speech
+# holding every core while the UI, the camera and the model downloads
+# all wanted time. Taking the whole machine for a burst is only free
+# if nothing else needs it, and on this board something always does.
 STT_THREADS = max(1, int(os.environ.get("DOSE_STT_THREADS",
-                                        CPU_CORES) or CPU_CORES))
+                                        max(1, CPU_CORES - 1))
+                         or max(1, CPU_CORES - 1)))
 
 for _var in ("OMP_NUM_THREADS", "ORT_NUM_THREADS",
              "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
@@ -558,16 +564,39 @@ def tune_for_pi():
             applied.append("cores=%d" % CPU_CORES)
         except Exception:
             pass
+    # The governor file is root-owned, so a plain write fails silently
+    # from the app — the device was still showing "ondemand" after we
+    # claimed to have set it. Try the direct write, then sudo -n (which
+    # works when the user has passwordless sudo, as Raspberry Pi OS
+    # does by default), and report only what actually took.
+    wrote = False
     for i in range(CPU_CORES):
         path = ("/sys/devices/system/cpu/cpu%d/cpufreq/"
                 "scaling_governor" % i)
         try:
             with open(path, "w") as f:
                 f.write("performance")
-            if i == 0:
-                applied.append("governor=performance")
+            wrote = True
+            continue
         except Exception:
             pass
+        try:
+            subprocess.run(
+                ["sudo", "-n", "tee", path], input=b"performance",
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5)
+        except Exception:
+            pass
+    try:
+        with open("/sys/devices/system/cpu/cpu0/cpufreq/"
+                  "scaling_governor") as f:
+            gov = f.read().strip()
+        if gov == "performance":
+            applied.append("governor=performance")
+        else:
+            applied.append("governor=%s (could not change)" % gov)
+    except Exception:
+        pass
     return applied
 
 # How Vosk tends to mis-hear "hey dose" — accept all of them
@@ -907,16 +936,20 @@ class DoseVoice:
             self._ms_reason = "library not installed (%s)" % e
             return None
 
-        # MOST ACCURATE FIRST. This used to fall back BASE -> TINY,
-        # which is backwards: when the model we asked for was not in
-        # the package, the station quietly ended up on the weakest one
-        # available and stayed there. Tiny is the reason "storage" came
-        # back as noise. Speed is already won elsewhere — recognition
-        # runs during the pause you take anyway — so the order here is
-        # biggest to smallest, and tiny is the last resort rather than
-        # the first fallback.
-        ACCURACY_ORDER = ("MEDIUM_STREAMING", "SMALL_STREAMING",
-                          "BASE_STREAMING", "TINY_STREAMING")
+        # THIS IS THE FAST MODEL. Speed is its entire job.
+        #
+        # The device reported "moonshine medium" taking 4.11 SECONDS
+        # on a single "thanks". I had ordered these biggest-first,
+        # reasoning that accuracy was what was scarce — and that
+        # reasoning was right for the ESCALATION model and completely
+        # wrong here. This one answers every sentence; if it is slow,
+        # everything is slow. Whisper is the accuracy path and it runs
+        # only when this one comes back with nothing usable.
+        #
+        # base is the largest that stays quick on a Pi 4. small and
+        # medium are reachable only by asking for them explicitly with
+        # DOSE_STT_ARCH, never by falling back into them.
+        ACCURACY_ORDER = ("BASE_STREAMING", "TINY_STREAMING")
         wanted = self._MS_ARCHS.get(self.STT_ARCH, "")
         order = ([wanted] if wanted else []) + [
             a for a in ACCURACY_ORDER if a != wanted]
@@ -953,6 +986,10 @@ class DoseVoice:
                 elif arch_name == "TINY_STREAMING":
                     # never let this be invisible again
                     self._ms_reason = "tiny — the only one available"
+                elif arch_name in ("MEDIUM_STREAMING",
+                                   "SMALL_STREAMING"):
+                    self._ms_reason = "%s — SLOW, set DOSE_STT_ARCH=base" \
+                        % arch_name.split("_")[0].lower()
                 return tr
             except Exception as e:
                 last = "%s: %s" % (arch_name.split("_")[0].lower(),

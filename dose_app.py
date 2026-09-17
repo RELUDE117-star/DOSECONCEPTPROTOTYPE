@@ -5574,10 +5574,7 @@ class DoseApp:
 
             tok = self._audit_token()
             if not tok:
-                self._audit_done(
-                    "%s · to post: github.com/settings/personal-access-"
-                    "tokens -> Issues:write -> save it as 'github_token'"
-                    " on a USB stick and plug it in" % saved)
+                self._audit_done(saved)
                 return
             try:
                 import urllib.request
@@ -5630,10 +5627,14 @@ class DoseApp:
         y = [40, 40]
         col = 0
         for heading, rows in sections:
+            # Stop well clear of the footer. The device photo showed
+            # the "saved to …" line running straight through the
+            # INSTALLED column because the columns were allowed to
+            # grow into the same space the footer uses.
             need = 14 + 12 * len(rows)
-            if y[col] + need > 430 and col == 0:
+            if y[col] + need > 376 and col == 0:
                 col = 1
-            if y[col] + need > 430 and col == 1:
+            if y[col] + need > 376 and col == 1:
                 break
             c.create_text(col_x[col], y[col], text=heading,
                           font=self.font_tiny, fill=t["muted"],
@@ -5643,8 +5644,7 @@ class DoseApp:
                 line = "%s  %s" % (label, value)
                 c.create_text(
                     col_x[col] + 4, y[col],
-                    text=self._fit_text(line, self.font_tiny,
-                                        col_w * 2),
+                    text=self._fit_text(line, self.font_tiny, col_w),
                     font=self.font_tiny,
                     fill=("#2ECC71" if good else "#F1C40F"),
                     anchor="nw")
@@ -5663,19 +5663,21 @@ class DoseApp:
             note = "GitHub: ready — SEND TO GITHUB posts this as an issue"
             note_col = "#2ECC71"
         else:
-            note = ("To post: make a token at github.com/settings/"
-                    "personal-access-tokens (Issues: write), save it in "
-                    "a file named 'github_token' on a USB stick, plug "
-                    "it in, reopen this page. Until then it saves to "
-                    "dose-home-station/audit-latest.txt")
+            note = ("No token: put one in 'github_token' on a USB "
+                    "stick (github.com/settings/personal-access-tokens, "
+                    "Issues:write)")
             note_col = "#F1C40F"
-        c.create_text(42, 392, text=note, font=self.font_tiny,
-                      fill=note_col, anchor="nw", width=590)
+        # Footer: the token note, then the last action. Both single
+        # lines, both fitted to the card, neither allowed to wrap into
+        # the columns above.
+        c.create_text(42, 382,
+                      text=self._fit_text(note, self.font_tiny, 590),
+                      font=self.font_tiny, fill=note_col, anchor="nw")
 
         status = getattr(self, "_audit_status", "")
         if status:
-            c.create_text(42, 404, text=self._fit_text(
-                status, self.font_tiny, 1180), font=self.font_tiny,
+            c.create_text(42, 396, text=self._fit_text(
+                status, self.font_tiny, 590), font=self.font_tiny,
                 fill=DOSE_BLUE_LT, anchor="nw")
 
         for label, x0, cb in (("REFRESH", 42, self._draw_frame),

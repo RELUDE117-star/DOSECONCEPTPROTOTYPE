@@ -446,9 +446,12 @@ except Exception as e:
 want = {"tiny": "TINY_STREAMING", "base": "BASE_STREAMING",
         "small": "SMALL_STREAMING", "medium": "MEDIUM_STREAMING"}.get(
     os.environ.get("DOSE_STT_ARCH", ""), "")
+# base, then tiny. NOT medium: the device measured moonshine medium at
+# 4.11 s on a single word. This is the model that answers every
+# sentence — Whisper is the accuracy path and escalates only when this
+# one fails.
 order = ([want] if want else []) + [
-    a for a in ("MEDIUM_STREAMING", "SMALL_STREAMING",
-                "BASE_STREAMING", "TINY_STREAMING") if a != want]
+    a for a in ("BASE_STREAMING", "TINY_STREAMING") if a != want]
 order = [a for a in order if hasattr(mv.ModelArch, a)]
 if not order:
     print("  This speech package has no usable model types.")

@@ -276,8 +276,10 @@ ok("msg" in done, "posting completes without a token")
 ok("saved" in done.get("msg", ""),
    "the report is written to disk regardless: %r"
    % done.get("msg", "")[:60])
-ok("token" in done.get("msg", "").lower(),
-   "and it says how to enable posting")
+SRC_N = open(os.path.join(ROOT, "dose_app.py"), errors="ignore").read()
+ok("No token" in SRC_N and "personal-access-tokens" in SRC_N,
+   "and the PAGE says how to enable posting (the status line is kept "
+   "to one line so it cannot run through the columns)")
 saved = os.path.join(home, "dose-home-station", "audit-latest.txt")
 ok(os.path.exists(saved), "the file really is there")
 ok(len(open(saved).read()) > 200, "with the report in it")

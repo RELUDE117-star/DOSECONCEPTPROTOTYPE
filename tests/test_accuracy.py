@@ -463,17 +463,25 @@ ok(bt.index("_moonshine_transcribe") < bt.index("_whisper_transcribe"),
 ok("_usable(ms)" in bt,
    "and the stronger model escalates only when that answer is "
    "unusable")
-ok(_dvm.STT_THREADS >= _dvm.INFER_THREADS,
-   "transcription gets every core (%d of %d) because it is a short "
-   "burst, not continuous work"
-   % (_dvm.STT_THREADS, _dvm.CPU_CORES))
-ok(_dvm.STT_THREADS == _dvm.CPU_CORES,
-   "the whole Pi, for the part that decides whether it understood you")
+ok(_dvm.STT_THREADS > _dvm.INFER_THREADS,
+   "transcription gets a bigger budget (%d) than continuous work "
+   "(%d), because it is a short burst"
+   % (_dvm.STT_THREADS, _dvm.INFER_THREADS))
+ok(_dvm.STT_THREADS == max(1, _dvm.CPU_CORES - 1),
+   "a bigger budget than background work, but a core stays free — "
+   "the device measured a load average of 6.66 on four cores when "
+   "speech held all of them")
 
 ms = VSRC.split("def _moonshine_v2")[1].split("\n    def ")[0]
-ok(ms.index("MEDIUM_STREAMING") < ms.index("TINY_STREAMING"),
-   "speech models are tried MOST ACCURATE first — the old order fell "
-   "back to tiny, which is why 'storage' came back as noise")
+# The FAST model chooses between base and tiny only. I had it
+# ordered biggest-first for accuracy, and the device measured
+# "moonshine medium" taking 4.11 SECONDS on one word. Accuracy is
+# Whisper's job — this one answers every sentence and must be quick.
+ord_txt = ms.split("ACCURACY_ORDER = ")[1][:90]
+ok("MEDIUM" not in ord_txt and "SMALL" not in ord_txt,
+   "the fast model never falls into medium or small")
+ok(ord_txt.index("BASE") < ord_txt.index("TINY"),
+   "base preferred over tiny — the largest that stays quick here")
 ok("ACCURACY_ORDER" in ms, "deliberately, not by accident")
 ok("tiny — the only one available" in ms,
    "and if tiny really is all there is, it says so on screen")

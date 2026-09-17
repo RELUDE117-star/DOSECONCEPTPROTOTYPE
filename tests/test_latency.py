@@ -281,6 +281,46 @@ print("    %-24s %.2f s" % ("TOTAL", total))
 ok(total < 1.0, "total response budget is %.2f s (< 1 s)" % total)
 ok(total < 0.85, "and with headroom for a slower day (%.2f s)" % total)
 
+print("== 5c. the FAST model is actually fast ==")
+# Measured on the device: "moonshine medium" took 4.11 SECONDS on a
+# single word, and the total turn was 7.04 s. My ordering picked the
+# biggest variant for the model that answers EVERY sentence — right
+# reasoning for the escalation path, completely wrong here.
+ms_src = VOICE_SRC.split("def _moonshine_v2")[1].split("\n    def ")[0]
+ok("MEDIUM_STREAMING" not in ms_src.split("ACCURACY_ORDER")[1][:120],
+   "the fast model never falls back into medium")
+ok("SMALL_STREAMING" not in ms_src.split("ACCURACY_ORDER")[1][:120],
+   "nor into small")
+order_txt = ms_src.split("ACCURACY_ORDER = ")[1][:90]
+ok("BASE_STREAMING" in order_txt and "TINY_STREAMING" in order_txt,
+   "it chooses between base and tiny only: %s"
+   % order_txt.split(")")[0].strip())
+ok(order_txt.index("BASE") < order_txt.index("TINY"),
+   "preferring base, the largest that stays quick on a Pi 4")
+ok("SLOW, set DOSE_STT_ARCH=base" in VOICE_SRC,
+   "and if a big one is pinned by hand, the audit page says it is "
+   "slow instead of hiding it")
+SH = open(os.path.join(ROOT, "DOSE.sh"), errors="ignore").read()
+sh_order = SH.split("order = ([want]")[1][:200]
+ok("MEDIUM_STREAMING" not in sh_order,
+   "the setup script downloads the same small set, so the app can "
+   "never find a big one sitting there and use it")
+
+print("== 5d. speech does not take the whole machine ==")
+# Reported: load average 6.66 on four cores — 167% oversubscribed.
+ok(dv.STT_THREADS <= dv.CPU_CORES - 1,
+   "even the burst leaves a core free (%d of %d)"
+   % (dv.STT_THREADS, dv.CPU_CORES))
+ok(dv.INFER_THREADS <= dv.CPU_CORES - 2,
+   "and continuous work leaves two (%d of %d)"
+   % (dv.INFER_THREADS, dv.CPU_CORES))
+tune = VOICE_SRC.split("def tune_for_pi")[1].split("\ndef ")[0]
+ok("sudo" in tune,
+   "the CPU governor is set with sudo — a plain write fails silently "
+   "and the device was still showing 'ondemand'")
+ok("could not change" in tune,
+   "and it reports the truth when it could not be changed")
+
 print("== 6. nothing lazy-loads inside the conversation ==")
 ok("def warm_models" in VOICE_SRC, "models are warmed at startup")
 ok("self.warm_models()" in VOICE_SRC, "the warm-up actually runs")
@@ -314,8 +354,11 @@ ok("beam_size=1" in VOICE_SRC,
 ok("cpu_threads=STT_THREADS" in VOICE_SRC,
    "transcription is loaded with EVERY core, not the continuous "
    "budget — it is a burst, not background work")
-ok(dv.STT_THREADS == dv.CPU_CORES,
-   "which is all %d of them" % dv.CPU_CORES)
+ok(dv.STT_THREADS > dv.INFER_THREADS,
+   "more than the continuous budget (%d vs %d), but not the whole "
+   "machine — the device measured a load average of 6.66 on four "
+   "cores when speech took all of them"
+   % (dv.STT_THREADS, dv.INFER_THREADS))
 ok("TMP_AUDIO_DIR" in VOICE_SRC and "/dev/shm" in VOICE_SRC,
    "transient audio goes to RAM, not the SD card")
 ok('dir=TMP_AUDIO_DIR' in VOICE_SRC,
