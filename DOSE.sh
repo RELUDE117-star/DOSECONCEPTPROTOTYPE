@@ -76,7 +76,10 @@ if ! probe "tkinter" || ! probe "PIL, PIL.ImageTk"; then
     echo "  Core display components are missing — cannot start."
     echo "  Run the commands shown above, then run DOSE.sh again."
     echo "  Press any key to close..."
-    read -n 1 -s
+    # Never block forever: the station autostarts with Terminal=false,
+    # so there is nobody to press a key. Wait briefly if a terminal is
+    # attached, otherwise carry straight on.
+    [ -t 0 ] && read -n 1 -s -t 30 || true
     exit 1
 fi
 
@@ -123,7 +126,10 @@ if [ "$I2C_NEEDS_REBOOT" = "true" ]; then
     echo "  └──────────────────────────────────────────┘"
     echo ""
     echo "  Press any key to close..."
-    read -n 1 -s
+    # Never block forever: the station autostarts with Terminal=false,
+    # so there is nobody to press a key. Wait briefly if a terminal is
+    # attached, otherwise carry straight on.
+    [ -t 0 ] && read -n 1 -s -t 30 || true
     exit 0
 fi
 
@@ -335,40 +341,69 @@ if [ -n "$RETIRED" ]; then
     rm -f "$VOICE_DIR"/cache/.voice 2>/dev/null || true
 fi
 
-# ── Check for updates ──
+# ── Update, every launch, WITHOUT ASKING ──
+# This used to end in:  read -p "Would you like to update? (y/n)"
+# The station autostarts from a desktop entry with Terminal=false, so
+# there is no terminal to answer that prompt — the read got EOF and
+# the update was skipped EVERY SINGLE TIME. The device sat on a build
+# from days earlier while fix after fix was pushed to it. An
+# interactive question on a touchscreen with no keyboard is not a
+# safeguard, it is a wall.
+#
+# It also never fetched dose_nlu.py, so even a successful update left
+# the language rules stale.
+#
+# Now: fetch everything, VALIDATE it, back up what is there, and only
+# then replace. A broken download changes nothing.
 echo "  Checking for updates..."
-TEMP_FILE=$(mktemp)
-if curl -sL "$RAW_URL/dose_app.py?nocache=$(date +%s)" -o "$TEMP_FILE" 2>/dev/null; then
-    # Compare downloaded file with current
-    LOCAL_HASH=$(md5sum "$APP_DIR/dose_app.py" 2>/dev/null | cut -d' ' -f1)
-    REMOTE_HASH=$(md5sum "$TEMP_FILE" 2>/dev/null | cut -d' ' -f1)
-
-    if [ -n "$REMOTE_HASH" ] && [ "$LOCAL_HASH" != "$REMOTE_HASH" ]; then
-        echo ""
-        echo "  ┌─────────────────────────────────────┐"
-        echo "  │   An update is available from GitHub  │"
-        echo "  └─────────────────────────────────────┘"
-        echo ""
-        read -p "  Would you like to update? (y/n): " ANSWER
-        if [ "$ANSWER" = "y" ] || [ "$ANSWER" = "Y" ]; then
-            cp "$TEMP_FILE" "$APP_DIR/dose_app.py"
-            # Also update DOSE.sh, the voice assistant, and logo
-            curl -sL "$RAW_URL/DOSE.sh?nocache=$(date +%s)" -o "$APP_DIR/DOSE.sh" 2>/dev/null || true
-            curl -sL "$RAW_URL/dose_voice.py?nocache=$(date +%s)" -o "$APP_DIR/dose_voice.py" 2>/dev/null || true
-            curl -sL "$RAW_URL/dose_logo.png?nocache=$(date +%s)" -o "$APP_DIR/dose_logo.png" 2>/dev/null || true
-            curl -sL "$RAW_URL/demo_qr.png?nocache=$(date +%s)" -o "$APP_DIR/demo_qr.png" 2>/dev/null || true
-            chmod +x "$APP_DIR"/*.py "$APP_DIR"/*.sh 2>/dev/null || true
-            echo "  Updated!"
-        else
-            echo "  Skipped update."
-        fi
-    else
-        echo "  App is up to date."
+STAGE=$(mktemp -d)
+UPDATE_OK=1
+for F in dose_app.py dose_voice.py dose_nlu.py DOSE.sh; do
+    if ! curl -fsSL "$RAW_URL/$F?nocache=$(date +%s)" -o "$STAGE/$F" 2>/dev/null; then
+        echo "  Could not fetch $F — keeping what is installed."
+        UPDATE_OK=0
+        break
     fi
-else
-    echo "  No internet — skipping update check."
+    # must be a real file, not an error page
+    if [ "$(stat -c%s "$STAGE/$F" 2>/dev/null || echo 0)" -lt 500 ]; then
+        echo "  $F download looks wrong — keeping what is installed."
+        UPDATE_OK=0
+        break
+    fi
+    case "$F" in
+        *.py)
+            if ! python3 -c "import sys,py_compile;py_compile.compile(sys.argv[1],doraise=True)" "$STAGE/$F" 2>/dev/null; then
+                echo "  $F is not valid python — keeping what is installed."
+                UPDATE_OK=0
+                break
+            fi
+            ;;
+    esac
+done
+
+if [ "$UPDATE_OK" = "1" ]; then
+    CHANGED=""
+    for F in dose_app.py dose_voice.py dose_nlu.py DOSE.sh; do
+        A=$(md5sum "$STAGE/$F" 2>/dev/null | cut -d' ' -f1)
+        B=$(md5sum "$APP_DIR/$F" 2>/dev/null | cut -d' ' -f1)
+        [ "$A" != "$B" ] && CHANGED="$CHANGED $F"
+    done
+    if [ -n "$CHANGED" ]; then
+        echo "  Updating:$CHANGED"
+        mkdir -p "$APP_DIR/.backup"
+        for F in dose_app.py dose_voice.py dose_nlu.py DOSE.sh; do
+            [ -f "$APP_DIR/$F" ] && cp "$APP_DIR/$F" "$APP_DIR/.backup/$F" 2>/dev/null
+            cp "$STAGE/$F" "$APP_DIR/$F"
+        done
+        curl -fsSL "$RAW_URL/dose_logo.png?nocache=$(date +%s)" -o "$APP_DIR/dose_logo.png" 2>/dev/null || true
+        curl -fsSL "$RAW_URL/demo_qr.png?nocache=$(date +%s)" -o "$APP_DIR/demo_qr.png" 2>/dev/null || true
+        chmod +x "$APP_DIR"/*.py "$APP_DIR"/*.sh 2>/dev/null || true
+        echo "  Updated. Build $(md5sum "$APP_DIR/dose_app.py" | cut -c1-7)"
+    else
+        echo "  Already on the newest build ($(md5sum "$APP_DIR/dose_app.py" 2>/dev/null | cut -c1-7))."
+    fi
 fi
-rm -f "$TEMP_FILE"
+rm -rf "$STAGE"
 echo ""
 
 # ── Create desktop shortcut ──
@@ -584,5 +619,8 @@ if [ $EXIT_CODE -ne 0 ]; then
     cat "$APP_DIR/error.log"
     echo ""
     echo "  Press any key to close..."
-    read -n 1 -s
+    # Never block forever: the station autostarts with Terminal=false,
+    # so there is nobody to press a key. Wait briefly if a terminal is
+    # attached, otherwise carry straight on.
+    [ -t 0 ] && read -n 1 -s -t 30 || true
 fi

@@ -1202,6 +1202,16 @@ class DoseVoice:
             return False
         if not self._vad_trusted:
             return True
+        # Only while a conversation is actually happening. Idle, the
+        # energy gate is enough to learn the room and drive the meter
+        # — running a neural detector on every loud block while nobody
+        # is talking to the station means a television keeps it busy
+        # all evening for nothing.
+        # Default to DOING the work if the state is somehow unknown:
+        # skipping the detector is the risky direction, not running it.
+        if getattr(self, "state", "listening") == "idle" \
+                and not WAKE_WORD:
+            return True
         p = self.vad_speech_prob(frame)
         if p is None:
             return True                      # no detector: energy alone

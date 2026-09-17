@@ -50,6 +50,8 @@ def fresh(trusted=True):
     v._barge = False
     v._barge_frames = 0
     v._play_proc = None
+    # a conversation is happening — the detector rests when idle
+    v.state = "listening"
     return v
 
 
@@ -134,6 +136,34 @@ v.vad_speech_prob = lambda _f: 0.9
 for _ in range(400):
     v.is_speech(b"\x01\x01" * 512, True)
 ok(v._vad_trusted, "a detector that agrees is kept")
+
+print("== 3b. it rests when nobody is talking to it ==")
+idle = fresh()
+idle.state = "idle"
+idle._vad = object()
+calls = {"n": 0}
+
+
+def _counting(_f):
+    calls["n"] += 1
+    return 0.0
+
+
+idle.vad_speech_prob = _counting
+for _ in range(50):
+    idle.is_speech(b"\x01\x01" * 512, True)
+ok(calls["n"] == 0,
+   "idle, the detector is not run at all (%d calls) — a television "
+   "should not keep it busy all evening" % calls["n"])
+busy = fresh()
+busy.state = "listening"
+busy._vad = object()
+calls["n"] = 0
+busy.vad_speech_prob = _counting
+for _ in range(50):
+    busy.is_speech(b"\x01\x01" * 512, True)
+ok(calls["n"] == 50,
+   "during a conversation it runs on every block (%d)" % calls["n"])
 
 print("== 4. talking over her stops her ==")
 ok(dv.BARGE_IN, "barge-in is on by default")

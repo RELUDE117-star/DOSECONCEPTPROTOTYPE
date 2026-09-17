@@ -306,6 +306,45 @@ ok("_frame_to_gray" in cam,
 ok("self._camera_view and self.mode ==" in cam,
    "and the colour image is built only when the debug view is open")
 
+VSRC = open(os.path.join(ROOT, "dose_voice.py"),
+            errors="ignore").read()
+print("== 3d. the update can actually LAND ==")
+# The device sat on a build from days earlier while fix after fix was
+# pushed to it. The launch-time update ended in an interactive
+# "Would you like to update? (y/n)" — and the station autostarts from
+# a desktop entry with Terminal=false, so there was nobody to answer
+# it. The read got EOF and the update was skipped EVERY TIME.
+upd = SH_SRC.split("Update, every launch")[1].split("# ──", 1)[0]
+upd_code = "\n".join(ln for ln in upd.split("\n")
+                     if not ln.lstrip().startswith("#"))
+ok("read -p" not in upd_code,
+   "the launch update never asks a question")
+import re as _re3                                           # noqa: E402
+unbounded = [ln for ln in SH_SRC.split("\n")
+             if _re3.match(r"\s*read\s", ln) and "-t " not in ln
+             and not ln.lstrip().startswith("#")]
+ok(not unbounded,
+   "and NOTHING in the script waits for a keypress without a timeout "
+   "(%d found)" % len(unbounded))
+ok("[ -t 0 ]" in SH_SRC,
+   "a key wait only happens when a terminal is actually attached")
+for f in ("dose_app.py", "dose_voice.py", "dose_nlu.py", "DOSE.sh"):
+    ok(f in upd, "the update fetches %s" % f)
+ok("py_compile" in upd,
+   "every python file is compiled before it is installed")
+ok(".backup" in upd,
+   "and the previous version is kept, so a bad update is recoverable")
+ok("UPDATE_OK=0" in upd,
+   "a failed or short download changes nothing")
+
+print("== 3e. the voice detector rests when nobody is talking ==")
+is_sp = VSRC.split("def is_speech")[1].split("\n    def ")[0]
+ok('"idle"' in is_sp and "WAKE_WORD" in is_sp,
+   "Silero runs during a conversation, not on every loud block while "
+   "idle — a television should not keep it busy all evening")
+ok('getattr(self, "state", "listening")' in is_sp,
+   "and an unknown state means DO the work, not skip it")
+
 print("== 4. nothing is left spinning ==")
 VSRC = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
 ok(dv.INFER_THREADS <= max(1, dv.CPU_CORES - 2),
