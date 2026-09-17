@@ -117,8 +117,9 @@ DATA_PATH = os.path.expanduser("~/dose-home-station/med_data.json")
 ADHERENCE_PATH = os.path.expanduser("~/dose-home-station/adherence_log.json")
 APP_DIR = os.path.expanduser("~/dose-home-station")
 APP_FILE = os.path.join(APP_DIR, "dose_app.py")
-RAW_URL = ("https://raw.githubusercontent.com/relude117-star/"
-           "doseconceptprototype/claude/quirky-brown-vkHwi")
+REPO = "relude117-star/doseconceptprototype"
+BRANCH = "claude/quirky-brown-vkHwi"
+RAW_URL = "https://raw.githubusercontent.com/%s/%s" % (REPO, BRANCH)
 
 SLOT_KEYS = ["blue", "red", "green", "yellow"]
 SLOT_COLORS = {
@@ -1005,6 +1006,8 @@ class DoseApp:
             self._draw_mic_meter(c)
         elif self.mode == "calibrate":
             self._draw_calibrate(c)
+        elif self.mode == "audit":
+            self._draw_audit(c)
         elif self.mode == "sysinfo":
             self._draw_sysinfo(c)
         elif self.mode == "btaudio":
@@ -1033,7 +1036,7 @@ class DoseApp:
         if active == "dosealert":
             active = getattr(self, "_alert_return", "home")
         if active in ("micreport", "btaudio", "micmeter", "sysinfo",
-                      "calibrate"):
+                      "calibrate", "audit"):
             active = "settings"
         if active in ("hold", "spin", "confirmdisp", "dispensed",
                       "qtyconfirm", "addmed"):
@@ -4333,6 +4336,7 @@ class DoseApp:
         col = COL_L
 
         for label, x0, cb in (("CHECK NOW", 56, self._on_update_pressed),
+                              ("AUDIT", 236, self._open_audit),
                               ("CLOSE", 466, self._close_sysinfo)):
             b = _pil_rounded_rect(150, 44, 14,
                                   DOSE_BLUE if label == "CLOSE"
@@ -5111,6 +5115,7 @@ class DoseApp:
         buttons = [("MIC LEVEL", self._open_mic_meter, False),
                    # read a few lines and it tunes itself to this room
                    ("TUNE ROOM", self._open_calibrate, False),
+                   ("AUDIT", self._open_audit, False),
                    ("TEST SPKR", self._speaker_test, False),
                    ("RESCAN", self._audio_rescan, False)]
         if show_report:
@@ -5224,9 +5229,338 @@ class DoseApp:
         self.mode = "btaudio"
         self._draw_frame()
 
+    # ── AUDIT PAGE ───────────────────────────────────────────────────
+    # One screen, everything on it, nothing cut off — made to be
+    # photographed and sent to me. Every number here is measured on
+    # THIS device: the real cost of the last turn stage by stage, what
+    # the microphone is actually getting, which models are loaded, and
+    # what the Pi is doing. Guessing at a slow assistant from a
+    # description is how we went round in circles; this replaces the
+    # description with data.
+    def _open_audit(self):
+        # Don't record "audit" as the screen to go back to — opening it
+        # twice would trap CLOSE on this page.
+        if self.mode != "audit":
+            self._prev_mode = self.mode
+        self.mode = "audit"
+        self._audit_tick()
+        self._draw_frame()
+
+    def _close_audit(self):
+        self.mode = getattr(self, "_prev_mode", "settings") or "settings"
+        self._draw_frame()
+
+    def _audit_tick(self):
+        if self.mode != "audit":
+            return
+        self._draw_frame()
+        self.root.after(1000, self._audit_tick)
+
+    def _audit_sections(self):
+        """(heading, [(label, value, ok)]) for everything worth seeing."""
+        v = self.voice
+        out = []
+
+        # 1. the last turn, measured
+        try:
+            rows = v.turn_report() if v else []
+        except Exception as e:
+            rows = [("turn report failed", str(e)[:30], False, "")]
+        out.append(("LAST TURN (measured on this device)",
+                    [(a, b, c) for a, b, c, _d in rows]))
+
+        # 1b. how it has been doing OVERALL, not just last turn
+        try:
+            sm = v.turn_log_summary() if v else {"turns": 0}
+        except Exception:
+            sm = {"turns": 0}
+        if sm.get("turns"):
+            n = sm["turns"]
+            miss = sm.get("not_understood", 0)
+            out.append(("LAST %d TURNS" % n, [
+                ("understood", "%d of %d" % (n - miss, n),
+                 miss * 3 <= n),
+                ("NOT understood", "%d" % miss, miss == 0),
+                ("heard nothing", "%d" % sm.get("heard_nothing", 0),
+                 sm.get("heard_nothing", 0) == 0),
+                ("distorted audio", "%d" % sm.get("distorted", 0),
+                 sm.get("distorted", 0) == 0),
+                ("engines disagreed", "%d"
+                 % sm.get("engines_disagreed", 0), True),
+                ("slower than 1.5s", "%d" % sm.get("slow", 0),
+                 sm.get("slow", 0) == 0),
+                ("typical", "%.2f s" % sm.get("p50", 0),
+                 sm.get("p50", 0) < 1.5),
+                ("worst", "%.2f s" % sm.get("worst", 0),
+                 sm.get("worst", 0) < 3.0),
+            ]))
+        else:
+            out.append(("LAST TURNS",
+                        [("no turns logged yet", "say something", True)]))
+
+        # 2. what the microphone is getting
+        mic = []
+        try:
+            mic.append(("room", v._room_note(), v._nfloor < 400))
+            mic.append(("voice level", "%.0f" % v._speech_level,
+                        800 < v._speech_level < 6000))
+            mic.append(("boost", "%.2fx" % v._agc_ceiling(),
+                        v._agc_ceiling() <= 2.0))
+            mic.append(("detector", v._vad_note(),
+                        "listening" in v._vad_note()))
+            cal = getattr(v, "_cal_profile", None)
+            mic.append(("calibrated", "yes — gate %.0f" % cal["gate"]
+                        if cal else "NO — run TUNE ROOM", bool(cal)))
+            mic.append(("device", (v.mic_name or "?")[:26]
+                        if hasattr(v, "mic_name") else "-", True))
+        except Exception as e:
+            mic.append(("unavailable", str(e)[:28], False))
+        out.append(("MICROPHONE", mic))
+
+        # 3. models
+        mods = []
+        try:
+            for label, ok_, detail in (v.model_status() if v else []):
+                mods.append((label, (detail or "")[:26], bool(ok_)))
+        except Exception:
+            pass
+        try:
+            import dose_voice as _dv
+            mods.append(("wake word",
+                         "on (costs CPU)" if _dv.WAKE_WORD else "off",
+                         True))
+            mods.append(("endpoint", "%.2fs / %.1fs"
+                         % (_dv.ENDPOINT_STABLE, _dv.ENDPOINT_DANGLING),
+                         True))
+        except Exception:
+            pass
+        out.append(("MODELS", mods))
+
+        # 4. the machine
+        hw = []
+        try:
+            for label, detail, good in (v.hardware_report() if v else []):
+                hw.append((label, str(detail)[:26], bool(good)))
+        except Exception as e:
+            hw.append(("unavailable", str(e)[:26], False))
+        out.append(("RASPBERRY PI", hw))
+
+        # 5. what is installed
+        files = [("dose_app.py", getattr(self, "_build_id", "?"), True)]
+        try:
+            for m, ok_, bid in self.module_report():
+                files.append((m, bid if ok_ else "MISSING", bool(ok_)))
+        except Exception:
+            pass
+        try:
+            missing = dict(self.missing_voice_deps())
+        except Exception:
+            missing = {}
+        for mod_name, pkg in self.VOICE_DEPS:
+            files.append((pkg, "ok" if mod_name not in missing
+                          else "MISSING", mod_name not in missing))
+        out.append(("INSTALLED", files))
+        return out
+
+    # Where a token lives, if the user chooses to add one. NEVER in
+    # the repository — this file is public, and a committed token is a
+    # token that has to be revoked.
+    AUDIT_TOKEN_PATHS = (
+        "~/dose-home-station/github_token",
+        "~/.dose_github_token",
+    )
+
+    def audit_report_text(self):
+        """The audit as plain text — what gets saved and posted."""
+        from datetime import datetime as _dt
+        lines = ["DOSE Home Station — audit",
+                 _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+                 "build %s" % getattr(self, "_build_id", "?"), ""]
+        for heading, rows in self._audit_sections():
+            lines.append("## %s" % heading)
+            for label, value, good in rows:
+                lines.append("  %-22s %-28s %s"
+                             % (label, value, "" if good else "<-- CHECK"))
+            lines.append("")
+
+        # EVERY TURN. This is the part worth reading: what was said,
+        # what it heard, whether it worked it out, and how long each
+        # one took. A run of bad turns can be read here instead of
+        # described.
+        lines.append("## EVERY TURN (newest last)")
+        lines.append("  Each turn shows what EACH recogniser produced,")
+        lines.append("  what the language layer made of it, and what")
+        lines.append("  the microphone was actually getting.")
+        lines.append("")
+        try:
+            rows = self.voice.turn_log(40) if self.voice else []
+        except Exception as e:
+            rows = []
+            lines.append("  (log unavailable: %s)" % str(e)[:40])
+        if not rows:
+            lines.append("  (nothing logged yet)")
+        for r in rows:
+            mark = "OK " if r.get("understood") else "BAD"
+            lines.append("  [%s] %s  total %ss (end %s fast %s slow %s)"
+                         % (mark, r.get("at", "?"), r.get("total", "?"),
+                            r.get("endpoint", "?"), r.get("fast", "?"),
+                            r.get("slow", "?")))
+            lines.append("       audio : %.1fs  room %s  voice %s  "
+                         "peak %s  clip %s%%  snr %s"
+                         % (r.get("secs", 0) or 0, r.get("room", "?"),
+                            r.get("voice", "?"), r.get("peak", "?"),
+                            r.get("clip_pct", "?"), r.get("snr", "?")))
+            lines.append("       live  : %r" % (r.get("vosk") or "")[:56])
+            lines.append("       fast  : %r"
+                         % (r.get("fast_text") or "")[:56])
+            if r.get("slow_text"):
+                lines.append("       slow  : %r"
+                             % (r.get("slow_text") or "")[:56])
+            lines.append("       USED  : %r  (%s)"
+                         % ((r.get("heard") or "")[:56],
+                            r.get("engine", "?")))
+            lines.append("       intent: %s" % r.get("intent", "?"))
+            lines.append("       said  : %s" % (r.get("reply") or "")[:66])
+            lines.append("")
+        lines.append("")
+        return "\n".join(lines)
+
+    def _audit_token(self):
+        for cand in self.AUDIT_TOKEN_PATHS:
+            try:
+                path = os.path.expanduser(cand)
+                if os.path.isfile(path):
+                    tok = open(path).read().strip()
+                    if tok:
+                        return tok
+            except Exception:
+                continue
+        return None
+
+    def _post_audit(self):
+        """Save the audit, and post it to GitHub if a token is present.
+
+        A token is never shipped in this repository — the repository is
+        public, and a committed credential is a revoked credential. The
+        report is ALWAYS written to disk either way, so it can be
+        recovered even with no network and no token."""
+        self._audit_status = "saving…"
+        self._draw_frame()
+
+        def work():
+            text = ""
+            try:
+                text = self.audit_report_text()
+                path = os.path.join(
+                    os.path.expanduser("~/dose-home-station"),
+                    "audit-latest.txt")
+                with open(path, "w") as f:
+                    f.write(text)
+                saved = "saved to %s" % path
+            except Exception as e:
+                saved = "could not save: %s" % str(e)[:30]
+
+            tok = self._audit_token()
+            if not tok:
+                self._audit_done(
+                    "%s · add a token to post: see "
+                    "dose-home-station/github_token" % saved)
+                return
+            try:
+                import urllib.request
+                body = json.dumps({
+                    "title": "Audit — build %s"
+                             % getattr(self, "_build_id", "?"),
+                    "body": "```\n" + text[:60000] + "\n```",
+                }).encode()
+                req = urllib.request.Request(
+                    "https://api.github.com/repos/%s/issues" % REPO,
+                    data=body, method="POST",
+                    headers={"Authorization": "Bearer " + tok,
+                             "Accept": "application/vnd.github+json",
+                             "User-Agent": "dose-station",
+                             "Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    num = json.loads(r.read().decode()).get("number")
+                self._audit_done("posted to GitHub as issue #%s" % num)
+            except Exception as e:
+                self._audit_done("%s · post failed: %s"
+                                 % (saved, str(e)[:40]))
+
+        threading.Thread(target=work, daemon=True,
+                         name="audit-post").start()
+
+    def _audit_done(self, msg):
+        """Record the outcome. Called ON THE WORKER THREAD, so it does
+        NOT touch Tk — setting an attribute is safe, calling into the
+        widget tree from another thread is not, and Tkinter raises
+        "main thread is not in main loop" when it is. The audit page
+        already refreshes once a second and will show this on its next
+        pass."""
+        self._audit_status = msg
+
+    def _draw_audit(self, c):
+        t = self.theme
+        c.create_image(26, 12, image=self._get_tk_image(
+            "audit_card", _pil_rounded_rect(620, 456, 20, t["card_bg"])),
+            anchor="nw")
+        c.create_text(42, 22, text="AUDIT — photograph this",
+                      font=self.font_label, fill=DOSE_BLUE_LT,
+                      anchor="nw")
+
+        sections = self._audit_sections()
+        # Two columns, and the font shrinks to fit rather than letting
+        # anything run off the card. The whole point is that nothing
+        # is cut off.
+        col_x = (42, 340)
+        col_w = 280
+        y = [40, 40]
+        col = 0
+        for heading, rows in sections:
+            need = 14 + 12 * len(rows)
+            if y[col] + need > 430 and col == 0:
+                col = 1
+            if y[col] + need > 430 and col == 1:
+                break
+            c.create_text(col_x[col], y[col], text=heading,
+                          font=self.font_tiny, fill=t["muted"],
+                          anchor="nw")
+            y[col] += 14
+            for label, value, good in rows:
+                line = "%s  %s" % (label, value)
+                c.create_text(
+                    col_x[col] + 4, y[col],
+                    text=self._fit_text(line, self.font_tiny,
+                                        col_w * 2),
+                    font=self.font_tiny,
+                    fill=("#2ECC71" if good else "#F1C40F"),
+                    anchor="nw")
+                y[col] += 12
+            y[col] += 6
+
+        status = getattr(self, "_audit_status", "")
+        if status:
+            c.create_text(42, 404, text=self._fit_text(
+                status, self.font_tiny, 1180), font=self.font_tiny,
+                fill=DOSE_BLUE_LT, anchor="nw")
+
+        for label, x0, cb in (("REFRESH", 42, self._draw_frame),
+                              ("SEND TO GITHUB", 222, self._post_audit),
+                              ("CLOSE", 496, self._close_audit)):
+            c.create_image(x0, 418, image=self._get_tk_image(
+                "audit_%s" % label, _pil_rounded_rect(
+                    150, 40, 12, DOSE_BLUE if label == "CLOSE"
+                    else t["elevated_bg"])), anchor="nw")
+            c.create_text(x0 + 75, 438, text=label,
+                          font=self.font_small_bold,
+                          fill="#06101E" if label == "CLOSE" else t["fg"],
+                          anchor="center")
+            self._click_zones.append((x0, 418, x0 + 150, 458, cb))
+
     # ── ROOM CALIBRATION SCREEN ──────────────────────────────────────
     def _open_calibrate(self):
-        self._prev_mode = self.mode
+        if self.mode != "calibrate":
+            self._prev_mode = self.mode
         self.mode = "calibrate"
         self._cal_line = 0
         try:

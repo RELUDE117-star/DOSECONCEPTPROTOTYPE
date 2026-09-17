@@ -9,3 +9,10 @@ build/
 node_modules/
 package-lock.json
 package.json
+
+# A GitHub token for the audit "SEND TO GITHUB" button lives on the
+# device only. This repository is public; a committed token is a
+# revoked token.
+github_token
+*.token
+audit-*.txt

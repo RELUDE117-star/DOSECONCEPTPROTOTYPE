@@ -297,9 +297,13 @@ assert all(k.startswith("nav:") or k in {
 #
 # Downloaded from HuggingFace on first use and cached on the device.
 # All MIT/Apache, all on-device, nothing metered.
+# base.en first, not small. On a Pi 4 the bigger models take SECONDS
+# per utterance; an answer that arrives after the person has given up
+# is not an answer. base.en is the largest that stays usable here, and
+# DOSE_WHISPER_MODELS can name a bigger one on better hardware.
 WHISPER_MODELS = tuple(filter(None, os.environ.get(
     "DOSE_WHISPER_MODELS",
-    "distil-small.en,small.en,base.en,tiny.en").split(",")))
+    "base.en,distil-small.en,tiny.en").split(",")))
 
 
 
@@ -1288,8 +1292,12 @@ class DoseVoice:
         path = None
         try:
             path = self._write_wav(audio_bytes)
+            # beam_size=1 — greedy. I had this at 5 for accuracy, and
+            # a beam search is several times slower for a fraction of
+            # a percent of word error on short commands. On a Pi that
+            # trade is not close.
             segs, _info = self._whisper.transcribe(
-                path, language="en", beam_size=5,
+                path, language="en", beam_size=1,
                 vad_filter=True, condition_on_previous_text=False,
                 initial_prompt=self._whisper_prompt())
             return self._clean_text(" ".join(sg.text for sg in segs))
@@ -1346,31 +1354,57 @@ class DoseVoice:
         audio. Giving up quickly is not an accuracy strategy."""
         if not audio_bytes:
             return vosk_text
-        # 1) WHISPER FIRST. It is the model the HuggingFace audio
-        #    course builds its assistant's transcription stage on, and
-        #    it is simply better at hearing a sentence than the small
-        #    streaming recogniser is. That one was running first, and
-        #    when the package only shipped its tiny arch the station
-        #    was effectively listening with the weakest model it had —
-        #    which is why "storage" came back as noise. Accuracy is
-        #    what is scarce here, not milliseconds: this runs during
-        #    the pause you take anyway.
-        wh = self._whisper_transcribe(audio_bytes)
-        if wh and self._usable(wh):
-            return wh
-        # 2) the fast streaming recogniser, biased toward this
-        #    cabinet's drug names — a good second opinion, and the
-        #    whole answer when Whisper isn't installed yet
+        t_start = time.time()
+
+        # 1) THE FAST MODEL ANSWERS. Moonshine is built for exactly
+        #    this — a short command, on a small CPU — and it is biased
+        #    toward this cabinet's drug names.
+        #
+        #    I had Whisper running first here. On a Pi 4 that is
+        #    seconds per utterance, every utterance, and it made the
+        #    assistant unusable. Whisper is the better model and it
+        #    stays, but as an ESCALATION for the cases the fast one
+        #    cannot make out — not in the path of every sentence.
+        self._raw_vosk = vosk_text or ""
+        self._raw_fast = ""
+        self._raw_slow = ""
         ms = self._moonshine_transcribe(audio_bytes)
+        self._raw_fast = ms or ""
+        self._t_fast = time.time() - t_start
         if ms and self._usable(ms):
-            self._ms_saves = getattr(self, "_ms_saves", 0) + 1
+            self._t_slow = 0.0
+            self._last_engine = "moonshine"
             return ms
-        # 3) neither parsed. Prefer whichever actually said something,
-        #    so a near-miss can still be matched or asked about.
-        if wh and not (_nlu_mod and _nlu_mod.looks_hallucinated(wh)):
+
+        # 2) It came back with nothing we can act on. Now the stronger
+        #    model gets a turn on the same audio — with a hard time
+        #    limit, because a correct answer that arrives after the
+        #    person has given up is not a correct answer.
+        t_wh = time.time()
+        wh = self._whisper_transcribe(audio_bytes)
+        self._raw_slow = wh or ""
+        self._t_slow = time.time() - t_wh
+        self._last_engine = "whisper" if wh else "moonshine"
+        if wh and self._usable(wh):
+            self._whisper_saves = getattr(self, "_whisper_saves", 0) + 1
             return wh
-        if ms and not (_nlu_mod and _nlu_mod.looks_hallucinated(ms)):
-            return ms
+
+        # 3) Neither parsed. Hand back the one with MORE IN IT.
+        #
+        #    This used to prefer the fast model's answer simply because
+        #    it came first, which meant a turn where it produced "urk"
+        #    and the stronger model produced "open storage the" was
+        #    reported as "urk" — throwing away the transcript that the
+        #    phonetic matcher could actually have worked with. A
+        #    longer, more word-like answer is the better near-miss.
+        cands = [c for c in (ms, wh)
+                 if c and not (_nlu_mod
+                               and _nlu_mod.looks_hallucinated(c))]
+        if cands:
+            best = max(cands, key=lambda c: (len(c.split()), len(c)))
+            self._last_engine = ("moonshine" if best == ms
+                                 else "whisper")
+            return best
         # the same model through the plain ONNX package
         if self._moonshine is not None:
             path = None
@@ -3317,6 +3351,15 @@ class DoseVoice:
                     self._clip_blocks += 1
                     self._clip_recent = time.time()
                 self._blocks_seen += 1
+                # per-turn quality, for the log
+                self._turn_blocks = getattr(self, "_turn_blocks", 0) + 1
+                self._turn_peak = max(getattr(self, "_turn_peak", 0),
+                                      peak)
+                if peak >= 31000:
+                    self._turn_clip = getattr(self, "_turn_clip", 0) + 1
+                if rms > gate:
+                    self._turn_snr = max(getattr(self, "_turn_snr", 0.0),
+                                         self._snr)
                 energetic = rms > gate
                 if energetic and self.is_speech(data, True):
                     # stamp the moment: the endpointer uses this to cut
@@ -3790,8 +3833,33 @@ class DoseVoice:
                 if command:
                     self._handle_exchange(rec, command)
                 else:
+                    # HEARD NOTHING. This is the failure that matters
+                    # most and it used to leave no trace at all — the
+                    # log would simply have a gap where a turn should
+                    # be. Now it is recorded with the audio conditions,
+                    # so "it never hears me" can be read as numbers.
+                    blocks = max(1, getattr(self, "_turn_blocks", 1))
+                    self._log_turn({
+                        "at": time.strftime("%H:%M:%S"),
+                        "heard": "", "vosk": getattr(self, "_partial", ""),
+                        "fast_text": "", "slow_text": "",
+                        "engine": "-", "model": "-", "intent": "-",
+                        "understood": False,
+                        "reply": "NOTHING HEARD",
+                        "endpoint": 0, "fast": 0, "slow": 0,
+                        "speak": 0, "total": 0,
+                        "room": round(getattr(self, "_nfloor", 0)),
+                        "voice": round(getattr(self, "_speech_level", 0)),
+                        "peak": getattr(self, "_turn_peak", 0),
+                        "clip_pct": round(
+                            100.0 * getattr(self, "_turn_clip", 0)
+                            / blocks),
+                        "snr": round(getattr(self, "_turn_snr", 0.0), 1),
+                        "secs": round(blocks * BLOCK_SIZE
+                                      / float(SAMPLE_RATE), 1),
+                    })
                     self._speak("I didn't catch that, Ryan. "
-                                "Hold the logo and try again.")
+                                "Tap the logo and try again.")
                     self._set_ui_state("idle")
                 self._drain(rec)
                 continue
@@ -3962,6 +4030,12 @@ class DoseVoice:
         back at the ambient floor for ENDPOINT_SILENCE, we close the
         utterance ourselves and start thinking immediately."""
         self._set_ui_state("listening")
+        # audio quality for THIS turn — is it hearing clean speech or
+        # distorted mush?
+        self._turn_clip = 0
+        self._turn_blocks = 0
+        self._turn_peak = 0
+        self._turn_snr = 0.0
         deadline = time.time() + timeout
         buf = bytearray()
         heard = False
@@ -4089,6 +4163,8 @@ class DoseVoice:
                 if tail:
                     final_parts.append(tail)
                 text = " ".join(final_parts).strip()
+                self._turn_stopped_at = lv
+                self._t_endpoint = time.time() - lv
                 got = finish(buf, text)
                 if got:
                     return got
@@ -4349,6 +4425,8 @@ class DoseVoice:
             #    nothing to synthesize, just play it
             whole = self._cache_path(text)
             if os.path.exists(whole):
+                self._t_first_sound = 0.0     # already rendered
+                self._t_cached = True
                 self._play_wav(whole)
                 return
 
@@ -4387,13 +4465,17 @@ class DoseVoice:
                                  name="tts-stream").start()
 
             # 3) first chunk: render and speak immediately
+            _t_speak0 = time.time()
+            self._t_cached = False
             try:
                 first = self.render_to_cache(chunks[0])
             except Exception:
                 first = None
             if first:
+                self._t_first_sound = time.time() - _t_speak0
                 self._play_wav(first)
             else:
+                self._t_first_sound = time.time() - _t_speak0
                 self._speak_uncached(chunks[0])
 
             # 4) the remainder, each as soon as it exists — unless
@@ -4462,6 +4544,109 @@ class DoseVoice:
         t = " ".join(words)
         return t in {d.replace("'", "") for d in self.DONE_PHRASES}
 
+    # ── THE TURN LOG ─────────────────────────────────────────────────
+    # Every single thing said to this station, with what it heard, what
+    # it made of it, what it said back, and how long each stage took.
+    # Bounded, on disk, and included in the audit report — so a run of
+    # bad turns can be read rather than described.
+    TURN_LOG_MAX = 60
+
+    def _turn_log_path(self):
+        return os.path.join(VOICE_DIR, "turns.jsonl")
+
+    def _log_turn(self, rec):
+        """Append one turn. Never allowed to break a conversation."""
+        try:
+            path = self._turn_log_path()
+            os.makedirs(VOICE_DIR, exist_ok=True)
+            line = json.dumps(rec, default=str)[:2000]
+            lines = []
+            if os.path.exists(path):
+                with open(path) as f:
+                    lines = f.read().splitlines()[-(self.TURN_LOG_MAX - 1):]
+            lines.append(line)
+            with open(path, "w") as f:
+                f.write("\n".join(lines) + "\n")
+        except Exception:
+            pass
+
+    def turn_log(self, limit=25):
+        """The most recent turns, newest last."""
+        try:
+            with open(self._turn_log_path()) as f:
+                rows = f.read().splitlines()[-limit:]
+            out = []
+            for r in rows:
+                try:
+                    out.append(json.loads(r))
+                except Exception:
+                    continue
+            return out
+        except Exception:
+            return []
+
+    def turn_log_summary(self):
+        """How badly is it doing? Counts, not impressions."""
+        rows = self.turn_log(self.TURN_LOG_MAX)
+        if not rows:
+            return {"turns": 0}
+        miss = sum(1 for r in rows if not r.get("understood"))
+        silent = sum(1 for r in rows if not (r.get("heard") or "").strip())
+        clipped = sum(1 for r in rows if (r.get("clip_pct") or 0) > 2)
+        disagreed = sum(1 for r in rows
+                        if r.get("slow_text")
+                        and r.get("fast_text")
+                        and r["slow_text"] != r["fast_text"])
+        slow = sum(1 for r in rows if (r.get("total") or 0) > 1.5)
+        esc = sum(1 for r in rows if (r.get("slow") or 0) > 0)
+        tot = [r.get("total") or 0 for r in rows]
+        tot.sort()
+        return {
+            "turns": len(rows),
+            "not_understood": miss,
+            "heard_nothing": silent,
+            "distorted": clipped,
+            "engines_disagreed": disagreed,
+            "slow": slow,
+            "escalated": esc,
+            "p50": tot[len(tot) // 2] if tot else 0,
+            "worst": tot[-1] if tot else 0,
+        }
+
+    def turn_report(self):
+        """What the last turn actually cost, stage by stage.
+
+        Not estimates — the real clock, from this device. This is what
+        the audit page shows, so a slow assistant can be diagnosed
+        from a photograph of the screen instead of guessed at."""
+        t = getattr(self, "_turn", None) or {}
+        rows = []
+
+        def row(label, val, good, detail=""):
+            rows.append((label, val, good, detail))
+
+        if not t:
+            return [("No turn yet", "tap the logo and say something",
+                     True, "")]
+        row("You stopped talking", "%.2f s wait" % t.get("endpoint", 0),
+            t.get("endpoint", 0) <= 1.0, "policy")
+        row("Heard by", t.get("engine", "-"), True,
+            t.get("model", ""))
+        row("  fast model", "%.2f s" % t.get("fast", 0),
+            t.get("fast", 0) < 0.8, "moonshine")
+        if t.get("slow", 0) > 0:
+            row("  escalated", "%.2f s" % t.get("slow", 0),
+                t.get("slow", 0) < 2.0, "whisper")
+        row("Understood", "%.3f s" % t.get("think", 0),
+            t.get("think", 0) < 0.1, "on-device")
+        row("First words out", "%.2f s" % t.get("speak", 0),
+            t.get("speak", 0) < 1.0,
+            "cached" if t.get("cached") else "synthesized")
+        total = t.get("total", 0)
+        row("TOTAL", "%.2f s" % total, total < 1.5, "stop -> reply")
+        row("You said", (t.get("text") or "-")[:38], True, "")
+        return rows
+
     def _handle_exchange(self, rec, text):
         """A conversation, not a single question.
 
@@ -4476,9 +4661,73 @@ class DoseVoice:
         and answers herself."""
         self._closed.clear()
         while True:
+            t_stop = getattr(self, "_turn_stopped_at", time.time())
             self._set_ui_state("thinking", user_text=text)
+            t0 = time.time()
             reply, keep_listening = self.respond(text)
+            t_think = time.time() - t0
+            t1 = time.time()
             self._speak(reply, user_text=text)
+            # Everything above, measured. turn_report() renders it.
+            self._turn = {
+                "endpoint": getattr(self, "_t_endpoint", 0.0),
+                "fast": getattr(self, "_t_fast", 0.0),
+                "slow": getattr(self, "_t_slow", 0.0),
+                "engine": getattr(self, "_last_engine", "-"),
+                "model": (self._ms_arch_used or "").split("_")[0].lower()
+                or self._whisper_size,
+                "think": t_think,
+                "speak": getattr(self, "_t_first_sound", 0.0),
+                "cached": getattr(self, "_t_cached", False),
+                "total": (t1 - t_stop) + getattr(
+                    self, "_t_first_sound", 0.0),
+                "text": text,
+            }
+            # Log it. "understood" is the thing that matters most: did
+            # the station work out what was being asked, or did it fall
+            # through to a shrug?
+            low = (reply or "").lower()
+            understood = not any(
+                p in low for p in ("instruction unclear",
+                                   "did not copy", "didn't catch",
+                                   "insufficient data",
+                                   "that instruction is unclear"))
+            # What the language layer made of it — did it know how to
+            # respond, or did it fall through?
+            intent = "?"
+            try:
+                if _nlu_mod is not None:
+                    intent = _nlu_mod.parse(text, self._med_names()).name
+            except Exception:
+                pass
+            blocks = max(1, getattr(self, "_turn_blocks", 1))
+            self._log_turn({
+                "at": time.strftime("%H:%M:%S"),
+                # EACH recogniser's own answer, so a disagreement is
+                # visible instead of averaged away
+                "vosk": (getattr(self, "_raw_vosk", "") or "")[:60],
+                "fast_text": (getattr(self, "_raw_fast", "") or "")[:60],
+                "slow_text": (getattr(self, "_raw_slow", "") or "")[:60],
+                "heard": text,
+                "engine": self._turn["engine"],
+                "model": self._turn["model"],
+                "intent": intent,
+                "understood": understood,
+                "reply": (reply or "")[:120],
+                "endpoint": round(self._turn["endpoint"], 2),
+                "fast": round(self._turn["fast"], 2),
+                "slow": round(self._turn["slow"], 2),
+                "speak": round(self._turn["speak"], 2),
+                "total": round(self._turn["total"], 2),
+                # audio quality: is it hearing clean speech, or mush?
+                "room": round(getattr(self, "_nfloor", 0)),
+                "voice": round(getattr(self, "_speech_level", 0)),
+                "peak": getattr(self, "_turn_peak", 0),
+                "clip_pct": round(
+                    100.0 * getattr(self, "_turn_clip", 0) / blocks),
+                "snr": round(getattr(self, "_turn_snr", 0.0), 1),
+                "secs": round(blocks * BLOCK_SIZE / float(SAMPLE_RATE), 1),
+            })
 
             # she has stopped speaking; clear whatever the microphone
             # picked up of her own voice before listening again

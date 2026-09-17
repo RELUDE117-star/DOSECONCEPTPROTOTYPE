@@ -303,10 +303,14 @@ ok(os.environ.get("OMP_NUM_THREADS") == str(dv.INFER_THREADS),
 # because recognition runs DURING the pause (section 5), and because
 # the burst gets every core rather than the continuous budget.
 bt = VOICE_SRC.split("def _better_transcribe")[1].split("\n    def ")[0]
-ok(bt.index("_whisper_transcribe") < bt.index("_moonshine_transcribe"),
-   "the accurate recogniser answers first")
-ok("self._usable(wh)" in bt,
-   "and the fast one is the fallback when that answer is unusable")
+ok(bt.index("_moonshine_transcribe") < bt.index("_whisper_transcribe"),
+   "the FAST recogniser answers first — it is the one that fits the "
+   "latency budget")
+ok("self._usable(ms)" in bt,
+   "and the stronger one escalates only when that answer is unusable")
+ok("beam_size=1" in VOICE_SRC,
+   "escalation decodes greedily — a beam search is several times "
+   "slower for a fraction of a percent on short commands")
 ok("cpu_threads=STT_THREADS" in VOICE_SRC,
    "transcription is loaded with EVERY core, not the continuous "
    "budget — it is a burst, not background work")

@@ -506,6 +506,18 @@ done
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-3}
 export ORT_NUM_THREADS=${ORT_NUM_THREADS:-3}
 
+# ── Audit reporting (optional) ──
+# The AUDIT page can post its report straight to GitHub so it can be
+# read without transcribing a photograph. That needs a token, and a
+# token must never live in the repository — this one is public. Put a
+# fine-grained personal access token with Issues:write into
+# ~/dose-home-station/github_token and the button starts working; do
+# nothing and the report is still written to
+# ~/dose-home-station/audit-latest.txt.
+if [ -f "$APP_DIR/github_token" ]; then
+    chmod 600 "$APP_DIR/github_token" 2>/dev/null || true
+fi
+
 # ── EVERYTHING READY? ──
 # A single gate before launch. The app used to open while pieces were
 # still arriving, so the first screen you saw listed things as MISSING

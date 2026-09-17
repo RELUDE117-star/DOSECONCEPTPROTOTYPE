@@ -399,13 +399,39 @@ for t in JUNK:
 
 VSRC = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
 bt = VSRC.split("def _better_transcribe")[1].split("\n    def ")[0]
-ok("self._usable(wh)" in bt,
+ok("self._usable(ms)" in bt,
    "its answer is only accepted if it actually means something")
-ok("_moonshine_transcribe" in bt,
-   "otherwise the fast model gets a turn on the SAME audio")
-ok("if wh and not" in bt and "if ms and not" in bt,
-   "and if neither parses, whichever heard something is still "
-   "returned so it can be matched or asked about")
+ok("_whisper_transcribe" in bt,
+   "otherwise the stronger model gets a turn on the SAME audio")
+ok("max(cands" in bt,
+   "and if neither parses, the answer with MORE IN IT wins — a turn "
+   "where the fast model said 'urk' and the slow one said 'open "
+   "storage the' was reporting 'urk', throwing away the transcript "
+   "the phonetic matcher could have used")
+
+# prove it, on the real method
+class _Pick(DoseVoice):
+    def __init__(self, fast, slow):
+        self._f, self._s = fast, slow
+        self._med_names = lambda: ["Sertraline"]
+
+    def _moonshine_transcribe(self, a):
+        return self._f
+
+    def _whisper_transcribe(self, a):
+        return self._s
+
+    def _write_wav(self, a):
+        return None
+
+
+for fast, slow, want in (("urk", "open storage the", "open storage the"),
+                         ("open storage the", "urk", "open storage the"),
+                         ("", "hello there friend", "hello there friend"),
+                         ("hello there friend", "", "hello there friend")):
+    got = _Pick(fast, slow)._better_transcribe(b"x" * 100, "")
+    ok(got == want,
+       "fast=%r slow=%r -> %r" % (fast, slow, got))
 
 pr = VSRC.split("def _probe_moonshine")[1].split("\n    def ")[0]
 ok("small.en" in pr,
@@ -422,17 +448,21 @@ print("== 14b. Whisper does the hearing now ==")
 # only shipped a tiny arch the station was listening with the weakest
 # model it had.
 import dose_voice as _dvm                                    # noqa: E402
-ok(_dvm.WHISPER_MODELS[0].startswith("distil-small")
-   or _dvm.WHISPER_MODELS[0].startswith("small"),
-   "the first choice is %r — small-class, not tiny"
+ok(_dvm.WHISPER_MODELS[0] in ("base.en", "distil-small.en",
+                              "small.en"),
+   "the escalation model is %r — strong enough to be worth calling, "
+   "small enough to answer before the person gives up"
    % _dvm.WHISPER_MODELS[0])
 ok("tiny.en" in _dvm.WHISPER_MODELS[-1],
    "tiny is the LAST resort, not the first fallback")
 ok(len(_dvm.WHISPER_MODELS) >= 3,
    "with a chain to fall back through if one will not download")
-ok(bt.index("_whisper_transcribe") < bt.index("_moonshine_transcribe"),
-   "Whisper is asked FIRST now — accuracy is what is scarce, not "
-   "milliseconds")
+ok(bt.index("_moonshine_transcribe") < bt.index("_whisper_transcribe"),
+   "the FAST model answers first — I had Whisper leading and on a Pi "
+   "that is seconds per utterance, every utterance")
+ok("_usable(ms)" in bt,
+   "and the stronger model escalates only when that answer is "
+   "unusable")
 ok(_dvm.STT_THREADS >= _dvm.INFER_THREADS,
    "transcription gets every core (%d of %d) because it is a short "
    "burst, not continuous work"

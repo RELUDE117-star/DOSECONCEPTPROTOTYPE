@@ -214,10 +214,13 @@ ok("moonshine" in vsrc.lower(), "Moonshine does the hearing")
 ok("faster_whisper" in vsrc,
    "Whisper is available for the cases it cannot make out")
 bt = vsrc.split("def _better_transcribe")[1].split("\n    def ")[0]
-ok(bt.index("_whisper_transcribe") < bt.index("_moonshine_transcribe"),
-   "Whisper answers first — accuracy is what is scarce here")
-ok("self._usable(wh)" in bt,
-   "and the fast one only when that answer is unusable")
+ok(bt.index("_moonshine_transcribe") < bt.index("_whisper_transcribe"),
+   "the fast recogniser answers first")
+ok("self._usable(ms)" in bt,
+   "and Whisper escalates only when that answer is unusable")
+ok(vsrc.index("base.en") < vsrc.index("distil-small.en"),
+   "with base.en as the default — the bigger models take SECONDS per "
+   "utterance on a Pi 4")
 ok("faster-whisper" in sh, "the setup script installs it")
 ok("faster-whisper" in src, "so does the app's dependency list")
 
