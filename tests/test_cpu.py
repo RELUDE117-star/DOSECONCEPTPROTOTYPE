@@ -187,9 +187,50 @@ try:
 finally:
     mod._scan_qr = _real_scan
 
+# frame -> grayscale, per camera frame
+import numpy as _np                                         # noqa: E402
+_raw = (_np.random.rand(480, 640, 3) * 255).astype("uint8")
+t0 = time.perf_counter()
+for _ in range(40):
+    mod.DoseApp._frame_to_gray(_raw)
+gray_ms = (time.perf_counter() - t0) / 40 * 1000
+
+# the audio thread, per 64 ms block
+try:
+    import audioop as _ao
+except ImportError:                                          # py3.13
+    import audioop_lts as _ao
+_blk = (_np.random.randn(1024) * 2000).astype(_np.int16).tobytes()
+_st = [None]
+_blk48 = (_np.random.randn(3072) * 2000).astype(_np.int16).tobytes()
+
+
+def _audio_block():
+    d, _st[0] = _ao.ratecv(_blk48, 2, 1, 48000, 16000, _st[0])
+    _ao.rms(d, 2)
+    _ao.max(d, 2)
+
+
+t0 = time.perf_counter()
+for _ in range(500):
+    _audio_block()
+audio_ms = (time.perf_counter() - t0) / 500 * 1000
+blocks_per_s = dv.SAMPLE_RATE / dv.BLOCK_SIZE
+
+# The clock tick only repaints when something on screen CHANGED. The
+# clock shows hours and minutes, so in the steady state that is about
+# twice a minute, not once a second.
 budget = [
-    ("screen repaint", redraw_ms, 1.0),        # clock tick, 1 Hz
-    ("QR decode", cheap_ms, 5.0),              # camera, 5 Hz
+    ("screen repaint", redraw_ms, 1.0 / 30),   # on change + backstop
+    ("frame -> gray", gray_ms, 5.0),           # camera, 5 Hz
+    ("QR decode (ours)", cheap_ms, 5.0),       # camera, 5 Hz
+    ("audio thread", audio_ms, blocks_per_s),  # continuous
+    # zbar's own scan cannot be measured here (pyzbar is not installed
+    # in this environment), so it is carried as a STATED ALLOWANCE
+    # rather than quietly counted as free. 20 ms per 640x480 frame is
+    # the pessimistic end of what pyzbar costs on a Pi 4 for QR-only
+    # decoding — already in Pi terms, so it is divided back out.
+    ("zbar scan (allowance)", 20.0 / PI_FACTOR, 5.0),
 ]
 total_pct = 0.0
 for label, ms, hz in budget:
@@ -200,7 +241,11 @@ for label, ms, hz in budget:
 print("    %-16s %27s %5.1f%%" % ("TOTAL", "", total_pct))
 ok(total_pct < BUDGET_PCT,
    "everything that runs on its own costs %.1f%% of one core on a Pi "
-   "(budget %.0f%%)" % (total_pct, BUDGET_PCT))
+   "(budget %.0f%%), INCLUDING a pessimistic allowance for the zbar "
+   "scan that cannot be measured here" % (total_pct, BUDGET_PCT))
+ok(total_pct < BUDGET_PCT * 0.8,
+   "with headroom for a busy moment (%.1f%% of %.0f%%)"
+   % (total_pct, BUDGET_PCT))
 
 print("== 3b. everything is in place BEFORE the app opens ==")
 # The app used to open while pieces were still arriving, so the first
@@ -222,6 +267,44 @@ ok("Starting without" in gate,
 ok("MISSING=\"\"" in gate,
    "the app still starts either way — a station that will not open is "
    "worse than one missing its best recogniser")
+
+print("== 3c. nothing expensive runs while idle ==")
+# The single biggest thing this device was doing: a full speech
+# recogniser on EVERY audio block, forever, to notice "hey dose".
+# Roughly a quarter of a Pi core, permanently, for a wake word that
+# is not how anyone gets into a conversation here.
+VSRC2 = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
+ok(not dv.WAKE_WORD,
+   "the wake word is OFF by default — tapping the logo costs nothing "
+   "until it is tapped")
+run_loop = VSRC2.split("def _run(")[1].split("\n    def ")[0]
+ok('if self.state == "idle" and not WAKE_WORD:' in run_loop,
+   "and with it off, the recogniser is not fed while idle")
+ok(run_loop.index('not WAKE_WORD')
+   < run_loop.index("got_final = rec.AcceptWaveform"),
+   "the skip happens BEFORE the decode, not after")
+
+ok("maxsize=" in VSRC2.split("self._audio_q = queue.Queue")[1][:40],
+   "the audio queue is bounded")
+ok("queue.Full" in VSRC2,
+   "and drops the oldest audio rather than growing without limit")
+
+tick = APP_SRC.split("def _tick_clock")[1].split("\n    def ")[0]
+ok("_screen_signature" in tick,
+   "the idle screen repaints only when something on it changed")
+ok("30" in tick and "stale" in tick,
+   "with an unconditional repaint as a backstop — a stale screen is "
+   "worse than the CPU it saves")
+sig = APP_SRC.split("def _screen_signature")[1].split("\n    def ")[0]
+for field in ("minute", "_is_qr_present", "_get_count", "_due_keys",
+              "dispense_state"):
+    ok(field in sig, "the signature covers %s" % field)
+
+cam = APP_SRC.split("def _camera_loop")[1].split("\n    def ")[0]
+ok("_frame_to_gray" in cam,
+   "frames are decoded in grayscale — a QR code has no colour")
+ok("self._camera_view and self.mode ==" in cam,
+   "and the colour image is built only when the debug view is open")
 
 print("== 4. nothing is left spinning ==")
 VSRC = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()

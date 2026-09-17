@@ -3047,11 +3047,46 @@ class DoseApp:
     # ══════════════════════════════════════════════════════════════════════
     #  CLOCK TICK
     # ══════════════════════════════════════════════════════════════════════
+    def _screen_signature(self):
+        """Everything the idle screens actually display.
+
+        The clock shows hours and minutes — no seconds — so repainting
+        every second was sixty times more often than anything on
+        screen could change. A full repaint is the most expensive
+        thing this app does, so that alone was most of its idle load."""
+        try:
+            now = datetime.now()
+            return (
+                self.mode,
+                now.hour, now.minute,
+                tuple(self._is_qr_present(k) for k in SLOT_KEYS),
+                tuple(self._get_count(k) for k in SLOT_KEYS),
+                tuple(self._is_loaded(k) for k in SLOT_KEYS),
+                tuple(sorted(self._due_keys or ())),
+                self.dispense_state,
+                bool(self._banner_dismissed),
+                self.theme_name if hasattr(self, "theme_name") else "",
+            )
+        except Exception:
+            return None
+
     def _tick_clock(self):
         self._check_presence_changes()
         self._check_due_doses()
         if self.mode in ("home", "storage"):
-            self._draw_frame()
+            sig = self._screen_signature()
+            # Repaint when something changed — and unconditionally
+            # every 30 s regardless, as a backstop. A stale screen is
+            # worse than the CPU it saves, so anything this signature
+            # might not cover still gets picked up within half a
+            # minute.
+            now = time.time()
+            stale = now - getattr(self, "_last_full_draw", 0) > 30
+            if sig is None or sig != getattr(self, "_screen_sig", None) \
+                    or stale:
+                self._screen_sig = sig
+                self._last_full_draw = now
+                self._draw_frame()
         self.root.after(1000, self._tick_clock)
 
     # ── Dose-time notification ─────────────────────────────────────────────
@@ -3645,6 +3680,27 @@ class DoseApp:
         except Exception:
             return 0
 
+    @staticmethod
+    def _frame_to_gray(frame):
+        """Grayscale image for decoding, as cheaply as possible.
+
+        A QR code carries no colour. Converting every frame to RGB and
+        letting PIL convert that to grayscale does two full-image
+        passes for nothing."""
+        try:
+            import numpy as np
+            if frame.ndim == 3:
+                # ITU-R 601 luma, in integer arithmetic
+                b = frame[:, :, 0].astype(np.uint16)
+                g = frame[:, :, 1].astype(np.uint16)
+                r = frame[:, :, 2].astype(np.uint16)
+                y = ((r * 77 + g * 150 + b * 29) >> 8).astype(np.uint8)
+            else:
+                y = frame
+            return Image.fromarray(y, mode="L")
+        except Exception:
+            return Image.fromarray(frame[:, :, ::-1]).convert("L")
+
     def _decode_passes(self, pil_img):
         """Decode the frame, escalating only when it is actually needed.
 
@@ -3689,7 +3745,7 @@ class DoseApp:
             return list(found.values())
         self._last_hard_pass = now
 
-        gray = pil_img.convert("L")
+        gray = pil_img if pil_img.mode == "L" else pil_img.convert("L")
 
         def enough():
             """Stop escalating once we have what we expect. The passes
@@ -3762,12 +3818,28 @@ class DoseApp:
                     locked = True
 
                 frame = self.camera.capture_array()
-                pil_img = Image.fromarray(frame[:, :, ::-1])
+
+                # Scan in GRAYSCALE. A QR code has no colour, and
+                # building a full RGB image for every frame — the
+                # channel flip alone is 2.25 ms here, about 18 ms on a
+                # Pi, some 9% of a core at five frames a second — buys
+                # nothing the decoder uses. Luma straight out of the
+                # array is a fraction of that, and the colour image is
+                # only built when the debug view is actually open.
+                pil_img = self._frame_to_gray(frame)
 
                 results = self._decode_passes(pil_img)
 
-                # Store frame + results for camera debug view
-                self._camera_frame = pil_img
+                # Colour frame for the camera debug view — built ONLY
+                # when that screen is up.
+                if self._camera_view and self.mode == "camview":
+                    try:
+                        self._camera_frame = Image.fromarray(
+                            frame[:, :, ::-1])
+                    except Exception:
+                        self._camera_frame = pil_img
+                else:
+                    self._camera_frame = pil_img
                 self._camera_qr_results = list(results) if results else []
 
                 # Report EVERY completed pass, including empty ones.

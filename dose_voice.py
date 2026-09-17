@@ -441,6 +441,15 @@ VAD_MODEL_URL = ("https://raw.githubusercontent.com/snakers4/"
                  "silero-vad/master/src/silero_vad/data/silero_vad.onnx")
 VAD_MODEL_MIN_BYTES = 500_000
 
+# ── WAKE WORD: OFF ───────────────────────────────────────────────────
+# Listening for "hey dose" means running a speech recogniser on every
+# block of audio for as long as the station is switched on — about a
+# quarter of a Pi core, permanently. The way into a conversation here
+# is tapping the Dose logo, which costs nothing until it is tapped.
+# Set DOSE_WAKE_WORD=1 to pay for the wake word if you want it.
+WAKE_WORD = os.environ.get("DOSE_WAKE_WORD", "0") not in ("0", "",
+                                                          "false")
+
 # ── BARGE-IN ─────────────────────────────────────────────────────────
 # Talking over her stops her. People interrupt each other constantly;
 # an assistant you have to wait out is the thing that feels like a
@@ -750,7 +759,11 @@ class DoseVoice:
         self.state = "idle"          # idle | listening | thinking | speaking
         self._flow = None            # active multi-turn conversation
         self._stop = threading.Event()
-        self._audio_q = queue.Queue()
+        # Bounded. Roughly 30 s of audio at 64 ms a block. If the
+        # consumer ever stalls, the OLDEST audio is dropped rather
+        # than memory growing without limit — on a 4 GB board that
+        # matters, and stale audio is worthless anyway.
+        self._audio_q = queue.Queue(maxsize=480)
         self._muted = False
         self._last_reply = ""
         self._last_exchange = None   # {"text","intent","arg"} of last turn
@@ -3331,7 +3344,14 @@ class DoseVoice:
                     lp["raw"] = max(lp.get("raw", 0), rms_raw)
                 except Exception:
                     pass
-            self._audio_q.put(data)
+            try:
+                self._audio_q.put_nowait(data)
+            except queue.Full:
+                try:
+                    self._audio_q.get_nowait()      # drop the oldest
+                    self._audio_q.put_nowait(data)
+                except Exception:
+                    pass
 
         def callback(indata, frames, t, status):
             ingest(bytes(indata))
@@ -3797,6 +3817,21 @@ class DoseVoice:
             # a hit starts a listening session exactly like hold-to-talk
             if self.state == "idle" and self._oww_feed(data):
                 self._ptt_requested = True
+                continue
+
+            # ── THE BIGGEST THING THIS DEVICE WAS DOING ──────────
+            # Below is a full speech recogniser, and it was running on
+            # EVERY audio block, forever, for one purpose: to notice
+            # the words "hey dose". A continuous ASR decode is roughly
+            # a quarter of a Pi core, permanently — for a wake word
+            # that never worked reliably and that nobody uses, because
+            # the way into a conversation is tapping the logo.
+            #
+            # So it does not run unless the wake word is actually
+            # switched on. Tapping the logo is handled above and is
+            # free: it sets a flag. When idle with no wake word, this
+            # thread costs a queue read and an RMS.
+            if self.state == "idle" and not WAKE_WORD:
                 continue
 
             got_final = rec.AcceptWaveform(data)
