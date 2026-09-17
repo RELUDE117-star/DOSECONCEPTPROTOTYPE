@@ -141,10 +141,41 @@ def backup_once(path, mode):
 
 # ── public key source (NEVER a private key) ───────────────────────────
 def _looks_like_pubkey(line):
-    line = line.strip()
-    return line.startswith((
-        "ssh-ed25519 ", "ssh-rsa ", "ecdsa-sha2-", "sk-ssh-ed25519@",
-        "sk-ecdsa-sha2-"))
+    """A REAL OpenSSH public key, not a placeholder.
+
+    Checking only the 'ssh-ed25519 ' prefix was not enough: a template
+    line like 'ssh-ed25519 AAAA...my-mac-pubkey... comment' passed and
+    would have been written into authorized_keys as a broken entry,
+    silently making key auth fail. So we decode the base64 body and
+    confirm the key type embedded inside it matches the prefix — which
+    only a genuine key can satisfy."""
+    line = (line or "").strip()
+    if line.startswith("#") or not line:
+        return False
+    parts = line.split()
+    if len(parts) < 2:
+        return False
+    ktype, body = parts[0], parts[1]
+    if ktype not in ("ssh-ed25519", "ssh-rsa", "ssh-dss",
+                     "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
+                     "ecdsa-sha2-nistp521",
+                     "sk-ssh-ed25519@openssh.com",
+                     "sk-ecdsa-sha2-nistp256@openssh.com"):
+        return False
+    # a placeholder gives itself away here: '.' is not base64
+    import re as _re
+    if not _re.fullmatch(r"[A-Za-z0-9+/]+={0,3}", body) or len(body) < 32:
+        return False
+    try:
+        import base64 as _b64
+        import struct as _st
+        raw = _b64.b64decode(body, validate=True)
+        n = _st.unpack(">I", raw[:4])[0]
+        if n <= 0 or n > 64 or len(raw) < 4 + n:
+            return False
+        return raw[4:4 + n].decode("ascii", "ignore") == ktype
+    except Exception:
+        return False
 
 
 def collect_pubkeys():
