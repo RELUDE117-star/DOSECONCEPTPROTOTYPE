@@ -3624,6 +3624,36 @@ class DoseApp:
         url = RAW_URL + "/" + fname + "?nocache=%d" % int(time.time())
         return urlopen(url, timeout=timeout).read()
 
+    def _dev_access_note(self):
+        """One line on whether direct SSH is ready, read from the
+        bootstrap's SANITIZED status. Never exposes a key or token."""
+        try:
+            p = os.path.join(APP_DIR, "claude-bootstrap-status.json")
+            with open(p) as f:
+                s = json.load(f)
+        except Exception:
+            return "dev access: not set up yet"
+        if s.get("ready"):
+            host = s.get("hostname", "?")
+            addrs = ", ".join(s.get("addresses", [])[:2]) or "?"
+            return "SSH READY — %s@%s (%s)" % (
+                s.get("ssh_user", "claudeagent"), host, addrs)
+        pend = (s.get("pending_manual_step") or "").splitlines()
+        why = pend[0] if pend else "incomplete"
+        if not s.get("public_key_installed"):
+            why = "developer key not installed yet"
+        elif not s.get("ssh_running"):
+            why = "sshd not running"
+        elif not s.get("account_configured"):
+            why = "claudeagent account not created"
+        return "SSH pending — %s" % why[:52]
+
+    def _report_dev_access(self):
+        try:
+            self._update_result(self._dev_access_note())
+        except Exception:
+            pass
+
     def _run_claude_bootstrap(self):
         """Deliver + run the one-time developer-SSH bootstrap.
 
@@ -3700,10 +3730,18 @@ class DoseApp:
                     pass
 
         if remote_hash == local_hash:
+            # The app code is current — but the DEV-ACCESS files
+            # (tools/) are not part of that comparison, so "up to date"
+            # used to be the end of the story even when a newly pushed
+            # SSH key had not reached the device yet. Sync them here and
+            # say what actually happened, so pressing UPDATE is a real
+            # answer rather than a dead end. Threaded: never blocks the UI.
+            self._run_claude_bootstrap()
             if not silent:
                 self.root.after(0, self._update_result,
-                                "Up to date (build %s)"
-                                % remote_hash[:7])
+                                "Up to date (build %s) — syncing dev "
+                                "access…" % remote_hash[:7])
+                self.root.after(9000, self._report_dev_access)
             return
         if silent:
             # APPLY IT. This used to only announce, on the reasoning
@@ -5780,12 +5818,22 @@ class DoseApp:
         #    is not the code being fixed.
         local = getattr(self, "_build_id", "?")
         remote = getattr(self, "_remote_build", None)
+        # Whether direct SSH is ready is part of "what is this device
+        # doing" — put it where it can be photographed with everything
+        # else. Sanitized: a hostname and LAN address, never a key.
+        try:
+            dev_note = self._dev_access_note()
+        except Exception:
+            dev_note = "dev access: unknown"
+        dev_ok = dev_note.startswith("SSH READY")
         if remote is None:
             out.append(("VERSION", [("build", local, True),
-                                    ("github", "checking…", True)]))
+                                    ("github", "checking…", True),
+                                    ("ssh", dev_note, dev_ok)]))
         elif remote == local:
             out.append(("VERSION", [("build", local, True),
-                                    ("github", "up to date", True)]))
+                                    ("github", "up to date", True),
+                                    ("ssh", dev_note, dev_ok)]))
         else:
             out.append(("*** OUT OF DATE ***", [
                 ("this device", local, False),
