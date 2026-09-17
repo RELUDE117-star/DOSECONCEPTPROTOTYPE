@@ -1,0 +1,17 @@
+# DOSE — developer SSH PUBLIC keys for the Raspberry Pi `claudeagent` account.
+#
+# ONLY public keys go here. A public key is safe to commit and share; it
+# grants nothing on its own. NEVER put a private key in this file.
+#
+# The Pi bootstrap (tools/bootstrap_claude_access.py) installs every valid
+# public key below into claudeagent's ~/.ssh/authorized_keys on the next
+# update. Lines starting with '#' and anything that is not a public key
+# are ignored, so this placeholder is inert until a real key is added.
+#
+# To add your Mac's key, on the MAC run:
+#     ssh-keygen -t ed25519 -f ~/.ssh/dose_pi_claude_ed25519 -C "dose-pi claude dev"
+#     cat ~/.ssh/dose_pi_claude_ed25519.pub
+# then paste the single ssh-ed25519 line here (replacing this comment
+# block's placeholder note) and commit. The private key stays on the Mac.
+#
+# --- paste public key line(s) below this line ---
