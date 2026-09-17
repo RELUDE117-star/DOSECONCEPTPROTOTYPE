@@ -105,7 +105,7 @@ class FakeVoice:
         return [("CPU", "4 cores · 2 for speech", True),
                 ("Load", "0.42 (10% of 4 cores)", True),
                 ("Free RAM", "1539 MB", True),
-                ("Clock", "1800 MHz (performance)", True),
+                ("Clock", "1500 MHz (schedutil)", True),
                 ("Temp", "62.8 °C", True),
                 ("Throttling", "no", True),
                 ("Power", "ok", True),

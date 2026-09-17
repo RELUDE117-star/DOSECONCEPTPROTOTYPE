@@ -573,13 +573,42 @@ def pi_health():
     return out
 
 
+def _pick_governor():
+    """Choose a governor that idles COOL and ramps quickly under load.
+
+    We deliberately do NOT use "performance": that pins all four cores
+    to 1500 MHz every second of the day, idle or not, which is what was
+    cooking the Pi (66-70 C at rest). It is not an overclock — the clock
+    never goes above stock — but running flat-out with nothing to do is
+    pure heat for no benefit.
+
+    "schedutil" (scheduler-driven) and "ondemand" both sit at the 600
+    MHz idle clock and jump to full speed the instant there is work, in
+    tens of milliseconds — far below one turn of conversation. Since the
+    speech load has already been cut right down, the ramp is invisible
+    and the Pi runs many degrees cooler. We prefer them in that order
+    and never fall back to performance."""
+    prefer = ("schedutil", "ondemand", "conservative")
+    try:
+        with open("/sys/devices/system/cpu/cpu0/cpufreq/"
+                  "scaling_available_governors") as f:
+            available = set(f.read().split())
+    except Exception:
+        available = set()
+    for g in prefer:
+        if not available or g in available:
+            return g
+    return "ondemand"
+
+
 def tune_for_pi():
     """Apply the runtime tuning that needs no root and no reboot.
 
-    Pinning the UI process's MAIN thread to core 0 keeps the screen
-    responsive while three cores chew on speech, and asking for the
-    performance governor removes the 600 MHz idle clock that otherwise
-    has to ramp up while the user is already waiting for an answer."""
+    Pinning the UI process's MAIN thread across the cores keeps the
+    screen responsive while speech runs, and asking for a scaling
+    governor that idles at 600 MHz — NOT the always-on performance
+    governor — keeps the Pi cool while still ramping to full clock the
+    moment there is work to do."""
     applied = []
     if CPU_CORES >= 4:
         try:
@@ -588,24 +617,24 @@ def tune_for_pi():
         except Exception:
             pass
     # The governor file is root-owned, so a plain write fails silently
-    # from the app — the device was still showing "ondemand" after we
-    # claimed to have set it. Try the direct write, then sudo -n (which
-    # works when the user has passwordless sudo, as Raspberry Pi OS
-    # does by default), and report only what actually took.
-    wrote = False
+    # from the app. Try the direct write, then sudo -n (which works
+    # when the user has passwordless sudo, as Raspberry Pi OS does by
+    # default), and report only what actually took. We pick a governor
+    # that scales DOWN when idle so the Pi stays cool — never one that
+    # holds full clock forever.
+    want = _pick_governor()
     for i in range(CPU_CORES):
         path = ("/sys/devices/system/cpu/cpu%d/cpufreq/"
                 "scaling_governor" % i)
         try:
             with open(path, "w") as f:
-                f.write("performance")
-            wrote = True
+                f.write(want)
             continue
         except Exception:
             pass
         try:
             subprocess.run(
-                ["sudo", "-n", "tee", path], input=b"performance",
+                ["sudo", "-n", "tee", path], input=want.encode(),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=5)
         except Exception:
@@ -614,8 +643,8 @@ def tune_for_pi():
         with open("/sys/devices/system/cpu/cpu0/cpufreq/"
                   "scaling_governor") as f:
             gov = f.read().strip()
-        if gov == "performance":
-            applied.append("governor=performance")
+        if gov == want:
+            applied.append("governor=%s (cool idle)" % gov)
         else:
             applied.append("governor=%s (could not change)" % gov)
     except Exception:
@@ -2788,8 +2817,12 @@ class DoseVoice:
              h["load_per_core"] < 0.9),
             ("Free RAM", "%d MB" % h["mem_free_mb"],
              h["mem_free_mb"] > 200),
+            # A cool-idle governor is the GOAL now, not a warning: it
+            # sits low when nothing is happening and ramps under load.
+            # Only "could not change" or a wedged-low clock is a problem.
             ("Clock", "%d MHz (%s)" % (h["mhz"], h["governor"] or "?"),
-             h["governor"] == "performance" or h["mhz"] >= 1400),
+             h["governor"] in ("schedutil", "ondemand", "conservative",
+                               "performance") or h["mhz"] >= 1400),
             ("Temp", "%.1f °C" % h["temp_c"], h["temp_c"] < 75),
             ("Throttling", "yes — the Pi is being slowed down"
              if h["throttled"] else "no", not h["throttled"]),

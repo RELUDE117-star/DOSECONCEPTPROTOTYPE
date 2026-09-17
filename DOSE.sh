@@ -526,17 +526,31 @@ if [ ! -s "$VAD_MODEL" ] || [ "$(stat -c%s "$VAD_MODEL" 2>/dev/null || echo 0)" 
     fi
 fi
 
-# ── Pi tuning for a conversational assistant ──
-# On a stock Raspberry Pi the CPU sits in "ondemand" and idles at
-# 600 MHz. Speech recognition and speech synthesis are short bursts,
-# so the governor is still ramping up while you are waiting for a
-# reply — which is felt as exactly the lag we are trying to remove.
-# Pinning "performance" removes that ramp. It is reversible (it lasts
-# until reboot) and needs no config file edits.
-echo "  Tuning for low latency..."
+# ── Pi tuning: cool when idle, fast under load ──
+# We deliberately do NOT pin "performance" — that holds all four cores
+# at 1500 MHz every second of the day, idle or not, and that constant
+# flat-out running is what was cooking the Pi (66-70 C at rest). It is
+# not an overclock (the clock never exceeds stock) but it is pure heat
+# for no benefit. "schedutil" / "ondemand" idle at 600 MHz and jump to
+# full clock the moment there is work — in tens of milliseconds, far
+# below one turn of conversation — so the Pi runs many degrees cooler
+# with no felt lag. Reversible; lasts until reboot; no config edits.
+echo "  Tuning for cool, responsive operation..."
+GOV=ondemand
+for CAND in schedutil ondemand conservative; do
+    if grep -qw "$CAND" /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null; then
+        GOV="$CAND"; break
+    fi
+done
 for G in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-    [ -w "$G" ] && echo performance > "$G" 2>/dev/null || \
-        echo performance 2>/dev/null | sudo tee "$G" >/dev/null 2>&1 || true
+    [ -w "$G" ] && echo "$GOV" > "$G" 2>/dev/null || \
+        echo "$GOV" 2>/dev/null | sudo tee "$G" >/dev/null 2>&1 || true
+done
+# Never leave a stray overclock in the firmware config. If a previous
+# setup ever wrote one, comment it out so the SoC stays at stock clocks.
+for CFG in /boot/firmware/config.txt /boot/config.txt; do
+    [ -w "$CFG" ] || continue
+    sed -i -E 's/^[[:space:]]*(arm_freq|over_voltage|force_turbo|gpu_freq|arm_freq_min)[[:space:]]*=/#&/' "$CFG" 2>/dev/null || true
 done
 
 # Keep the ONNX runtimes (speech + voice) to 3 of the 4 cores so the

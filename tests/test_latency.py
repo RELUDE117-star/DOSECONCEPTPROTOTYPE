@@ -363,9 +363,11 @@ ok("TMP_AUDIO_DIR" in VOICE_SRC and "/dev/shm" in VOICE_SRC,
    "transient audio goes to RAM, not the SD card")
 ok('dir=TMP_AUDIO_DIR' in VOICE_SRC,
    "the wav writer actually uses it")
-ok("scaling_governor" in SH_SRC and "performance" in SH_SRC,
-   "the CPU governor is pinned so the clock isn't ramping up from "
-   "600 MHz while the user waits")
+ok("scaling_governor" in SH_SRC
+   and ("schedutil" in SH_SRC or "ondemand" in SH_SRC)
+   and "echo performance >" not in SH_SRC,
+   "the CPU governor idles cool (schedutil/ondemand) and is NOT "
+   "pinned to performance, which would run flat-out and overheat")
 ok("def tune_for_pi" in VOICE_SRC and "self._tuned = tune_for_pi()"
    in VOICE_SRC, "the app applies the tuning itself too")
 
