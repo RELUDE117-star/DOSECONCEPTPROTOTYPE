@@ -1944,7 +1944,17 @@ class DoseVoice:
         self._max_capture_by_numid(card)
 
     def _max_capture_by_numid(self, card):
-        """Enable every CAPTURE-capable control by numid with cset."""
+        """Enable every CAPTURE-capable control by numid with cset.
+
+        This used to cset every capture volume to a hardcoded 100%,
+        which silently undid the level the caller had just set:
+        _max_capture() writes _capture_level (70% by default) to the
+        named control and then calls straight into here, which put
+        100% back over the top. A device audit found the AIRHUG
+        sitting at exactly 100% (+31.99 dB) while DEFAULT_CAPTURE_LEVEL
+        was 70 — the symmetric auto-leveller's decisions never reached
+        the hardware at all. It now honours _capture_level when one is
+        set, and only falls back to full when nothing was asked for."""
         try:
             out = subprocess.run(
                 ["amixer", "-c", str(card), "contents"],
@@ -1987,9 +1997,11 @@ class DoseVoice:
                             capture_output=True, timeout=5,
                             env=self._audio_env())
                     else:
+                        lvl = ("%d%%" % self._capture_level
+                               if self._capture_level else "100%")
                         subprocess.run(
                             ["amixer", "-c", str(card), "cset",
-                             "numid=" + numid, "100%"],
+                             "numid=" + numid, lvl],
                             capture_output=True, timeout=5,
                             env=self._audio_env())
                 except Exception:
@@ -4056,14 +4068,56 @@ class DoseVoice:
             return peak > 5
 
         def close_capture(cap):
+            """Tear a capture down COMPLETELY.
+
+            kill() on its own is not a teardown, and this cost the
+            device its microphone. Two things were missing:
+
+            • No wait(). Every pipe capture we closed left a zombie
+              recorder (`[arecord] <defunct>`) parented to us. A live
+              audit found one sitting there.
+            • SIGKILL, not SIGTERM. A killed arecord never runs its
+              cleanup, so the ALSA PCM is not released — the audit
+              found card 5 stranded in state SETUP with an owner_pid
+              that no longer existed, hw_ptr frozen at 0.83 s of audio
+              for 23 minutes, and every subsequent open (ours and
+              anyone else's) failing EBUSY. The mic was unrecoverable
+              short of restarting the app.
+
+            So: TERM first so the recorder can release the device,
+            KILL only as a fallback, always reap, always close the
+            pipe the reader thread is holding."""
             if not cap:
                 return
             kind, h = cap
+            if kind == "portaudio":
+                for step in (getattr(h, "stop", None),
+                             getattr(h, "close", None)):
+                    try:
+                        if step:
+                            step()
+                    except Exception:
+                        pass
+                return
+            # Pipe recorder: let it close the ALSA device itself.
             try:
-                if kind == "portaudio":
-                    h.stop(); h.close()
-                else:
+                h.terminate()
+            except Exception:
+                pass
+            try:
+                h.wait(timeout=2)
+            except Exception:
+                try:
                     h.kill()
+                except Exception:
+                    pass
+                try:
+                    h.wait(timeout=2)      # reap, or it becomes a zombie
+                except Exception:
+                    pass
+            try:
+                if h.stdout:
+                    h.stdout.close()
             except Exception:
                 pass
 

@@ -69,9 +69,19 @@ ok(not offenders, "no tracked file contains private key material %s"
    % (offenders[:3] if offenders else ""))
 
 print("== 2. no private key anywhere in git HISTORY ==")
-_, hist = sh("git", "log", "--all", "-p")
-hits = [m for m in PRIVATE_MARKERS if m in hist and
-        "PRIVATE_MARKERS" not in hist.split(m)[0][-200:]]
+# Scan every commit EXCEPT this guard's own source. This file necessarily
+# contains the exact strings it hunts for, so it matched itself: the old
+# self-exclusion only looked 200 characters back from the FIRST hit, which
+# reached the early markers in the tuple but never "BEGIN PGP PRIVATE KEY"
+# (the 7th) — so this check failed on every run from the commit that
+# introduced it. A guard that is permanently red is a guard people learn
+# to ignore, which is worse than not having one.
+#
+# Excluding the file by pathspec removes the self-reference entirely, and
+# lets the match below be exact rather than heuristic.
+SELF = "tests/test_no_private_keys.py"
+_, hist = sh("git", "log", "--all", "-p", "--", ".", ":(exclude)" + SELF)
+hits = [m for m in PRIVATE_MARKERS if m in hist]
 ok(not hits, "no commit ever introduced private key material %s" % hits)
 
 print("== 3. private-key FILENAMES are git-ignored ==")
