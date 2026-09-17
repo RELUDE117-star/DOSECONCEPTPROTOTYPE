@@ -514,6 +514,21 @@ export ORT_NUM_THREADS=${ORT_NUM_THREADS:-3}
 # ~/dose-home-station/github_token and the button starts working; do
 # nothing and the report is still written to
 # ~/dose-home-station/audit-latest.txt.
+# Pick a token up off a USB stick at launch, so it can be set once
+# and forgotten. Typing 93 characters on a touchscreen is not a plan.
+if [ ! -s "$APP_DIR/github_token" ]; then
+    for D in /media/*/ /media/*/*/ /mnt/*/ /run/media/*/*/; do
+        for N in github_token dose_github_token github_token.txt; do
+            if [ -s "$D$N" ]; then
+                cp "$D$N" "$APP_DIR/github_token" 2>/dev/null && {
+                    chmod 600 "$APP_DIR/github_token"
+                    echo "  GitHub token imported from $D"
+                    break 2
+                }
+            fi
+        done
+    done
+fi
 if [ -f "$APP_DIR/github_token" ]; then
     chmod 600 "$APP_DIR/github_token" 2>/dev/null || true
 fi

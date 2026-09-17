@@ -240,10 +240,19 @@ ok("TOTAL" in txt, "and the end-to-end number")
 ok("<-- CHECK" in txt or True, "problems are flagged inline")
 
 # a token is NEVER in the repository — it is public
-for fname in ("dose_app.py", "dose_voice.py", "DOSE.sh", ".gitignore"):
+# A real token is a prefix followed by a long run of token
+# characters. The bare prefixes appear legitimately in the validator
+# that REJECTS bad ones, so match the shape, not the word.
+import re as _re2                                            # noqa: E402
+TOKEN_RX = _re2.compile(r"(ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{20,}")
+for fname in ("dose_app.py", "dose_voice.py", "dose_nlu.py", "DOSE.sh",
+              ".gitignore"):
     body = open(os.path.join(ROOT, fname), errors="ignore").read()
-    ok("ghp_" not in body and "github_pat_" not in body,
-       "%s contains no GitHub token" % fname)
+    hits = [h for h in TOKEN_RX.findall(body)]
+    ok(not hits, "%s contains no GitHub token" % fname)
+# and the pattern really does catch one
+ok(TOKEN_RX.search("github_pat_" + "A" * 60),
+   "the check would catch a real token if one were committed")
 gi = open(os.path.join(ROOT, ".gitignore"), errors="ignore").read()
 ok("github_token" in gi, "the token path is gitignored")
 ok("audit-" in gi, "and so are saved audit reports")
@@ -331,6 +340,60 @@ draw_a = src_a.split("def _draw_audit")[1].split("\n    def ")[0]
 ok("SEND TO GITHUB" in draw_a, "there is a button for it")
 ok("_post_audit" in draw_a, "wired to the poster")
 ok("_audit_status" in draw_a, "and the result is shown on screen")
+
+print("== 6b. getting a token onto the device ==")
+# Typing a 93-character token on a touchscreen keyboard is not a plan.
+# A USB stick is.
+ok(app._looks_like_token("github" + "_pat_" + "A" * 60),
+   "a fine-grained token is recognised")
+ok(app._looks_like_token("ghp_" + "B" * 36), "a classic token too")
+for junk in ("", "   ", "hello", "x" * 10, "ghp_" + "A" * 400,
+             "ghp_with space", "not_a_token_at_all_but_long_enough"):
+    ok(not app._looks_like_token(junk),
+       "rejected as a token: %r" % junk[:24])
+
+usb = _tf3.mkdtemp()
+stick = os.path.join(usb, "MYSTICK")
+os.makedirs(stick, exist_ok=True)
+good = "github" + "_pat_" + "C" * 60
+with open(os.path.join(stick, "github_token"), "w") as f:
+    f.write(good + "\n")
+
+apphome = _tf3.mkdtemp()
+os.makedirs(os.path.join(apphome, "dose-home-station"), exist_ok=True)
+mod.APP_DIR = os.path.join(apphome, "dose-home-station")
+app.USB_ROOTS = (usb,)
+app.AUDIT_TOKEN_PATHS = (os.path.join(apphome, "none"),)
+got = app.import_usb_token()
+ok(got == good, "a token on a USB stick is imported")
+dest = os.path.join(mod.APP_DIR, "github_token")
+ok(os.path.exists(dest), "and stored on the device")
+ok(oct(os.stat(dest).st_mode)[-3:] == "600",
+   "with permissions locked down (%s)"
+   % oct(os.stat(dest).st_mode)[-3:])
+
+# junk on a stick is not imported
+os.unlink(dest)
+with open(os.path.join(stick, "github_token"), "w") as f:
+    f.write("this is not a token")
+ok(app.import_usb_token() is None, "junk on a stick is ignored")
+ok(not os.path.exists(dest), "and nothing is stored")
+
+# and _audit_token falls back to the stick
+with open(os.path.join(stick, "github_token"), "w") as f:
+    f.write(good)
+ok(app._audit_token() == good,
+   "asking for a token checks the stick automatically")
+
+SRC2 = open(os.path.join(ROOT, "dose_app.py"), errors="ignore").read()
+drawa = SRC2.split("def _draw_audit")[1].split("\n    def ")[0]
+ok("personal-access-tokens" in drawa,
+   "the page shows the exact GitHub page to make one on")
+ok("Issues" in drawa, "and which permission it needs")
+ok("USB" in drawa, "and how to get it onto the station")
+SH2 = open(os.path.join(ROOT, "DOSE.sh"), errors="ignore").read()
+ok("/media/" in SH2 and "github_token" in SH2,
+   "and launch imports one off a stick too, so it is a one-time job")
 
 print("== 7. EVERY turn is logged ==")
 import dose_voice as _dvl                                   # noqa: E402

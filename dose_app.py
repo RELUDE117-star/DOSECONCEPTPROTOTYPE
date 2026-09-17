@@ -3590,10 +3590,61 @@ class DoseApp:
         threading.Thread(target=do_download, daemon=True).start()
 
     def _finish_update(self):
-        self._update_status_text = "Updated! Restarting..."
-        if self.mode == "settings":
+        """Files are in. Now finish the ACTUAL job.
+
+        The button used to replace .py files and restart, and that was
+        it. Anything a new version needed — a python package, a speech
+        model, the voice detector — was left to a shell script the
+        user had to find and run, and the screen said so. That is the
+        one thing they cannot do from the station in front of them, so
+        the button now finishes the whole job itself and only restarts
+        once there is nothing left to fetch."""
+        self._update_status_text = "Updated — finishing setup…"
+        if self.mode in ("settings", "sysinfo"):
             self._draw_frame()
-        self.root.after(2000, self._restart_app)
+        self.root.after(200, self._update_finish_setup)
+
+    def _update_finish_setup(self):
+        """Install and download whatever the new version needs."""
+        def work():
+            steps = []
+            try:
+                missing = dict(self.missing_voice_deps())
+            except Exception:
+                missing = {}
+            if missing:
+                steps.append("libraries")
+                try:
+                    self._ensure_python_deps()
+                except Exception:
+                    pass
+            # models: voice, speech, and the voice detector
+            try:
+                vdir = os.path.expanduser("~/dose-home-station/voice")
+                import glob as _g
+                if not _g.glob(os.path.join(vdir, "*.onnx")) or \
+                        not _g.glob(os.path.join(vdir, "vosk-model*")):
+                    steps.append("models")
+                    self._voice_download_models(force=True)
+            except Exception:
+                pass
+            try:
+                if self.voice is not None:
+                    self.voice.fetch_vad_model()
+                    self.voice.ensure_upgraded_models()
+            except Exception:
+                pass
+            self._update_status_text = (
+                "Updated — %s installing in the background. Restarting…"
+                % ", ".join(steps) if steps
+                else "Updated! Restarting…")
+
+        threading.Thread(target=work, daemon=True,
+                         name="update-finish").start()
+        # Restart regardless: the downloads continue after the restart
+        # and report themselves on the audit page. A station that will
+        # not come back up is worse than one still fetching a model.
+        self.root.after(2500, self._restart_app)
 
     def _restart_app(self):
         try:
@@ -4103,8 +4154,8 @@ class DoseApp:
                     except Exception:
                         failed.append(pkg)
                 if sudo_blocked:
-                    status = ("can't install: sudo needs a password "
-                              "— run DOSE.sh once to finish")
+                    status = ("can't install audio tools without a "
+                              "password — everything else still works")
                 elif _sh.which("arecord"):
                     status = ("audio tools installed ✓"
                               + (" (optional missing: %s)"
@@ -4803,12 +4854,16 @@ class DoseApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # The app installs and downloads all of these ITSELF — the UPDATE
+    # button now finishes the whole job, so telling the user to go and
+    # run a shell script was both wrong and the only thing they could
+    # not do from the screen in front of them.
     _VOICE_HINTS = {
-        "audio library not installed": "run DOSE.sh to finish setup",
-        "vosk not installed": "run DOSE.sh to finish setup",
-        "piper not installed": "run DOSE.sh to finish setup",
-        "speech model missing": "run DOSE.sh to download models",
-        "voice model missing": "run DOSE.sh to download models",
+        "audio library not installed": "installing…",
+        "vosk not installed": "installing…",
+        "piper not installed": "installing…",
+        "speech model missing": "downloading…",
+        "voice model missing": "downloading…",
         "no microphone detected": "plug the USB microphone in",
         "microphone failed to open": "reseat the USB microphone",
     }
@@ -4819,7 +4874,7 @@ class DoseApp:
         if getattr(self, "_voice_downloading", False):
             return "Voice: downloading speech models… (a few minutes)"
         if self.voice is None:
-            return "Voice: run DOSE.sh to finish setup"
+            return "Voice: starting…"
         if not self.voice.available:
             hint = self._VOICE_HINTS.get(self.voice.reason)
             if hint:
@@ -5238,6 +5293,12 @@ class DoseApp:
     # description is how we went round in circles; this replaces the
     # description with data.
     def _open_audit(self):
+        # a stick may have been plugged in since last time
+        try:
+            if not self._audit_token():
+                pass
+        except Exception:
+            pass
         # Don't record "audit" as the screen to go back to — opening it
         # twice would trap CLOSE on this page.
         if self.mode != "audit":
@@ -5425,6 +5486,56 @@ class DoseApp:
         lines.append("")
         return "\n".join(lines)
 
+    # Where a USB stick gets mounted on Raspberry Pi OS.
+    USB_ROOTS = ("/media", "/mnt", "/run/media")
+    TOKEN_FILENAMES = ("github_token", "dose_github_token",
+                       "github_token.txt", "dose_token.txt")
+
+    def import_usb_token(self):
+        """Pick up a token from a USB stick, automatically.
+
+        Typing a 93-character token on a touchscreen keyboard is
+        miserable, and there is no reason to: drop a file called
+        github_token on any USB stick, plug it in, and the station
+        copies it to its own storage with the permissions locked down.
+        Returns the token if one was imported."""
+        import glob as _g
+        pats = []
+        for root in self.USB_ROOTS:
+            for name in self.TOKEN_FILENAMES:
+                pats.append(os.path.join(root, "*", name))
+                pats.append(os.path.join(root, "*", "*", name))
+        for pat in pats:
+            for path in _g.glob(pat):
+                try:
+                    tok = open(path).read().strip()
+                except Exception:
+                    continue
+                if not self._looks_like_token(tok):
+                    continue
+                try:
+                    dest = os.path.join(APP_DIR, "github_token")
+                    os.makedirs(APP_DIR, exist_ok=True)
+                    with open(dest, "w") as f:
+                        f.write(tok)
+                    os.chmod(dest, 0o600)
+                    self._audit_status = (
+                        "token imported from USB — you can remove the "
+                        "stick")
+                    return tok
+                except Exception:
+                    continue
+        return None
+
+    @staticmethod
+    def _looks_like_token(tok):
+        """A GitHub token, roughly. Catches an empty or obviously
+        wrong file before it is stored and used."""
+        tok = (tok or "").strip()
+        if len(tok) < 20 or len(tok) > 255 or " " in tok:
+            return False
+        return tok.startswith(("ghp_", "github_pat_", "gho_", "ghs_"))
+
     def _audit_token(self):
         for cand in self.AUDIT_TOKEN_PATHS:
             try:
@@ -5435,7 +5546,8 @@ class DoseApp:
                         return tok
             except Exception:
                 continue
-        return None
+        # nothing stored — is there a stick plugged in?
+        return self.import_usb_token()
 
     def _post_audit(self):
         """Save the audit, and post it to GitHub if a token is present.
@@ -5463,8 +5575,9 @@ class DoseApp:
             tok = self._audit_token()
             if not tok:
                 self._audit_done(
-                    "%s · add a token to post: see "
-                    "dose-home-station/github_token" % saved)
+                    "%s · to post: github.com/settings/personal-access-"
+                    "tokens -> Issues:write -> save it as 'github_token'"
+                    " on a USB stick and plug it in" % saved)
                 return
             try:
                 import urllib.request
@@ -5537,6 +5650,27 @@ class DoseApp:
                     anchor="nw")
                 y[col] += 12
             y[col] += 6
+
+        # Say plainly whether posting is possible, and if not, the
+        # exact steps — on the screen in front of you, not in a
+        # README you would have to go and find.
+        have_tok = False
+        try:
+            have_tok = bool(self._audit_token())
+        except Exception:
+            pass
+        if have_tok:
+            note = "GitHub: ready — SEND TO GITHUB posts this as an issue"
+            note_col = "#2ECC71"
+        else:
+            note = ("To post: make a token at github.com/settings/"
+                    "personal-access-tokens (Issues: write), save it in "
+                    "a file named 'github_token' on a USB stick, plug "
+                    "it in, reopen this page. Until then it saves to "
+                    "dose-home-station/audit-latest.txt")
+            note_col = "#F1C40F"
+        c.create_text(42, 392, text=note, font=self.font_tiny,
+                      fill=note_col, anchor="nw", width=590)
 
         status = getattr(self, "_audit_status", "")
         if status:

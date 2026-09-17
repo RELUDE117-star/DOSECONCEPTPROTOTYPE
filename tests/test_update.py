@@ -153,6 +153,55 @@ with tempfile.TemporaryDirectory() as tmp:
     ok(open(os.path.join(here, "dose_app.py"), "rb").read() == OLD,
        "missing module leaves the install untouched")
 
+# ── 5. the button FINISHES THE JOB ───────────────────────────────────
+# It used to replace .py files and restart, and that was it. Anything
+# the new version needed — a python package, a speech model, the voice
+# detector — was left to a shell script the user had to find and run,
+# and the screen told them to. That is the ONE thing they cannot do
+# from the station in front of them.
+SRC = open(os.path.join(ROOT, "dose_app.py"), errors="ignore").read()
+fin = SRC.split("def _finish_update")[1].split("\n    def ")[0]
+ok("_update_finish_setup" in fin,
+   "finishing an update runs the setup step")
+setup = SRC.split("def _update_finish_setup")[1].split("\n    def ")[0]
+ok("_ensure_python_deps" in setup,
+   "which installs any missing python packages")
+ok("_voice_download_models" in setup,
+   "downloads any missing speech/voice models")
+ok("fetch_vad_model" in setup, "and the voice detector")
+ok("_restart_app" in setup,
+   "then restarts — regardless, so a slow download can never leave "
+   "the station down")
+ok("threading.Thread" in setup,
+   "with the work off the UI thread")
+
+# and nothing may tell the user to go and run a shell script
+code_lines = [ln for ln in SRC.split("\n")
+              if not ln.lstrip().startswith("#")]
+# only USER-FACING strings count — a comment or a variable name
+# mentioning the script is fine
+hints = [ln.strip() for ln in code_lines
+         if "DOSE.sh" in ln and '"' in ln
+         and ("run DOSE.sh" in ln or "Run DOSE.sh" in ln)]
+ok(not hints,
+   "nothing on screen tells the user to run DOSE.sh (%d found)"
+   % len(hints))
+for ln in hints[:3]:
+    print("    still says:", ln[:70])
+
+ok('"speech model missing": "downloading…"' in SRC
+   or "downloading" in SRC.split("_VOICE_HINTS")[1][:400],
+   "a missing model reads as 'downloading', because that is what is "
+   "actually happening")
+
+# the fetch order is unchanged and still API-first
+fetch = SRC.split("def _fetch_repo_file")[1].split("\n    def ")[0]
+ok("api.github.com" in fetch,
+   "the GitHub API is still tried first — never CDN-stale")
+ok("nocache" in fetch, "with a cache-busted raw fallback")
+ok("api_only" in fetch,
+   "and auto-updates can demand the authoritative source")
+
 print()
 print("update suite: %d passed, %d failed" % (PASSED, FAILED))
 if FAILED:
