@@ -1836,8 +1836,9 @@ class DoseApp:
             ("Voice Assistant", 4, "toggle", "voice_enabled",
              self.settings.get("voice_enabled", True)),
             # Added below the fold — the list scrolls now.
-            ("Run Full Audit Test", 5, "button", "selftest", None),
-            ("Tune To This Room", 6, "button", "calibrate", None),
+            ("Audit / Diagnostics", 5, "button", "audit", None),
+            ("Run Full Audit Test", 6, "button", "selftest", None),
+            ("Tune To This Room", 7, "button", "calibrate", None),
         ]
 
         # ── SCROLLING ────────────────────────────────────────────────
@@ -1925,6 +1926,9 @@ class DoseApp:
                 by = y + (row_h - bh) // 2
                 cap, act, sub = {
                     "update": ("UPDATE", self._on_update_pressed, None),
+                    "audit": ("OPEN", self._open_audit,
+                              "Everything measured on this device — "
+                              "send it to GitHub"),
                     "selftest": ("RUN", self._open_selftest,
                                  "Say ten phrases — scores itself and "
                                  "says what to fix"),

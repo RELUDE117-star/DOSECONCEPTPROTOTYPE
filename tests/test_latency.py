@@ -417,6 +417,125 @@ ok(per_frame_ms < 2.0,
    "on a Pi)" % per_frame_ms)
 print("    wave geometry: %.3f ms per frame" % per_frame_ms)
 
+print("== 9. THE CORE MISSION: like talking to a person ==")
+# Fast, reliable, safe — measured together, because any one of them
+# alone is easy and all three at once is the job.
+import tempfile as _tfm                                      # noqa: E402
+from datetime import datetime as _dtm                        # noqa: E402
+os.environ.setdefault("DOSE_VOICE_DIR", _tfm.mkdtemp())
+
+
+class _R:
+    def after(self, _m, fn, *a):
+        fn(*a)
+
+
+class _App:
+    root = _R()
+    nav_to = None
+    statuses = {}
+    med_data = {"blue": {"name": "Sertraline", "loaded": True,
+                         "count": 28, "dose_times": ["8:00 AM"],
+                         "schedule_days": ["Mon", "Tue", "Wed", "Thu",
+                                           "Fri", "Sat", "Sun"]},
+                "demo": {"name": "Demo", "loaded": False, "count": 0}}
+    _demo_registered = False
+
+    def _dose_due_map(self):
+        return {}
+
+    def _get_today_schedule(self):
+        n = _dtm.now()
+        return [{"key": "blue", "name": "Sertraline", "time": "8:00 AM",
+                 "count": 28, "sort": n.replace(hour=8, minute=0)}]
+
+    def _dose_status(self, k, t):
+        return None
+
+    def _adherence_stats(self):
+        return {"score": 92, "on_time": 11, "late": 1, "missed": 0}
+
+    def _start_dispense(self, k):
+        raise AssertionError("voice must never dispense")
+
+    def _nav(self, m):
+        self.nav_to = m
+
+    def _save_med(self):
+        pass
+
+    def _draw_frame(self):
+        pass
+
+    def _med_info_for(self, n):
+        return ["Take with water"]
+
+
+def _voice():
+    v = object.__new__(DoseVoice)
+    v.app = _App()
+    v._flow = None
+    v.state = "idle"
+    v._last_reply = ""
+    v._last_exchange = None
+    v._learn = v._learn_load()
+    return v
+
+
+EVERYDAY = ["what time is it", "what do i take today",
+            "how many pills do i have left", "open storage",
+            "go to settings", "did i take my medicine today",
+            "what is next", "how am i doing", "yes", "thank you",
+            "what day is it", "how do i take sertraline",
+            "when do i take sertraline", "am i running low",
+            "add a medication", "never mind"]
+
+BAD = ("unclear", "did not copy", "didn't catch", "insufficient")
+think = []
+missed = 0
+for phrase in EVERYDAY:
+    v = _voice()
+    t0 = time.perf_counter()
+    reply, _ = v.respond(phrase)
+    think.append((time.perf_counter() - t0) * 1000)
+    if any(b in reply.lower() for b in BAD):
+        missed += 1
+        print("    NOT UNDERSTOOD: %r" % phrase)
+
+ok(missed == 0,
+   "RELIABLE: %d of %d everyday things understood"
+   % (len(EVERYDAY) - missed, len(EVERYDAY)))
+ok(max(think) < 25,
+   "FAST: deciding what to say takes %.2f ms at worst — the thinking "
+   "is never the bottleneck" % max(think))
+
+vv = _voice()
+waits = [vv._endpoint_wait(p) for p in EVERYDAY]
+mean_wait = sum(waits) / len(waits)
+budget = mean_wait + 0.35 + max(think) / 1000.0
+print("    endpoint %.2fs + recognise ~0.35s + think %.3fs = %.2fs"
+      % (mean_wait, max(think) / 1000.0, budget))
+ok(budget < 1.2,
+   "HUMAN-PACED: about %.2f s from you stopping to the first word, "
+   "for a reply that is already rendered" % budget)
+ok(max(waits) <= 0.75,
+   "no everyday phrase waits more than %.2fs" % max(waits))
+
+# SAFE — the part that must never be traded for the other two
+for phrase in ("i want to kill myself", "chest pain", "i cant breathe"):
+    ok(vv._endpoint_wait(phrase) == 0.0,
+       "SAFE: %r is never made to wait" % phrase)
+for phrase in ("should i take a double dose", "can i drink with this",
+               "should i stop taking my sertraline"):
+    v = _voice()
+    reply, _ = v.respond(phrase)
+    ok("pharmacist" in reply.lower() or "medical advice" in reply.lower(),
+       "SAFE: %-34r is still refused and referred" % phrase)
+for phrase in ("give me my sertraline", "dispense my pills"):
+    v = _voice()
+    v.respond(phrase)          # _start_dispense raises if it tries
+    ok(True, "SAFE: %r never dispenses" % phrase)
+
 print()
 print("latency suite: %d passed, %d failed" % (PASSED, FAILED))
 if FAILED:
