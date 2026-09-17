@@ -296,8 +296,16 @@ ok(dv.INFER_THREADS == max(1, min(2, dv.CPU_CORES - 2)),
    % (dv.INFER_THREADS, dv.CPU_CORES))
 ok(os.environ.get("OMP_NUM_THREADS") == str(dv.INFER_THREADS),
    "the ONNX/BLAS runtimes honour that core budget")
-ok("faster_whisper" not in VOICE_SRC.replace("faster-whisper", ""),
-   "the slow recogniser is gone — Moonshine alone does the hearing")
+# Moonshine still does the hearing in the common case; the stronger
+# model runs ONLY when the fast one returns something that does not
+# parse, so it never sits in the normal latency path.
+bt = VOICE_SRC.split("def _better_transcribe")[1].split("\n    def ")[0]
+ok(bt.index("_moonshine_transcribe") < bt.index("_whisper_transcribe"),
+   "the fast recogniser answers first")
+ok("self._usable(ms)" in bt,
+   "the slower one runs only when that answer is unusable")
+ok("cpu_threads=INFER_THREADS" in VOICE_SRC,
+   "and it is loaded with the Pi's core budget when it does")
 ok("TMP_AUDIO_DIR" in VOICE_SRC and "/dev/shm" in VOICE_SRC,
    "transient audio goes to RAM, not the SD card")
 ok('dir=TMP_AUDIO_DIR' in VOICE_SRC,

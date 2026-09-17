@@ -180,6 +180,10 @@ if [ ! -f "$VOICE_DIR/.bt_ready3" ]; then
     python3 -m pip install --break-system-packages --no-deps openwakeword==0.6.0 2>/dev/null \
         || python3 -m pip install --no-deps openwakeword==0.6.0 2>/dev/null || true
     python3 -m pip install --break-system-packages scipy scikit-learn tqdm 2>/dev/null || true
+    # The stronger recogniser, used when the fast one cannot make out
+    # what was said. Accuracy matters more than the extra download.
+    python3 -m pip install --break-system-packages faster-whisper 2>/dev/null \
+        || python3 -m pip install faster-whisper 2>/dev/null || true
     python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
         || python3 -m pip install useful-moonshine-onnx 2>/dev/null || true
     touch "$VOICE_DIR/.bt_ready3"
@@ -405,13 +409,15 @@ except Exception as e:
     print("  Speech library missing (%s) — the app will install it." % e)
     sys.exit(0)
 
+# MOST ACCURATE FIRST, tiny only as a last resort. The app orders
+# them the same way; if these disagree the app downloads a second
+# model on first use and the wait lands on the user.
 want = {"tiny": "TINY_STREAMING", "base": "BASE_STREAMING",
         "small": "SMALL_STREAMING", "medium": "MEDIUM_STREAMING"}.get(
-    os.environ.get("DOSE_STT_ARCH", "base"), "BASE_STREAMING")
-# try what we want, then whatever this build of the package has
-order = [want] + [a for a in ("BASE_STREAMING", "TINY_STREAMING",
-                              "SMALL_STREAMING", "MEDIUM_STREAMING")
-                  if a != want]
+    os.environ.get("DOSE_STT_ARCH", ""), "")
+order = ([want] if want else []) + [
+    a for a in ("MEDIUM_STREAMING", "SMALL_STREAMING",
+                "BASE_STREAMING", "TINY_STREAMING") if a != want]
 order = [a for a in order if hasattr(mv.ModelArch, a)]
 if not order:
     print("  This speech package has no usable model types.")

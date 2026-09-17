@@ -3885,10 +3885,11 @@ class DoseApp:
         ("rapidfuzz", "rapidfuzz"),          # phonetic drug matching
         ("jellyfish", "jellyfish"),          # metaphone
         ("audioop", "audioop-lts"),          # py3.13 removed audioop
-        # the ONE recogniser. faster-whisper was removed: ~1 s per
-        # command on a Pi 4 against Moonshine's ~0.25 s, which is the
-        # entire latency budget spent on one step.
-        ("moonshine_voice", "moonshine-voice"),
+        ("moonshine_voice", "moonshine-voice"),   # fast recogniser
+        # The stronger model, used only when the fast one comes back
+        # with something that does not parse. Giving up quickly is not
+        # an accuracy strategy.
+        ("faster_whisper", "faster-whisper"),
     )
 
     def _swap_voice_engine(self):
@@ -4516,7 +4517,7 @@ class DoseApp:
                             [sys.executable, "-m", "pip", "install",
                              "sounddevice", "vosk", "piper-tts", "qrcode", "audioop-lts",
                              "rapidfuzz", "jellyfish", "moonshine-voice",
-                             "useful-moonshine-onnx"],
+                             "faster-whisper", "useful-moonshine-onnx"],
                             capture_output=True, timeout=900, env=env)
                 except Exception:
                     pass

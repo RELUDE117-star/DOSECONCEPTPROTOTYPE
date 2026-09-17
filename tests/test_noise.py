@@ -221,6 +221,7 @@ trim = object.__new__(DoseVoice)
 trim._capture_level = None
 trim._forced_card = None
 trim._clip_recent = 0.0
+trim._speech_level = 2000.0        # a healthy voice level
 
 # not enough audio yet -> no judgement
 trim._blocks_seen, trim._clip_blocks = 10, 10
@@ -242,13 +243,14 @@ ok(trim.trim_capture_if_clipping() is None,
 # persistent clipping -> stepped down, and it keeps stepping
 trim._blocks_seen, trim._clip_blocks = 200, 40     # 20%
 lvl = trim.trim_capture_if_clipping()
-ok(lvl == 70,
-   "persistent clipping DOES step it down as a safety net (-> %s%%)"
-   % lvl)
-for _ in range(10):
+ok(lvl == 90,
+   "persistent clipping DOES step it down as a safety net, starting "
+   "from whatever the mixer holds (-> %s%%)" % lvl)
+for _ in range(12):
+    trim._speech_level = 2000.0
     trim._blocks_seen, trim._clip_blocks = 200, 40
     trim.trim_capture_if_clipping()
-ok(trim._capture_level == 40,
+ok(trim._capture_level == 30,
    "it keeps stepping down to a floor, never to nothing (%d%%)"
    % trim._capture_level)
 
@@ -272,7 +274,59 @@ for nf, word in ((40, "quiet"), (250, "some background"),
     ok(word in hot._room_note(),
        "a floor of %-5d reads as %r" % (nf, hot._room_note()))
 
-print("== 9. the noise level is visible, not guesswork ==")
+print("== 9. nothing boosts the input any more ==")
+# Three boosts were multiplying: ALSA capture at 100%, the PipeWire
+# source at 150%, and a software auto-gain of up to 40x. That is why
+# speech arrived at nearly full scale.
+ok(dv.SOURCE_VOLUME <= 1.0,
+   "the input is at unity (%.2f), never boosted past it"
+   % dv.SOURCE_VOLUME)
+ok("1.5 if self._is_usb_name" not in VSRC,
+   "the 150%% boost for USB mics is gone")
+ok('"Audio/Sink", 0.9' not in VSRC,
+   "the speaker is no longer pinned near maximum")
+ok(0.4 <= dv.SINK_VOLUME <= 0.8,
+   "it sits at %.0f%% — audible across a room without deafening the "
+   "microphone inches away" % (dv.SINK_VOLUME * 100))
+ok(dv.TARGET_SPEECH_RMS <= 4000,
+   "speech should land around %.0f, a third of full scale, with "
+   "headroom" % dv.TARGET_SPEECH_RMS)
+
+print("== 10. a level a PREVIOUS version pinned gets walked back ==")
+# ALSA remembers the mixer across runs, so deciding to stop touching
+# the level does not undo a 100% that an earlier version wrote.
+hot2 = object.__new__(DoseVoice)
+hot2._capture_level = None
+hot2._forced_card = None
+hot2._clip_recent = 0.0
+hot2._speech_level = 9955.0        # what the device actually reported
+hot2._blocks_seen, hot2._clip_blocks = 200, 0
+lvl = hot2.trim_capture_if_clipping()
+ok(lvl is not None and lvl < 100,
+   "speech at 9955 is recognised as too hot and the mic is turned "
+   "down (-> %s%%)" % lvl)
+ok(hot2._speech_level == 0.0,
+   "and the measurement restarts, so it steps once per reading "
+   "instead of overshooting")
+for _ in range(12):
+    hot2._speech_level = 9955.0
+    hot2._blocks_seen, hot2._clip_blocks = 200, 0
+    hot2.trim_capture_if_clipping()
+ok(hot2._capture_level == 30,
+   "it keeps walking down to a floor (%d%%)" % hot2._capture_level)
+
+# a healthy level is never touched
+calm = object.__new__(DoseVoice)
+calm._capture_level = None
+calm._forced_card = None
+calm._clip_recent = 0.0
+calm._speech_level = 2600.0
+calm._blocks_seen, calm._clip_blocks = 200, 0
+ok(calm.trim_capture_if_clipping() is None,
+   "a healthy voice level is left completely alone")
+ok(calm._capture_level is None, "the mixer is not touched at all")
+
+print("== 11. the noise level is visible, not guesswork ==")
 VSRC = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
 ok("self._snr" in VSRC,
    "the signal-to-noise ratio is measured every block")

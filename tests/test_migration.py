@@ -206,13 +206,20 @@ ok(names(d) == [],
 ok(not os.listdir(os.path.join(d, "cache")),
    "and every clip she rendered goes with her")
 
-print("== 8. one recogniser ==")
-ok("faster_whisper" not in vsrc.replace("faster-whisper", ""),
-   "faster-whisper is gone from the engine")
-ok("faster-whisper" not in sh, "and from the setup script")
-ok("faster_whisper" not in src.replace("faster-whisper", ""),
-   "and from the app's dependency list")
+print("== 8. two recognisers, with distinct jobs ==")
+# Whisper was removed for speed and is back for accuracy. It is not a
+# competing recogniser: it only runs when the fast one returns
+# something that does not parse.
 ok("moonshine" in vsrc.lower(), "Moonshine does the hearing")
+ok("faster_whisper" in vsrc,
+   "Whisper is available for the cases it cannot make out")
+bt = vsrc.split("def _better_transcribe")[1].split("\n    def ")[0]
+ok(bt.index("_moonshine_transcribe") < bt.index("_whisper_transcribe"),
+   "in that order")
+ok("self._usable(ms)" in bt,
+   "and only when the first answer is unusable")
+ok("faster-whisper" in sh, "the setup script installs it")
+ok("faster-whisper" in src, "so does the app's dependency list")
 
 print("== 9. exactly ONE voice model is ever downloaded ==")
 # Pin the source. The voice is the HuggingFace Piper hfc_female

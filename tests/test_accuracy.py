@@ -377,6 +377,54 @@ for phrase in ("how do i take atorvastatin",
        or "pharmacist" in reply.lower(),
        "%-38r still defers to the pharmacist" % phrase)
 
+print("== 14. nonsense gets a SECOND OPINION, not a shrug ==")
+# Reported from the device: saying "storage" came back as "(urk)" and
+# the station answered "insufficient data". A recogniser handed poor
+# audio does not return nothing — it returns confident nonsense. The
+# fix is to notice the transcript means nothing and re-run the SAME
+# audio through a stronger model, not to give up faster.
+_v._med_names = lambda: ["Sertraline", "Atorvastatin"]
+
+USABLE = ["open storage", "what time is it", "how many pills do i have "
+          "left", "did i take my sertraline", "yes", "no",
+          "sertraline", "what do i take today"]
+for t in USABLE:
+    ok(_v._usable(t), "usable transcript: %r" % t)
+
+JUNK = ["urk", "", "a", "mmm hmm hmm hmm hmm hmm",
+        "the the the the the the the", "zzzzzzzzzz"]
+for t in JUNK:
+    ok(not _v._usable(t),
+       "recognised as meaningless, worth re-hearing: %r" % t)
+
+VSRC = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
+bt = VSRC.split("def _better_transcribe")[1].split("\n    def ")[0]
+ok(bt.index("_moonshine_transcribe") < bt.index("_whisper_transcribe"),
+   "the fast model goes first, so the common case stays fast")
+ok("self._usable(ms)" in bt,
+   "its answer is only accepted if it actually means something")
+ok("_whisper_transcribe" in bt,
+   "otherwise the stronger model gets a turn on the SAME audio")
+ok("if ms and not" in bt and "if wh:" in bt,
+   "and if neither parses, whichever heard something is still "
+   "returned so it can be matched or asked about")
+
+pr = VSRC.split("def _probe_moonshine")[1].split("\n    def ")[0]
+ok("small.en" in pr,
+   "the stronger model is whisper small.en, an accuracy step up")
+ok('compute_type="int8"' in pr, "in int8 so it fits a Pi 4")
+ok("_whisper_prompt" in VSRC,
+   "and it is told this cabinet's medication names, the same way "
+   "the fast model is given key terms")
+
+ms = VSRC.split("def _moonshine_v2")[1].split("\n    def ")[0]
+ok(ms.index("MEDIUM_STREAMING") < ms.index("TINY_STREAMING"),
+   "speech models are tried MOST ACCURATE first — the old order fell "
+   "back to tiny, which is why 'storage' came back as noise")
+ok("ACCURACY_ORDER" in ms, "deliberately, not by accident")
+ok("tiny — the only one available" in ms,
+   "and if tiny really is all there is, it says so on screen")
+
 print()
 print("accuracy suite: %d passed, %d failed" % (PASSED, FAILED))
 if FAILED:

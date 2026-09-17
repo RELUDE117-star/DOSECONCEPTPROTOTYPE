@@ -164,6 +164,27 @@ ENDPOINT_MAX_UTTERANCE = float(os.environ.get("DOSE_MAX_UTTERANCE", "8.0"))
 # rejects a quiet voice from across the room, which is the trade a
 # far-field microphone exists to avoid.
 NOISE_GATE_RATIO = float(os.environ.get("DOSE_NOISE_GATE", "3.0"))
+
+# ── LEVELS ───────────────────────────────────────────────────────────
+# Unity on the way in. Every boost here multiplies with the ALSA
+# capture level and with the software auto-gain, and three of those at
+# once is how speech ended up arriving at nearly full scale.
+SOURCE_VOLUME = float(os.environ.get("DOSE_SOURCE_VOLUME", "1.0"))
+
+# The speaker is NOT run at maximum. It sits inches from the
+# microphone: every dB of it that leaks back in is noise the
+# recogniser has to hear the person through, and it raises the
+# measured room floor so real speech has to clear a higher gate.
+# Loud enough to hear across a room, quiet enough not to deafen the
+# thing listening for you.
+SINK_VOLUME = float(os.environ.get("DOSE_SINK_VOLUME", "0.65"))
+
+# Where speech should land. The recogniser wants a healthy signal with
+# headroom, not a hot one — around a third of full scale.
+TARGET_SPEECH_RMS = float(os.environ.get("DOSE_TARGET_RMS", "3000"))
+# Above this the input is too hot and the hardware level gets stepped
+# down, whatever a previous run left behind in the mixer.
+HOT_SPEECH_RMS = float(os.environ.get("DOSE_HOT_RMS", "6000"))
 # the shortest of the graces, used where a single number is needed
 ENDPOINT_SILENCE = ENDPOINT_STABLE
 
@@ -659,7 +680,9 @@ class DoseVoice:
     # board via DOSE_STT_ARCH.
     _MS_ARCHS = {"tiny": "TINY_STREAMING", "base": "BASE_STREAMING",
                  "small": "SMALL_STREAMING", "medium": "MEDIUM_STREAMING"}
-    STT_ARCH = os.environ.get("DOSE_STT_ARCH", "base")
+    # "" means: take the most accurate model this package offers.
+    # Set DOSE_STT_ARCH to tiny/base/small/medium to pin one.
+    STT_ARCH = os.environ.get("DOSE_STT_ARCH", "")
 
     def _moonshine_v2(self):
         """Load the recogniser, and say WHY if it won't load.
@@ -682,12 +705,19 @@ class DoseVoice:
             self._ms_reason = "library not installed (%s)" % e
             return None
 
-        # What this build of the package actually has, best first.
-        wanted = self._MS_ARCHS.get(self.STT_ARCH, "BASE_STREAMING")
-        order = [wanted] + [a for a in ("BASE_STREAMING", "TINY_STREAMING",
-                                        "SMALL_STREAMING",
-                                        "MEDIUM_STREAMING")
-                            if a != wanted]
+        # MOST ACCURATE FIRST. This used to fall back BASE -> TINY,
+        # which is backwards: when the model we asked for was not in
+        # the package, the station quietly ended up on the weakest one
+        # available and stayed there. Tiny is the reason "storage" came
+        # back as noise. Speed is already won elsewhere — recognition
+        # runs during the pause you take anyway — so the order here is
+        # biggest to smallest, and tiny is the last resort rather than
+        # the first fallback.
+        ACCURACY_ORDER = ("MEDIUM_STREAMING", "SMALL_STREAMING",
+                          "BASE_STREAMING", "TINY_STREAMING")
+        wanted = self._MS_ARCHS.get(self.STT_ARCH, "")
+        order = ([wanted] if wanted else []) + [
+            a for a in ACCURACY_ORDER if a != wanted]
         available = [a for a in order if hasattr(mv.ModelArch, a)]
         if not available:
             available = [a for a in dir(mv.ModelArch)
@@ -714,9 +744,13 @@ class DoseVoice:
                                                 "0.15"))})
                 self._ms_v2 = tr
                 self._ms_arch_used = arch_name
-                if arch_name != wanted:
+                if wanted and arch_name != wanted:
                     self._ms_reason = "using %s (%s unavailable)" % (
-                        arch_name.split("_")[0].lower(), wanted)
+                        arch_name.split("_")[0].lower(),
+                        wanted.split("_")[0].lower())
+                elif arch_name == "TINY_STREAMING":
+                    # never let this be invisible again
+                    self._ms_reason = "tiny — the only one available"
                 return tr
             except Exception as e:
                 last = "%s: %s" % (arch_name.split("_")[0].lower(),
@@ -768,21 +802,111 @@ class DoseVoice:
             return ""
 
     def _probe_moonshine(self):
-        """ONE recogniser: Moonshine Base (Useful Sensors, MIT, ONNX).
+        """Moonshine for speed, Whisper for when speed was not enough.
 
-        faster-whisper used to run in front of it. It was removed: on a
-        Pi 4 it takes roughly a second on a short command, which is the
-        whole latency budget spent on the step that Moonshine does in
-        ~0.25 s at comparable accuracy for this vocabulary — especially
-        once the cabinet's own drug names are supplied as key terms.
-        Carrying both also meant two downloads, two failure modes, and
-        no way to tell which one had answered."""
-        self._whisper = None       # deliberately gone
+        I removed faster-whisper earlier to win latency, and that was
+        right at the time. It is wrong now: when the station cannot
+        make out what you said, the answer is not to give up faster.
+        Whisper small.en is a materially stronger model than whatever
+        Moonshine arch a given package ships, and — crucially — it only
+        runs when the first attempt produced something unusable. The
+        common case stays fast; the failures get the better model.
+        Both are MIT and run entirely on-device."""
+        self._whisper = None
+        self._whisper_size = ""
+        try:
+            from faster_whisper import WhisperModel
+            # small.en is the accuracy step up from base.en and still
+            # fits a Pi 4 in int8. It is loaded lazily-ish here because
+            # it is only used on the hard cases.
+            size = os.environ.get("DOSE_WHISPER_SIZE", "small.en")
+            self._whisper = WhisperModel(
+                size, device="cpu", compute_type="int8",
+                cpu_threads=INFER_THREADS, num_workers=1)
+            self._whisper_size = size
+        except Exception:
+            self._whisper = None
         try:
             import moonshine_onnx
             self._moonshine = moonshine_onnx
         except Exception:
             self._moonshine = None
+
+    def _usable(self, text):
+        """Did that transcript actually mean anything here?
+
+        A recogniser handed poor audio does not return nothing — it
+        returns confident nonsense. "(urk)" for "storage" is the shape
+        of it. So a transcript only counts as usable if it parses to a
+        real intent, names a medication, or is one of the short
+        answers a conversation depends on. Anything else is worth a
+        second opinion from a stronger model."""
+        t = (text or "").strip()
+        if len(t) < 2:
+            return False
+        try:
+            if _nlu_mod is not None and _nlu_mod.looks_hallucinated(t):
+                return False
+            # Ask the SAME matcher that would answer it. Navigation,
+            # the time, the personality lines and the add-medication
+            # flow all live here rather than in the pattern set, so
+            # checking only the pattern set would send a perfectly good
+            # "open storage" off for a second opinion it doesn't need.
+            norm = " " + re.sub(r"[^a-z0-9' ]", " ",
+                                t.lower()).strip() + " "
+            norm = re.sub(r"\s+", " ", norm)
+            hit = self._match_builtin(norm)
+            if hit and hit[0]:
+                return True
+        except Exception:
+            pass
+        if _nlu_mod is None:
+            return True
+        try:
+            if _nlu_mod.is_yes(t) or _nlu_mod.is_no(t):
+                return True
+            intent = _nlu_mod.parse(t, self._med_names())
+            return intent.name != "unknown" or bool(
+                intent.med or intent.suggestion)
+        except Exception:
+            return True
+
+    def _whisper_transcribe(self, audio_bytes):
+        """The stronger model, for when the fast one came back with
+        something that meant nothing."""
+        if self._whisper is None or not audio_bytes:
+            return ""
+        path = None
+        try:
+            path = self._write_wav(audio_bytes)
+            segs, _info = self._whisper.transcribe(
+                path, language="en", beam_size=5,
+                vad_filter=True, condition_on_previous_text=False,
+                initial_prompt=self._whisper_prompt())
+            return self._clean_text(" ".join(sg.text for sg in segs))
+        except Exception:
+            return ""
+        finally:
+            if path:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+
+    def _whisper_prompt(self):
+        """Tell Whisper what this device is about. Naming the actual
+        medications and the words the station listens for biases it
+        the same way Moonshine's key terms do, which is most of the
+        difference on drug names."""
+        try:
+            meds = ", ".join(self._med_names()[:12])
+        except Exception:
+            meds = ""
+        base = ("Medication reminder device. Commands: what time is it, "
+                "what do I take today, how many pills do I have left, "
+                "did I take my medicine, open storage, open settings, "
+                "go to user, next dose.")
+        return (base + " Medications: " + meds) if meds else base
 
     def _write_wav(self, audio_bytes):
         # RAM, not the SD card: on a Pi this saves tens of ms per
@@ -803,16 +927,32 @@ class DoseVoice:
         return " ".join(text.split())
 
     def _better_transcribe(self, audio_bytes, vosk_text):
-        """Transcribe the captured command with Moonshine — the one
-        recogniser — falling back to the live listener's own transcript
-        if it is unavailable, so the station never goes deaf."""
+        """Work out what was actually said, trying harder when the
+        first answer means nothing.
+
+        Order matters. Moonshine is fast and biased toward this
+        cabinet's drug names, so it goes first and usually settles it.
+        If what comes back does not parse to anything — the "(urk)"
+        case — the stronger Whisper model gets a turn on the SAME
+        audio. Giving up quickly is not an accuracy strategy."""
         if not audio_bytes:
             return vosk_text
-        # Moonshine v2, with THIS device's drug names as key terms —
-        # the measured fix for medication-name mishears.
+        # 1) Moonshine v2, with THIS device's drug names as key terms —
+        #    the measured fix for medication-name mishears.
         ms = self._moonshine_transcribe(audio_bytes)
+        if ms and self._usable(ms):
+            return ms
+        # 2) it gave us nothing we can act on — ask the better model
+        wh = self._whisper_transcribe(audio_bytes)
+        if wh and self._usable(wh):
+            self._whisper_saves = getattr(self, "_whisper_saves", 0) + 1
+            return wh
+        # 3) neither parsed. Prefer whichever actually said something,
+        #    so a near-miss can still be matched or asked about.
         if ms and not (_nlu_mod and _nlu_mod.looks_hallucinated(ms)):
             return ms
+        if wh:
+            return wh
         # the same model through the plain ONNX package
         if self._moonshine is not None:
             path = None
@@ -1329,7 +1469,7 @@ class DoseVoice:
         # user's explicit pick wins, if it's still present
         forced = getattr(self, "_forced_sink", None)
         if forced and forced in sinks:
-            self._make_default(forced, "Audio/Sink", 0.9)
+            self._make_default(forced, "Audio/Sink", SINK_VOLUME)
             self._out_cache = (now, forced)
             return forced
         target = None
@@ -1345,7 +1485,7 @@ class DoseVoice:
                 target = physical[0]
         if target:
             # make it the system default too, unmuted and audible
-            self._make_default(target, "Audio/Sink", 0.9)
+            self._make_default(target, "Audio/Sink", SINK_VOLUME)
         self._out_cache = (now, target)
         return target
 
@@ -1448,11 +1588,16 @@ class DoseVoice:
             physical = [s for s in srcs if "bluez" not in s.lower()]
             target = physical[0] if physical else None
         if target:
-            # C-Media USB mini mics (SunFounder etc.) are very quiet
-            # at stock gain — boost them well past unity
-            self._make_default(target, "Audio/Source",
-                               1.5 if self._is_usb_name(target)
-                               else 1.0)
+            # UNITY. No boost past 100%.
+            #
+            # This was 150% for any USB mic, chosen for a very quiet
+            # C-Media mini capsule. Stacked on top of an ALSA capture
+            # level of 100% and a software auto-gain, it is why speech
+            # was arriving at nearly full scale: three separate boosts
+            # multiplying each other. A microphone that hears properly
+            # needs none of them, and an overdriven signal is harder to
+            # recognise than a quiet one, not easier.
+            self._make_default(target, "Audio/Source", SOURCE_VOLUME)
         return target
 
     def _engage_bt_mic(self):
@@ -1618,7 +1763,7 @@ class DoseVoice:
         self._forced_sink = sink
         self._out_cache = None
         try:
-            self._make_default(sink, "Audio/Sink", 0.9)
+            self._make_default(sink, "Audio/Sink", SINK_VOLUME)
         except Exception:
             pass
 
@@ -2165,24 +2310,38 @@ class DoseVoice:
         blocks hit full scale and step the hardware down until they
         don't. Called periodically; does nothing when the level is fine.
         """
-        seen = self._blocks_seen
+        seen = getattr(self, "_blocks_seen", 0)
         if seen < 80:                    # ~10 s of audio, enough to judge
             return None
+        speech = getattr(self, "_speech_level", 0.0)
+        if not speech and not self._clip_blocks:
+            return None                  # no speech seen yet
         ratio = self._clip_blocks / float(seen)
         self._clip_ratio = ratio
         self._clip_blocks = 0
         self._blocks_seen = 0
         # more than 2% of blocks saturating is not a loud moment, it is
         # a level that is set too high
-        if ratio <= 0.02:
+        # Two reasons to turn the input down. Hard clipping is the
+        # obvious one. The other is a signal that is simply too HOT —
+        # speech arriving near full scale is not clipped, but it has no
+        # headroom, it drags the measured room floor up with it, and
+        # it is harder for the recogniser than a clean signal at a
+        # third of full scale.
+        #
+        # This also repairs a mixer that an EARLIER version of this
+        # software pinned to 100%. ALSA remembers that setting across
+        # runs, so simply deciding to stop touching the level does not
+        # undo it — the level has to be actively walked back down.
+        hot = speech > HOT_SPEECH_RMS
+        if ratio <= 0.02 and not hot:
             return None
-        # We do not normally set the level at all. If the input is
-        # genuinely saturating, start from a sensible number and work
-        # down from there — this is a safety net for a capsule that
-        # arrives overdriven, not the normal path.
-        cur = self._capture_level if self._capture_level else 80
-        if cur > 40:
-            self._capture_level = max(40, cur - 10)
+        cur = self._capture_level if self._capture_level else 100
+        if cur > 30:
+            self._capture_level = max(30, cur - 10)
+            # re-learn at the new level rather than stepping again on
+            # stale measurements
+            self._speech_level = 0.0
             card = (self._forced_card or (None,))[0]
             if card is not None:
                 try:
@@ -2212,6 +2371,12 @@ class DoseVoice:
         # Say what we are doing to the signal, not just what the room
         # sounds like — "boost 1.0x" means the microphone is being left
         # alone, which is the healthy state.
+        lvl = self._speech_level
+        if lvl > HOT_SPEECH_RMS:
+            return "voice too hot (%.0f) — turning the mic down" % lvl
+        if lvl:
+            return "%s · voice %.0f, boost %.1fx" % (
+                word, lvl, self._agc_ceiling())
         return "%s (%.0f, boost %.1fx)" % (
             word, nf, self._agc_ceiling())
 
@@ -2373,6 +2538,12 @@ class DoseVoice:
                               or ("downloading…" if attempt < 2
                                   else "download failed — retrying"))
                 rows.append(("Speech", ms is not None, detail[:40]))
+
+                # 2b) The stronger model, for the hard cases.
+                rows.append(("Speech+", self._whisper is not None,
+                             ("whisper %s" % self._whisper_size)
+                             if self._whisper is not None
+                             else "not installed"))
 
                 # 3) The live listener. This is NOT a competing
                 #    recogniser: it is what puts your words on the
