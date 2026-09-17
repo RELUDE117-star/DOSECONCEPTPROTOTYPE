@@ -489,8 +489,12 @@ ok("MEDIUM" not in ord_txt and "SMALL" not in ord_txt,
 ok(ord_txt.index("BASE") < ord_txt.index("TINY"),
    "base preferred over tiny — the largest that stays quick here")
 ok("ACCURACY_ORDER" in ms, "deliberately, not by accident")
-ok("tiny — the only one available" in ms,
-   "and if tiny really is all there is, it says so on screen")
+ok("tiny — weak, Whisper checks it" in ms,
+   "and if tiny really is all there is — as it is on the device — it "
+   "says so on screen rather than hiding it")
+ok("_fast_is_weak" in ms,
+   "and marks the fast answers as provisional, so the stronger model "
+   "gets a turn on anything that does not parse cleanly")
 
 print("== 15. it acts on what you MEANT, without hijacking ==")
 # The phonetic command vocabulary runs dead last. An earlier version

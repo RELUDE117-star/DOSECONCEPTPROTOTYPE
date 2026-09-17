@@ -84,6 +84,69 @@ while f2.nf < TAP * 0.7 and blocks < int(60 / BLOCK_S):
 ok(blocks * BLOCK_S < 8.0,
    "and it gets there in %.1f s, not minutes" % (blocks * BLOCK_S))
 
+print("== 1b. THE WORST BUG: talking must not make it DEAF ==")
+# From the device: "room too loud to hear you - voice 2462" with the
+# room actually quiet, and 1 of 10 turns understood.
+#
+# The floor updated on EVERY block, speech included. Talking for a few
+# seconds dragged it up toward the level of the speech itself, the
+# gate rose with it, and the voice could no longer clear the gate it
+# had just raised. The station went deaf BECAUSE somebody spoke to it.
+VOICE_RMS = 2462.0          # exactly what the device reported
+
+
+def floor_after_speech(learn_from_speech, seconds=5.0):
+    nf = 60.0
+    for _ in range(int(seconds / BLOCK_S)):
+        prev_gate = max(40.0, nf * dv.NOISE_GATE_RATIO)
+        is_voice = VOICE_RMS > prev_gate
+        if VOICE_RMS < nf:
+            nf = nf * 0.95 + VOICE_RMS * 0.05
+        elif learn_from_speech or not is_voice:
+            nf = nf * 0.98 + VOICE_RMS * 0.02
+        if not learn_from_speech:
+            nf = min(nf, dv.NOISE_FLOOR_MAX)
+    return nf
+
+
+old_nf = floor_after_speech(True)
+new_nf = floor_after_speech(False)
+ok(VOICE_RMS <= max(40.0, old_nf * dv.NOISE_GATE_RATIO),
+   "the old behaviour really did go deaf (floor %.0f, gate %.0f, "
+   "voice %.0f)" % (old_nf, old_nf * dv.NOISE_GATE_RATIO, VOICE_RMS))
+ok(VOICE_RMS > max(40.0, new_nf * dv.NOISE_GATE_RATIO),
+   "five seconds of talking no longer raises the bar above your own "
+   "voice (floor %.0f, gate %.0f)"
+   % (new_nf, new_nf * dv.NOISE_GATE_RATIO))
+
+VSRC0 = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
+ing = VSRC0.split("THE NOISE FLOOR MUST NOT LEARN")[1][:2000]
+ok("prev_gate" in ing,
+   "the gate is computed from the PREVIOUS floor, so a block is "
+   "judged before it can influence what judges it")
+ok("elif not is_voice:" in ing,
+   "and the floor learns only from what is not a voice")
+ok("NOISE_FLOOR_MAX" in ing,
+   "with a hard ceiling — being a bit noisy is recoverable, being "
+   "deaf is not")
+ok(dv.NOISE_FLOOR_MAX * dv.NOISE_GATE_RATIO < 3000,
+   "the ceiling keeps the gate at %.0f, below an ordinary speaking "
+   "voice" % (dv.NOISE_FLOOR_MAX * dv.NOISE_GATE_RATIO))
+
+# a genuinely loud room still raises it — Silero calls a tap not-speech
+nf = 60.0
+for _ in range(int(20 / BLOCK_S)):
+    prev_gate = max(40.0, nf * dv.NOISE_GATE_RATIO)
+    is_voice = False                      # a tap: loud, not a voice
+    if TAP < nf:
+        nf = nf * 0.95 + TAP * 0.05
+    elif not is_voice:
+        nf = nf * 0.98 + TAP * 0.02
+    nf = min(nf, dv.NOISE_FLOOR_MAX)
+ok(nf > 200,
+   "a running tap still raises the floor (%.0f) — it is speech that "
+   "is excluded, not noise" % nf)
+
 print("== 2. THE BUG: one quiet moment must not pin the gate ==")
 # Room is noisy, then a brief dip, then noisy again. The old code set
 # the floor to that dip instantly and took ~4 minutes to recover, so

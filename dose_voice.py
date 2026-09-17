@@ -171,6 +171,13 @@ ENDPOINT_MAX_UTTERANCE = float(os.environ.get("DOSE_MAX_UTTERANCE", "8.0"))
 # far-field microphone exists to avoid.
 NOISE_GATE_RATIO = float(os.environ.get("DOSE_NOISE_GATE", "3.0"))
 
+# The highest the learned room floor may go. At the default 3x ratio
+# this puts the gate at 2400 — a normal speaking voice arrives well
+# above that. Without a ceiling a loud room can raise the bar past
+# anything a person produces, and the station is then deaf until the
+# floor decays. Being a bit noisy is recoverable; being deaf is not.
+NOISE_FLOOR_MAX = float(os.environ.get("DOSE_NOISE_FLOOR_MAX", "800"))
+
 # How close a mis-transcribed request has to sound to a command before
 # we act on it. Measured: at anything from 70 to 80 this matches 11 of
 # 12 realistic mishears and never once fires on a medication name, a
@@ -1001,7 +1008,12 @@ class DoseVoice:
                         wanted.split("_")[0].lower())
                 elif arch_name == "TINY_STREAMING":
                     # never let this be invisible again
-                    self._ms_reason = "tiny — the only one available"
+                    self._ms_reason = "tiny — weak, Whisper checks it"
+                    # Tiny mishears often enough that its answers are
+                    # provisional: the stronger model gets a turn on
+                    # anything that is not a confident parse, which is
+                    # what _usable already decides.
+                    self._fast_is_weak = True
                 elif arch_name in ("MEDIUM_STREAMING",
                                    "SMALL_STREAMING"):
                     self._ms_reason = "%s — SLOW, set DOSE_STT_ARCH=base" \
@@ -3069,11 +3081,21 @@ class DoseVoice:
             except Exception:
                 pass
             silence = b"\x00\x00" * SAMPLE_RATE      # 1 s of nothing
-            # Warm the FAST model only. Whisper is deliberately left
-            # cold: loading it here would put its cost on every boot
-            # for something most turns never touch.
             try:
                 self._moonshine_transcribe(silence)
+            except Exception:
+                pass
+            # WARM WHISPER TOO — in the background, at low priority.
+            #
+            # I made this lazy to save RAM at boot, and that moved the
+            # cost somewhere far worse: into the middle of a
+            # conversation. The device logged a 26.6-second turn where
+            # it "heard nothing" — that was the first escalation
+            # paying to load the model while somebody stood there
+            # waiting. Loading it here costs nothing anyone can feel.
+            try:
+                self._load_whisper()
+                self._whisper_transcribe(silence)
             except Exception:
                 pass
             try:
@@ -3409,12 +3431,34 @@ class DoseVoice:
                 # Down over ~2 s so it follows a room going quiet;
                 # up over ~6 s so a burst of speech does not raise it,
                 # but a tap running does within seconds.
+                # ── THE NOISE FLOOR MUST NOT LEARN FROM YOUR VOICE
+                # This updated on EVERY block, speech included. Talking
+                # for three seconds dragged the floor up toward the
+                # level of the speech itself, the gate went up with it,
+                # and your voice could no longer clear the gate it had
+                # just raised. The station went deaf BECAUSE you spoke
+                # to it — the device reported "room too loud to hear
+                # you · voice 2462" with the room supposedly quiet, and
+                # 1 of 10 turns understood.
+                #
+                # The gate is computed from the PREVIOUS floor, the
+                # block is judged against it, and the floor learns only
+                # from what is not a voice. A tap or a fan still raises
+                # it — Silero calls those not-speech — but you cannot.
                 nf = self._nfloor
+                prev_gate = max(40.0, nf * NOISE_GATE_RATIO)
+                is_voice = rms > prev_gate and self.is_speech(data, True)
                 if rms < nf:
-                    nf = nf * 0.95 + rms * 0.05
-                else:
-                    nf = nf * 0.98 + rms * 0.02
-                self._nfloor = max(1.0, nf)
+                    nf = nf * 0.95 + rms * 0.05      # room went quiet
+                elif not is_voice:
+                    nf = nf * 0.98 + rms * 0.02      # louder, not a voice
+                # else: this is speech. Learn nothing from it.
+                #
+                # And a hard ceiling, so no amount of noise can raise
+                # the gate past the point where ordinary speech could
+                # never clear it. Being a bit noisy is recoverable;
+                # being deaf is not.
+                self._nfloor = max(1.0, min(nf, NOISE_FLOOR_MAX))
                 # Speech has to stand clear of the room, not merely be
                 # audible in it.
                 prof = getattr(self, "_cal_profile", None)
@@ -3451,7 +3495,7 @@ class DoseVoice:
                     self._turn_snr = max(getattr(self, "_turn_snr", 0.0),
                                          self._snr)
                 energetic = rms > gate
-                if energetic and self.is_speech(data, True):
+                if energetic and is_voice:
                     # stamp the moment: the endpointer uses this to cut
                     # the instant the user stops talking
                     self._last_voice_ts = time.time()
@@ -5307,6 +5351,11 @@ class DoseVoice:
                      "later", "good night", "goodnight", "night"),
         "sorry": ("sorry", "my bad", "oops", "whoops", "excuse me",
                   "pardon me"),
+        # Asked constantly when it is not working, and it used to be
+        # the one question it could not answer.
+        "hearme": ("can you hear me", "do you hear me", "are you there",
+                   "are you listening", "you there", "hello are you "
+                   "there", "can you hear me now", "did you hear me"),
         "filler": ("um", "uh", "erm", "hmm", "hm", "er", "well",
                    "so", "anyway"),
     }
@@ -5315,7 +5364,7 @@ class DoseVoice:
         """Whole-phrase only — 'no thanks' ends a conversation, 'no I
         meant the blue one' does not."""
         phrase = " ".join((t or "").lower().replace("'", "").split())
-        if not phrase or len(phrase.split()) > 3:
+        if not phrase or len(phrase.split()) > 5:
             return None
         for kind, words in self.SMALL_TALK.items():
             if phrase in {w.replace("'", "") for w in words}:
@@ -5337,6 +5386,8 @@ class DoseVoice:
             return "Goodbye, Ryan.", False
         if kind == "sorry":
             return "No need to apologise, Ryan.", True
+        if kind == "hearme":
+            return "I can hear you, Ryan. Go ahead.", True
         # filler — they are still thinking; say as little as possible
         return "Go on.", True
 
