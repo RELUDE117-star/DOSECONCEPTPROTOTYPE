@@ -3576,14 +3576,19 @@ class DoseVoice:
                         rows.append(("Speech (cloud)", True,
                                      "off (DOSE_STT_MODE=local)"))
                     elif not provs:
-                        rows.append(("Speech (cloud)", True,
-                                     "no key — add groq_key or hf_token"))
+                        rows.append(("Speech (cloud)", False,
+                                     "unavailable — install gradio_client "
+                                     "or add groq_key"))
                     else:
                         on = self._is_online()
+                        # note when HF is anonymous vs on the user's quota
+                        tag = "+".join(provs)
+                        if "hf" in provs and not _cs.hf_is_authenticated():
+                            tag = tag.replace("hf", "hf(anon)")
                         rows.append(("Speech (cloud)", True,
-                                     "%s · %s" % ("+".join(provs),
-                                     "online (PRIMARY)" if on
-                                     else "offline — using local")))
+                                     "%s · %s" % (tag,
+                                     "online (PRIMARY — Pi offloaded)"
+                                     if on else "offline — using local")))
                 except Exception:
                     pass
 

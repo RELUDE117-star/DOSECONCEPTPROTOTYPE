@@ -45,16 +45,23 @@ ok("gradio_client" in src, "HF free ZeroGPU path via gradio_client")
 ok("rate_limited" in src,
    "a rate-limit is caught and flagged, not paid around")
 
-print("== 2. credentials never assumed; providers gated on them ==")
+print("== 2. cloud offloads by default; local is the fallback ==")
 for k in ("GROQ_API_KEY", "HF_TOKEN", "HUGGINGFACE_TOKEN",
           "HUGGING_FACE_HUB_TOKEN", "GROQ_MODEL"):
     os.environ.pop(k, None)
-# with nothing configured, there are no providers and no crash
-ok(cloud.available_providers() == [],
-   "no credential -> no cloud provider is offered")
+# HF ZeroGPU counts as available with NO token (anonymous) as long as
+# gradio_client is installed — so a fresh device offloads out of the box.
+# Groq still needs its free key.
+provs = cloud.available_providers()
+ok("groq" not in provs, "Groq is NOT offered without its free key")
+ok(("hf" in provs) == cloud._gradio_client_available(),
+   "HF is offered iff gradio_client is present, token optional "
+   "(anonymous ZeroGPU) — the Pi offloads with zero config")
+ok(cloud.hf_is_authenticated() is False,
+   "with no token, HF runs on the shared anonymous free quota")
 w, allr = cloud.cloud_transcribe("/does/not/exist.wav", order=[])
 ok(not w.ok and "no cloud provider" in w.error,
-   "cloud_transcribe with nothing configured returns a clean error")
+   "an EMPTY order returns a clean error, never a crash")
 
 print("== 3. Groq: free-tier behaviour, graceful failure ==")
 r = cloud.transcribe_groq("/tmp/none.wav", api_key="")

@@ -303,18 +303,40 @@ def _hf_call_cached(cli, space):
     return got
 
 
+def _gradio_client_available():
+    try:
+        import gradio_client            # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 # ── the fallback chain ────────────────────────────────────────────────
 def available_providers():
-    """Which cloud providers are actually configured (have a
-    credential). Order preserved from provider_order()."""
+    """Which cloud providers can be used right now, in preference order.
+
+    The point of this whole module is that the Pi stops doing the STT
+    work — so the Hugging Face ZeroGPU Space counts as available WITHOUT
+    a token: gradio_client can call a public Space anonymously (a token
+    only raises the free daily quota). That means a fresh device offloads
+    to the cloud out of the box, with nothing to configure. Groq still
+    needs its free key, because there is no anonymous Groq. Set
+    DOSE_STT_MODE=local to force everything back onto the Pi."""
     have = []
-    gk, ht = groq_key(), hf_token()
+    gk = groq_key()
+    hf_ok = _gradio_client_available()      # token optional
     for name in provider_order():
         if name == "groq" and gk:
             have.append("groq")
-        elif name == "hf" and ht:
+        elif name == "hf" and hf_ok:
             have.append("hf")
     return have
+
+
+def hf_is_authenticated():
+    """True when HF requests will draw on the user's own (larger) free
+    quota rather than the shared anonymous pool."""
+    return bool(hf_token())
 
 
 def cloud_transcribe(wav_path, order=None, language="en",
