@@ -260,6 +260,42 @@ ok(hosts <= {"huggingface.co", "alphacephei.com"},
    "models come from exactly two free hosts: her voice and the live "
    "listener (found %s)" % ", ".join(sorted(hosts)))
 
+print("== 10. 'Speech: downloading...' must not be a dead end ==")
+# Reported from the device: Speech sat on "downloading..." forever.
+# The loader asked for ONE exact arch name and swallowed every error,
+# so a package whose build lacks that name — or a download that never
+# finished — looked identical to one still in progress.
+loader = vsrc.split("def _moonshine_v2")[1].split("\n    def ")[0]
+ok("hasattr(mv.ModelArch" in loader,
+   "it checks which model types the installed package actually has")
+ok(loader.count("except Exception") >= 2 and "self._ms_reason" in loader,
+   "and records WHY it failed instead of swallowing it")
+ok("for arch_name in available" in loader,
+   "it falls back through the available types rather than giving up")
+ok("library not installed" in loader,
+   "a missing library is reported as that, not as 'downloading'")
+
+status = vsrc.split('rows.append(("Speech"')[0][-900:]
+ok("_ms_reason" in status,
+   "Settings shows the real reason on the Speech row")
+ok("download failed" in vsrc,
+   "and stops claiming 'downloading' once it plainly is not")
+
+sh_dl = sh.split("Speech model: finish downloading")[1][:2000]
+ok("get_model_for_language" in sh_dl,
+   "the setup script downloads it BEFORE the app opens")
+ok(sh.index("Speech model: finish downloading")
+   < sh.index("Starting DOSE"),
+   "before launch, not after")
+ok(sh.index("Speech model: finish downloading")
+   > sh.index(".bt_ready3"),
+   "and outside the one-time setup block, so a failed download is "
+   "retried on the next launch")
+ok("hasattr(mv.ModelArch" in sh_dl,
+   "with the same fallback through available model types")
+ok("sys.exit(0)" in sh_dl,
+   "a failure never blocks the app from starting")
+
 print()
 print("migration suite: %d passed, %d failed" % (PASSED, FAILED))
 if FAILED:

@@ -164,7 +164,72 @@ f.run(TAP, int(10 / BLOCK_S))
 ok(not f.feed(TAP),
    "steady room noise never clears the gate, so it is never amplified")
 
-print("== 7. the noise level is visible, not guesswork ==")
+print("== 7. the microphone is not turned up past clipping ==")
+# The capture gain was pinned at 100%. On a cheap USB capsule that is
+# past the clipping point: a clap saturates, room tone reads hot, and
+# a clipped waveform carries LESS for the recogniser than a quiet one.
+from dose_voice import DoseVoice                            # noqa: E402
+
+VSRC = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
+cap = VSRC.split("attempts = []")[1][:900]
+ok('"100%", "cap"' not in cap,
+   "capture gain is no longer slammed to 100%")
+ok("self._capture_level" in cap,
+   "it is set from a measured level instead")
+
+trim = object.__new__(DoseVoice)
+trim._capture_level = 80
+trim._forced_card = None
+trim._clip_recent = 0.0
+ok(trim._capture_level <= 85,
+   "the starting level leaves headroom (%d%%)" % trim._capture_level)
+
+# not enough audio yet -> no judgement
+trim._blocks_seen, trim._clip_blocks = 10, 10
+ok(trim.trim_capture_if_clipping() is None,
+   "it will not judge the level on a handful of blocks")
+
+# a clean signal -> left alone
+trim._blocks_seen, trim._clip_blocks = 200, 0
+ok(trim.trim_capture_if_clipping() is None,
+   "a clean input is left alone")
+ok(trim._capture_level == 80, "and the level is unchanged")
+
+# an occasional loud moment is NOT a level problem
+trim._blocks_seen, trim._clip_blocks = 200, 3      # 1.5%
+ok(trim.trim_capture_if_clipping() is None,
+   "one loud moment does not trigger a change")
+
+# persistent clipping -> stepped down, and it keeps stepping
+trim._blocks_seen, trim._clip_blocks = 200, 40     # 20%
+lvl = trim.trim_capture_if_clipping()
+ok(lvl == 70, "persistent clipping turns the mic down (80 -> %s)" % lvl)
+for _ in range(10):
+    trim._blocks_seen, trim._clip_blocks = 200, 40
+    trim.trim_capture_if_clipping()
+ok(trim._capture_level == 40,
+   "it keeps stepping down to a floor, never to nothing (%d%%)"
+   % trim._capture_level)
+
+ok("audioop.max" in VSRC and "31000" in VSRC,
+   "clipping is measured from the samples, not guessed")
+
+print("== 8. it says when the input is too hot ==")
+hot = object.__new__(DoseVoice)
+hot._capture_level = 70
+hot._nfloor = 50.0
+hot._clip_recent = __import__("time").time()
+note = hot._room_note()
+ok("too hot" in note,
+   "recent clipping is reported plainly: %r" % note)
+hot._clip_recent = 0.0
+for nf, word in ((40, "quiet"), (250, "some background"),
+                 (600, "noisy"), (2000, "too loud")):
+    hot._nfloor = nf
+    ok(word in hot._room_note(),
+       "a floor of %-5d reads as %r" % (nf, hot._room_note()))
+
+print("== 9. the noise level is visible, not guesswork ==")
 VSRC = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
 ok("self._snr" in VSRC,
    "the signal-to-noise ratio is measured every block")

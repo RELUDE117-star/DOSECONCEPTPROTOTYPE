@@ -180,24 +180,6 @@ if [ ! -f "$VOICE_DIR/.bt_ready3" ]; then
     python3 -m pip install --break-system-packages --no-deps openwakeword==0.6.0 2>/dev/null \
         || python3 -m pip install --no-deps openwakeword==0.6.0 2>/dev/null || true
     python3 -m pip install --break-system-packages scipy scikit-learn tqdm 2>/dev/null || true
-    # Pre-download the ONE recogniser so first run is instant and fully
-    # offline afterwards. This must match the arch the app loads
-    # (BASE_STREAMING) or the first thing you say still pays for the
-    # download. The moonshine-voice TTS is deliberately NOT fetched:
-    # her voice is the Piper file below and there is no second
-    # synthesis engine to feed.
-    python3 - <<'PYEOF' 2>/dev/null || true
-import os
-try:
-    import moonshine_voice as mv
-    arch = {"tiny": "TINY_STREAMING", "base": "BASE_STREAMING",
-            "small": "SMALL_STREAMING", "medium": "MEDIUM_STREAMING"}.get(
-        os.environ.get("DOSE_STT_ARCH", "base"), "BASE_STREAMING")
-    mv.get_model_for_language("en", getattr(mv.ModelArch, arch))
-    print("  Moonshine speech model ready (%s)" % arch)
-except Exception:
-    print("  (Moonshine model will download on first run)")
-PYEOF
     python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
         || python3 -m pip install useful-moonshine-onnx 2>/dev/null || true
     touch "$VOICE_DIR/.bt_ready3"
@@ -407,6 +389,49 @@ Exec=/bin/bash $APP_DIR/DOSE.sh
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
+
+# ── Speech model: finish downloading BEFORE the app opens ──
+# This deliberately sits outside the one-time setup block and runs on
+# every launch until it succeeds. It used to be inside that block, run
+# once, and swallow every error — so a failed or interrupted download
+# left the app showing "Speech: downloading…" forever with nothing to
+# go on and no second attempt.
+echo "  Checking the speech model..."
+python3 - <<'PYEOF'
+import os, sys
+try:
+    import moonshine_voice as mv
+except Exception as e:
+    print("  Speech library missing (%s) — the app will install it." % e)
+    sys.exit(0)
+
+want = {"tiny": "TINY_STREAMING", "base": "BASE_STREAMING",
+        "small": "SMALL_STREAMING", "medium": "MEDIUM_STREAMING"}.get(
+    os.environ.get("DOSE_STT_ARCH", "base"), "BASE_STREAMING")
+# try what we want, then whatever this build of the package has
+order = [want] + [a for a in ("BASE_STREAMING", "TINY_STREAMING",
+                              "SMALL_STREAMING", "MEDIUM_STREAMING")
+                  if a != want]
+order = [a for a in order if hasattr(mv.ModelArch, a)]
+if not order:
+    print("  This speech package has no usable model types.")
+    sys.exit(0)
+
+for arch in order:
+    try:
+        print("  Downloading the speech model (%s)... this can take a "
+              "few minutes on first run." % arch.split("_")[0].lower())
+        sys.stdout.flush()
+        path, _a = mv.get_model_for_language("en",
+                                             getattr(mv.ModelArch, arch))
+        print("  Speech model ready: %s" % arch.split("_")[0].lower())
+        sys.exit(0)
+    except Exception as e:
+        print("  %s unavailable (%s)" % (arch.split("_")[0].lower(),
+                                         str(e)[:70]))
+print("  Speech model could not be downloaded — the app will keep "
+      "retrying in the background.")
+PYEOF
 
 # ── Pi tuning for a conversational assistant ──
 # On a stock Raspberry Pi the CPU sits in "ondemand" and idles at

@@ -662,28 +662,68 @@ class DoseVoice:
     STT_ARCH = os.environ.get("DOSE_STT_ARCH", "base")
 
     def _moonshine_v2(self):
+        """Load the recogniser, and say WHY if it won't load.
+
+        This used to ask for one exact arch name and swallow every
+        error, so a package whose build doesn't define that name — or
+        a download that never completed — looked identical to a
+        download still in progress. The station sat on "downloading…"
+        forever with nothing to go on. Now it tries the arch we want,
+        falls back through the ones the installed package actually
+        offers, and records the reason it failed."""
         if getattr(self, "_ms_v2", "unset") != "unset":
             return self._ms_v2
         self._ms_v2 = None
+        self._ms_reason = ""
+        self._ms_arch_used = ""
         try:
             import moonshine_voice as mv
-            arch_name = self._MS_ARCHS.get(self.STT_ARCH,
-                                           "BASE_STREAMING")
-            path, arch = mv.get_model_for_language(
-                "en", getattr(mv.ModelArch, arch_name))
-            boost = float(os.environ.get("KEYTERM_BOOST", "5"))
-            boost = max(1.0, min(boost, 6.0))   # 7+ measured to hallucinate
-            tr = mv.Transcriber(
-                model_path=path, model_arch=arch,
-                update_interval=float(
-                    os.environ.get("STT_UPDATE_INTERVAL", "0.25")),
-                options={"keyterm_boost": boost,
-                         "vad_window_duration": float(
-                             os.environ.get("STT_VAD_WINDOW", "0.15"))})
-            self._ms_v2 = tr
-        except Exception:
-            self._ms_v2 = None
-        return self._ms_v2
+        except Exception as e:
+            self._ms_reason = "library not installed (%s)" % e
+            return None
+
+        # What this build of the package actually has, best first.
+        wanted = self._MS_ARCHS.get(self.STT_ARCH, "BASE_STREAMING")
+        order = [wanted] + [a for a in ("BASE_STREAMING", "TINY_STREAMING",
+                                        "SMALL_STREAMING",
+                                        "MEDIUM_STREAMING")
+                            if a != wanted]
+        available = [a for a in order if hasattr(mv.ModelArch, a)]
+        if not available:
+            available = [a for a in dir(mv.ModelArch)
+                         if a.isupper() and not a.startswith("_")]
+        if not available:
+            self._ms_reason = "no speech model types in this package"
+            return None
+
+        last = ""
+        for arch_name in available:
+            try:
+                path, arch = mv.get_model_for_language(
+                    "en", getattr(mv.ModelArch, arch_name))
+                boost = float(os.environ.get("KEYTERM_BOOST", "5"))
+                # 7+ measured to hallucinate
+                boost = max(1.0, min(boost, 6.0))
+                tr = mv.Transcriber(
+                    model_path=path, model_arch=arch,
+                    update_interval=float(
+                        os.environ.get("STT_UPDATE_INTERVAL", "0.25")),
+                    options={"keyterm_boost": boost,
+                             "vad_window_duration": float(
+                                 os.environ.get("STT_VAD_WINDOW",
+                                                "0.15"))})
+                self._ms_v2 = tr
+                self._ms_arch_used = arch_name
+                if arch_name != wanted:
+                    self._ms_reason = "using %s (%s unavailable)" % (
+                        arch_name.split("_")[0].lower(), wanted)
+                return tr
+            except Exception as e:
+                last = "%s: %s" % (arch_name.split("_")[0].lower(),
+                                   str(e)[:60])
+                continue
+        self._ms_reason = last or "download did not complete"
+        return None
 
     def _moonshine_transcribe(self, audio_bytes):
         """Transcribe one captured utterance with this device's drug
@@ -862,11 +902,21 @@ class DoseVoice:
                                                "input source"))
             attempts = []
             if not playbackish:
+                # NOT 100%. A cheap USB capsule (C-Media CM108 and
+                # friends) is already past its clipping point at full
+                # capture gain: a clap saturates, room tone reads hot,
+                # and a clipped waveform is worse for the recogniser
+                # than a quiet one. Start with headroom and let
+                # _trim_capture() measure its way down from here if it
+                # still clips. The software auto-gain makes up the
+                # difference for a distant voice, and it cannot clip
+                # because it only lifts what is already below target.
+                lvl = "%d%%" % self._capture_level
                 attempts += [
-                    ["100%", "cap", "unmute"],
-                    ["100%", "on", "cap"],
+                    [lvl, "cap", "unmute"],
+                    [lvl, "on", "cap"],
                     ["cap"],
-                    ["100%", "unmute"],
+                    [lvl, "unmute"],
                 ]
             else:
                 attempts += [["90%", "unmute", "on"]]
@@ -1956,6 +2006,11 @@ class DoseVoice:
             self.warm_models()
         except Exception:
             pass
+        # watch the microphone level and turn it down if it saturates
+        try:
+            self.watch_input_level()
+        except Exception:
+            pass
         # hardware tuning (governor, core budget) — no root needed for
         # the parts that matter, and harmless everywhere else
         try:
@@ -2047,19 +2102,79 @@ class DoseVoice:
         ]
         return rows
 
+    def watch_input_level(self):
+        """Keep an eye on the microphone level for the first few
+        minutes, on its own worker.
+
+        It cannot be judged until audio has actually been flowing, and
+        it must not be tangled up with model downloads — an earlier
+        version put this in that loop and delayed the pre-rendered
+        replies by two minutes."""
+        def work():
+            try:
+                os.nice(10)
+            except Exception:
+                pass
+            for _ in range(30):                  # ~5 minutes
+                if self._stop.is_set():
+                    return
+                time.sleep(10)
+                try:
+                    self.trim_capture_if_clipping()
+                except Exception:
+                    pass
+        threading.Thread(target=work, daemon=True,
+                         name="input-level").start()
+
+    def trim_capture_if_clipping(self):
+        """Measure the input level and turn the microphone DOWN if it
+        is saturating.
+
+        The capture gain was being pinned at 100%, which on a cheap USB
+        capsule is past its clipping point — a clap saturates and room
+        tone reads hot. A clipped waveform carries less for the
+        recogniser than a quiet one, and no amount of software can put
+        back what the converter threw away. So: watch what fraction of
+        blocks hit full scale and step the hardware down until they
+        don't. Called periodically; does nothing when the level is fine.
+        """
+        seen = self._blocks_seen
+        if seen < 80:                    # ~10 s of audio, enough to judge
+            return None
+        ratio = self._clip_blocks / float(seen)
+        self._clip_ratio = ratio
+        self._clip_blocks = 0
+        self._blocks_seen = 0
+        # more than 2% of blocks saturating is not a loud moment, it is
+        # a level that is set too high
+        if ratio > 0.02 and self._capture_level > 40:
+            self._capture_level = max(40, self._capture_level - 10)
+            card = (self._forced_card or (None,))[0]
+            if card is not None:
+                try:
+                    self._max_capture(card)
+                except Exception:
+                    pass
+            return self._capture_level
+        return None
+
     def _room_note(self):
-        """Plain words for the ambient level, so the number means
-        something without knowing what an RMS is."""
+        """Plain words for what the microphone is actually getting, so
+        "it can't hear me" has somewhere to start."""
         nf = getattr(self, "_nfloor", 0.0)
-        if nf < 60:
+        # clipping is the more useful thing to say when it applies
+        if time.time() - getattr(self, "_clip_recent", 0) < 30:
+            return "input too hot (%d%%) — turning it down" % \
+                self._capture_level
+        if nf < 120:
             word = "quiet"
-        elif nf < 150:
+        elif nf < 400:
             word = "some background"
-        elif nf < 300:
-            word = "noisy"
+        elif nf < 900:
+            word = "noisy — speak closer"
         else:
-            word = "too loud — speak closer"
-        return "%s (%.0f)" % (word, nf)
+            word = "too loud to hear you"
+        return "%s (%.0f, mic %d%%)" % (word, nf, self._capture_level)
 
     def warm_models(self):
         """Run one throwaway inference through each recogniser at
@@ -2208,9 +2323,17 @@ class DoseVoice:
                 # 2) HEARING — Moonshine Base does the transcription.
                 self._ms_v2 = "unset"
                 ms = self._moonshine_v2()
-                rows.append(("Speech", ms is not None,
-                             "moonshine %s" % self.STT_ARCH
-                             if ms is not None else "downloading…"))
+                if ms is not None:
+                    detail = "moonshine %s" % (
+                        (self._ms_arch_used or "").split("_")[0].lower()
+                        or self.STT_ARCH)
+                else:
+                    # never leave it saying "downloading…" forever —
+                    # say what actually went wrong
+                    detail = (getattr(self, "_ms_reason", "")
+                              or ("downloading…" if attempt < 2
+                                  else "download failed — retrying"))
+                rows.append(("Speech", ms is not None, detail[:40]))
 
                 # 3) The live listener. This is NOT a competing
                 #    recogniser: it is what puts your words on the
@@ -2220,6 +2343,12 @@ class DoseVoice:
                 vok = bool(self._vosk_dir and os.path.isdir(self._vosk_dir))
                 rows.append(("Live listener", vok,
                              "on-screen text" if vok else "missing"))
+
+                # while we are here: is the microphone level too hot?
+                try:
+                    self.trim_capture_if_clipping()
+                except Exception:
+                    pass
 
                 self._model_status = rows
                 if all(r[1] for r in rows):
@@ -2306,6 +2435,11 @@ class DoseVoice:
         self._max_gain = float(os.environ.get("DOSE_MAX_GAIN", "40"))
         self._nfloor = 50.0      # learned ambient noise floor (RMS)
         self._snr = 0.0          # how far the last block stood above it
+        self._clip_blocks = 0    # blocks where the input saturated
+        self._blocks_seen = 0
+        self._clip_recent = 0.0
+        self._capture_level = int(os.environ.get("DOSE_CAPTURE_LEVEL",
+                                                 "80"))
         self._last_voice_ts = 0.0  # last block that carried real speech
 
         def ingest(data):
@@ -2361,6 +2495,17 @@ class DoseVoice:
                 # audible in it.
                 gate = max(40.0, self._nfloor * NOISE_GATE_RATIO)
                 self._snr = rms / max(1.0, self._nfloor)
+                # Is the input saturating? A clipped sample carries no
+                # information the recogniser can use, and it is what
+                # "even a clap is too loud" means.
+                try:
+                    peak = audioop.max(data, 2)
+                except Exception:
+                    peak = 0
+                if peak >= 31000:
+                    self._clip_blocks += 1
+                    self._clip_recent = time.time()
+                self._blocks_seen += 1
                 if rms > gate:                     # real signal, not hiss
                     # stamp the moment: the endpointer uses this to cut
                     # the instant the user stops talking
