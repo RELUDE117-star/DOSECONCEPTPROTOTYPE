@@ -404,6 +404,33 @@ def voice_integration():
         app.root.update()
         time.sleep(0.01)
     assert not app.canvas.find_withtag("voice_ov"), "panel never hid"
+    # room-calibration screen: opens, draws in every phase, closes
+    app._open_calibrate()
+    app.root.update()
+    assert app.mode == "calibrate"
+    for phase in ("idle", "room", "voice", "done", "failed"):
+        class _FakeCal:
+            CALIBRATION_LINES = ("Read this line.",)
+
+            def calibration_state(self, _p=phase):
+                return (_p, 1234.0, "note")
+
+            def start_calibration(self):
+                return True
+
+            def cancel_calibration(self):
+                pass
+        _real_voice = app.voice
+        app.voice = _FakeCal()
+        try:
+            app._draw_frame()
+            app.root.update()
+        finally:
+            app.voice = _real_voice
+    app._close_calibrate()
+    app.root.update()
+    assert app.mode != "calibrate"
+
     # med-info bridge
     lines = app._med_info_for("Atorvastatin")
     assert any("grapefruit" in l.lower() for l in lines)

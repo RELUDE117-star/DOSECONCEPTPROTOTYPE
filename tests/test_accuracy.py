@@ -399,13 +399,11 @@ for t in JUNK:
 
 VSRC = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
 bt = VSRC.split("def _better_transcribe")[1].split("\n    def ")[0]
-ok(bt.index("_moonshine_transcribe") < bt.index("_whisper_transcribe"),
-   "the fast model goes first, so the common case stays fast")
-ok("self._usable(ms)" in bt,
+ok("self._usable(wh)" in bt,
    "its answer is only accepted if it actually means something")
-ok("_whisper_transcribe" in bt,
-   "otherwise the stronger model gets a turn on the SAME audio")
-ok("if ms and not" in bt and "if wh:" in bt,
+ok("_moonshine_transcribe" in bt,
+   "otherwise the fast model gets a turn on the SAME audio")
+ok("if wh and not" in bt and "if ms and not" in bt,
    "and if neither parses, whichever heard something is still "
    "returned so it can be matched or asked about")
 
@@ -416,6 +414,31 @@ ok('compute_type="int8"' in pr, "in int8 so it fits a Pi 4")
 ok("_whisper_prompt" in VSRC,
    "and it is told this cabinet's medication names, the same way "
    "the fast model is given key terms")
+
+print("== 14b. Whisper does the hearing now ==")
+# The HuggingFace audio course builds its assistant's transcription
+# stage on Whisper (base.en on CPU, small.en as the upgrade). We had
+# the small streaming recogniser running first, and when its package
+# only shipped a tiny arch the station was listening with the weakest
+# model it had.
+import dose_voice as _dvm                                    # noqa: E402
+ok(_dvm.WHISPER_MODELS[0].startswith("distil-small")
+   or _dvm.WHISPER_MODELS[0].startswith("small"),
+   "the first choice is %r — small-class, not tiny"
+   % _dvm.WHISPER_MODELS[0])
+ok("tiny.en" in _dvm.WHISPER_MODELS[-1],
+   "tiny is the LAST resort, not the first fallback")
+ok(len(_dvm.WHISPER_MODELS) >= 3,
+   "with a chain to fall back through if one will not download")
+ok(bt.index("_whisper_transcribe") < bt.index("_moonshine_transcribe"),
+   "Whisper is asked FIRST now — accuracy is what is scarce, not "
+   "milliseconds")
+ok(_dvm.STT_THREADS >= _dvm.INFER_THREADS,
+   "transcription gets every core (%d of %d) because it is a short "
+   "burst, not continuous work"
+   % (_dvm.STT_THREADS, _dvm.CPU_CORES))
+ok(_dvm.STT_THREADS == _dvm.CPU_CORES,
+   "the whole Pi, for the part that decides whether it understood you")
 
 ms = VSRC.split("def _moonshine_v2")[1].split("\n    def ")[0]
 ok(ms.index("MEDIUM_STREAMING") < ms.index("TINY_STREAMING"),

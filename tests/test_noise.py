@@ -326,7 +326,99 @@ ok(calm.trim_capture_if_clipping() is None,
    "a healthy voice level is left completely alone")
 ok(calm._capture_level is None, "the mixer is not touched at all")
 
-print("== 11. the noise level is visible, not guesswork ==")
+print("== 11. CALIBRATION: measured, not guessed ==")
+# Every threshold before this was a number I picked. None of them know
+# how far away the user sits, how loud they talk, or what their
+# kitchen sounds like. Calibration measures all three, once.
+cal = object.__new__(DoseVoice)
+cal._cal = None
+cal._cal_profile = None
+cal._max_gain = 4.0
+cal._speech_level = 0.0
+cal._cal_path = lambda: os.path.join(
+    __import__("tempfile").mkdtemp(), "calibration.json")
+
+ok(cal.calibration_state()[0] == "idle", "starts idle")
+cal.start_calibration()
+ok(cal.calibration_state()[0] == "room",
+   "it listens to the ROOM first, before asking for a voice")
+
+# 3 s of a quiet room
+import time as _t                                           # noqa: E402
+cal._cal["t0"] = _t.time() - 3.1
+cal._calibration_feed(45.0)
+ok(cal.calibration_state()[0] == "voice",
+   "then it asks for the sentence")
+ok(abs(cal._cal["floor"] - 45.0) < 20,
+   "having measured the room floor (%.0f)" % cal._cal["floor"])
+
+# now a voice, comfortably above the room
+for _ in range(40):
+    cal._calibration_feed(1900.0)
+cal._cal["t0"] = _t.time() - 13
+cal._calibration_feed(1900.0)
+ok(cal.calibration_state()[0] == "done", "it finishes on its own")
+prof = cal._cal_profile
+ok(prof is not None, "and produces a profile")
+ok(abs(prof["voice"] - 1900.0) < 200,
+   "with the measured voice level (%.0f)" % prof["voice"])
+ok(prof["floor"] < prof["gate"] < prof["voice"],
+   "and a gate BETWEEN the room and the voice (%.0f < %.0f < %.0f) — "
+   "rejects the room, does not cut a quiet word"
+   % (prof["floor"], prof["gate"], prof["voice"]))
+cal._speech_level = 0.0
+ok(abs(cal._agc_ceiling() - prof["gain"]) < 0.001,
+   "the measured gain is used instead of the guess (%.2fx)"
+   % prof["gain"])
+ok(prof["gain"] <= 4.0, "and it is still bounded")
+
+# a loud voice needs no boost at all
+cal2 = object.__new__(DoseVoice)
+cal2._cal_profile = {"voice": 3200.0, "floor": 40.0, "gate": 100.0,
+                     "gain": max(1.0, min(dv.TARGET_SPEECH_RMS / 3200.0,
+                                          4.0))}
+ok(abs(cal2._agc_ceiling() - 1.0) < 0.01,
+   "a strong voice is measured as needing no boost")
+
+print("== 12. calibration refuses to lie ==")
+bad = object.__new__(DoseVoice)
+bad._cal = None
+bad._cal_profile = None
+bad._cal_path = cal._cal_path
+bad.start_calibration()
+bad._cal["t0"] = _t.time() - 3.1
+bad._calibration_feed(50.0)
+# ...and then the user says almost nothing
+for _ in range(3):
+    bad._calibration_feed(900.0)
+bad._cal["t0"] = _t.time() - 13
+bad._calibration_feed(60.0)
+ok(bad.calibration_state()[0] == "failed",
+   "too little speech is reported as a FAILURE, not saved as a "
+   "profile built from three blocks")
+ok(bad._cal_profile is None, "and nothing is written")
+
+print("== 13. it survives a restart ==")
+import tempfile as _tf2                                     # noqa: E402
+d = _tf2.mkdtemp()
+keep = object.__new__(DoseVoice)
+keep._cal_path = lambda: os.path.join(d, "calibration.json")
+keep._cal_profile = {"voice": 1800.0, "floor": 60.0, "gate": 200.0,
+                     "gain": 1.6, "when": 1.0}
+keep._save_calibration()
+fresh = object.__new__(DoseVoice)
+fresh._cal_path = keep._cal_path
+fresh._cal_profile = None
+ok(fresh.load_calibration(), "a saved calibration loads on next boot")
+ok(abs(fresh._cal_profile["voice"] - 1800.0) < 1,
+   "with the same numbers — you do not re-read the lines every time")
+
+VS = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
+ok("self.load_calibration()" in VS, "and it is loaded at startup")
+ok("prof[\"gate\"]" in VS or 'prof["gate"]' in VS,
+   "the measured gate is what the audio path actually uses")
+
+print("== 14. the noise level is visible, not guesswork ==")
 VSRC = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
 ok("self._snr" in VSRC,
    "the signal-to-noise ratio is measured every block")

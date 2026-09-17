@@ -401,6 +401,35 @@ EOF
 # left the app showing "Speech: downloading…" forever with nothing to
 # go on and no second attempt.
 echo "  Checking the speech model..."
+# Whisper does the hearing. Fetch it before the app opens so the first
+# thing you say is not paying for a download. The HuggingFace audio
+# course builds its assistant's transcription stage on exactly this
+# model family; these are the CTranslate2 conversions that make it
+# fast enough for a Pi.
+python3 - <<'PYEOF'
+import os, sys
+try:
+    from faster_whisper import WhisperModel
+except Exception as e:
+    print("  Whisper not installed yet (%s) — the app will fetch it."
+          % str(e)[:60])
+    sys.exit(0)
+models = [m for m in os.environ.get(
+    "DOSE_WHISPER_MODELS",
+    "distil-small.en,small.en,base.en,tiny.en").split(",") if m]
+for m in models:
+    try:
+        print("  Downloading the speech model (%s)..." % m)
+        sys.stdout.flush()
+        WhisperModel(m, device="cpu", compute_type="int8")
+        print("  Speech model ready: %s" % m)
+        sys.exit(0)
+    except Exception as e:
+        print("  %s unavailable (%s)" % (m, str(e)[:70]))
+print("  No Whisper model could be downloaded — the app will keep "
+      "retrying and use the fast recogniser meanwhile.")
+PYEOF
+
 python3 - <<'PYEOF'
 import os, sys
 try:

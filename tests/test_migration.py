@@ -214,10 +214,10 @@ ok("moonshine" in vsrc.lower(), "Moonshine does the hearing")
 ok("faster_whisper" in vsrc,
    "Whisper is available for the cases it cannot make out")
 bt = vsrc.split("def _better_transcribe")[1].split("\n    def ")[0]
-ok(bt.index("_moonshine_transcribe") < bt.index("_whisper_transcribe"),
-   "in that order")
-ok("self._usable(ms)" in bt,
-   "and only when the first answer is unusable")
+ok(bt.index("_whisper_transcribe") < bt.index("_moonshine_transcribe"),
+   "Whisper answers first — accuracy is what is scarce here")
+ok("self._usable(wh)" in bt,
+   "and the fast one only when that answer is unusable")
 ok("faster-whisper" in sh, "the setup script installs it")
 ok("faster-whisper" in src, "so does the app's dependency list")
 
@@ -282,15 +282,20 @@ ok("for arch_name in available" in loader,
 ok("library not installed" in loader,
    "a missing library is reported as that, not as 'downloading'")
 
-status = vsrc.split('rows.append(("Speech"')[0][-900:]
-ok("_ms_reason" in status,
+ok("_ms_reason" in vsrc.split('rows.append(("Speech (fast)"')[0][-900:],
    "Settings shows the real reason on the Speech row")
+ok('"Speech (main)"' in vsrc and '"Speech (fast)"' in vsrc,
+   "and names the two recognisers separately, so it is obvious which "
+   "one is actually doing the hearing")
 ok("download failed" in vsrc,
    "and stops claiming 'downloading' once it plainly is not")
 
-sh_dl = sh.split("Speech model: finish downloading")[1][:2000]
+sh_dl = sh.split("Speech model: finish downloading")[1][:4000]
+ok("WhisperModel(" in sh_dl,
+   "the setup script downloads the MAIN recogniser before the app "
+   "opens")
 ok("get_model_for_language" in sh_dl,
-   "the setup script downloads it BEFORE the app opens")
+   "and the fast one too")
 ok(sh.index("Speech model: finish downloading")
    < sh.index("Starting DOSE"),
    "before launch, not after")
@@ -300,6 +305,9 @@ ok(sh.index("Speech model: finish downloading")
    "retried on the next launch")
 ok("hasattr(mv.ModelArch" in sh_dl,
    "with the same fallback through available model types")
+ok("DOSE_WHISPER_MODELS" in sh_dl,
+   "and the same Whisper chain the app uses, so they cannot "
+   "disagree and make the first sentence pay for a download")
 ok("sys.exit(0)" in sh_dl,
    "a failure never blocks the app from starting")
 

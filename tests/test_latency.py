@@ -299,13 +299,19 @@ ok(os.environ.get("OMP_NUM_THREADS") == str(dv.INFER_THREADS),
 # Moonshine still does the hearing in the common case; the stronger
 # model runs ONLY when the fast one returns something that does not
 # parse, so it never sits in the normal latency path.
+# Accuracy now leads: Whisper answers first. That is affordable only
+# because recognition runs DURING the pause (section 5), and because
+# the burst gets every core rather than the continuous budget.
 bt = VOICE_SRC.split("def _better_transcribe")[1].split("\n    def ")[0]
-ok(bt.index("_moonshine_transcribe") < bt.index("_whisper_transcribe"),
-   "the fast recogniser answers first")
-ok("self._usable(ms)" in bt,
-   "the slower one runs only when that answer is unusable")
-ok("cpu_threads=INFER_THREADS" in VOICE_SRC,
-   "and it is loaded with the Pi's core budget when it does")
+ok(bt.index("_whisper_transcribe") < bt.index("_moonshine_transcribe"),
+   "the accurate recogniser answers first")
+ok("self._usable(wh)" in bt,
+   "and the fast one is the fallback when that answer is unusable")
+ok("cpu_threads=STT_THREADS" in VOICE_SRC,
+   "transcription is loaded with EVERY core, not the continuous "
+   "budget — it is a burst, not background work")
+ok(dv.STT_THREADS == dv.CPU_CORES,
+   "which is all %d of them" % dv.CPU_CORES)
 ok("TMP_AUDIO_DIR" in VOICE_SRC and "/dev/shm" in VOICE_SRC,
    "transient audio goes to RAM, not the SD card")
 ok('dir=TMP_AUDIO_DIR' in VOICE_SRC,

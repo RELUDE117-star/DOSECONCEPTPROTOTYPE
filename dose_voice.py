@@ -165,6 +165,22 @@ ENDPOINT_MAX_UTTERANCE = float(os.environ.get("DOSE_MAX_UTTERANCE", "8.0"))
 # far-field microphone exists to avoid.
 NOISE_GATE_RATIO = float(os.environ.get("DOSE_NOISE_GATE", "3.0"))
 
+# ── THE RECOGNISER ───────────────────────────────────────────────────
+# Whisper, in order of preference. The HuggingFace audio course builds
+# its assistant's transcription stage on openai/whisper-base.en for CPU
+# and names whisper-small.en as the upgrade; these are the CTranslate2
+# conversions of the same weights, which is what runs them fast enough
+# on a Pi. distil-small.en is first because it is a distillation of
+# small.en: the same class of accuracy at roughly twice the speed.
+#
+# Downloaded from HuggingFace on first use and cached on the device.
+# All MIT/Apache, all on-device, nothing metered.
+WHISPER_MODELS = tuple(filter(None, os.environ.get(
+    "DOSE_WHISPER_MODELS",
+    "distil-small.en,small.en,base.en,tiny.en").split(",")))
+
+
+
 # ── LEVELS ───────────────────────────────────────────────────────────
 # Unity on the way in. Every boost here multiplies with the ALSA
 # capture level and with the software auto-gain, and three of those at
@@ -274,6 +290,15 @@ INFER_THREADS = max(1, min(2, CPU_CORES - _RESERVED_CORES))
 _STARTUP_LOAD = _load_now()
 if _STARTUP_LOAD > CPU_CORES - _RESERVED_CORES:
     INFER_THREADS = 1
+
+# Transcription is a SHORT BURST — a few hundred milliseconds, once per
+# thing you say — so it gets EVERY core. The reservation above protects
+# the screen and the camera from work that runs continuously; this does
+# not run continuously, and it is over before either of them would
+# notice. This is the "use the whole Pi" lever, and a burst is the
+# right place to pull it.
+STT_THREADS = max(1, int(os.environ.get("DOSE_STT_THREADS",
+                                        CPU_CORES) or CPU_CORES))
 
 for _var in ("OMP_NUM_THREADS", "ORT_NUM_THREADS",
              "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
@@ -816,14 +841,16 @@ class DoseVoice:
         self._whisper_size = ""
         try:
             from faster_whisper import WhisperModel
-            # small.en is the accuracy step up from base.en and still
-            # fits a Pi 4 in int8. It is loaded lazily-ish here because
-            # it is only used on the hard cases.
-            size = os.environ.get("DOSE_WHISPER_SIZE", "small.en")
-            self._whisper = WhisperModel(
-                size, device="cpu", compute_type="int8",
-                cpu_threads=INFER_THREADS, num_workers=1)
-            self._whisper_size = size
+            for size in WHISPER_MODELS:
+                try:
+                    self._whisper = WhisperModel(
+                        size, device="cpu", compute_type="int8",
+                        cpu_threads=STT_THREADS, num_workers=1)
+                    self._whisper_size = size
+                    break
+                except Exception:
+                    self._whisper = None
+                    continue
         except Exception:
             self._whisper = None
         try:
@@ -937,22 +964,31 @@ class DoseVoice:
         audio. Giving up quickly is not an accuracy strategy."""
         if not audio_bytes:
             return vosk_text
-        # 1) Moonshine v2, with THIS device's drug names as key terms —
-        #    the measured fix for medication-name mishears.
-        ms = self._moonshine_transcribe(audio_bytes)
-        if ms and self._usable(ms):
-            return ms
-        # 2) it gave us nothing we can act on — ask the better model
+        # 1) WHISPER FIRST. It is the model the HuggingFace audio
+        #    course builds its assistant's transcription stage on, and
+        #    it is simply better at hearing a sentence than the small
+        #    streaming recogniser is. That one was running first, and
+        #    when the package only shipped its tiny arch the station
+        #    was effectively listening with the weakest model it had —
+        #    which is why "storage" came back as noise. Accuracy is
+        #    what is scarce here, not milliseconds: this runs during
+        #    the pause you take anyway.
         wh = self._whisper_transcribe(audio_bytes)
         if wh and self._usable(wh):
-            self._whisper_saves = getattr(self, "_whisper_saves", 0) + 1
             return wh
+        # 2) the fast streaming recogniser, biased toward this
+        #    cabinet's drug names — a good second opinion, and the
+        #    whole answer when Whisper isn't installed yet
+        ms = self._moonshine_transcribe(audio_bytes)
+        if ms and self._usable(ms):
+            self._ms_saves = getattr(self, "_ms_saves", 0) + 1
+            return ms
         # 3) neither parsed. Prefer whichever actually said something,
         #    so a near-miss can still be matched or asked about.
+        if wh and not (_nlu_mod and _nlu_mod.looks_hallucinated(wh)):
+            return wh
         if ms and not (_nlu_mod and _nlu_mod.looks_hallucinated(ms)):
             return ms
-        if wh:
-            return wh
         # the same model through the plain ONNX package
         if self._moonshine is not None:
             path = None
@@ -2161,6 +2197,11 @@ class DoseVoice:
             self.watch_input_level()
         except Exception:
             pass
+        # a calibration measured on a previous run still applies
+        try:
+            self.load_calibration()
+        except Exception:
+            pass
         # hardware tuning (governor, core budget) — no root needed for
         # the parts that matter, and harmless everywhere else
         try:
@@ -2265,6 +2306,9 @@ class DoseVoice:
         cannot reach a usable level on its own, and it fades in as the
         measured speech level falls rather than switching on abruptly.
         """
+        prof = getattr(self, "_cal_profile", None)
+        if prof:
+            return prof.get("gain", 1.0)   # measured, not guessed
         lvl = self._speech_level
         if lvl <= 0:
             return self._max_gain          # nothing learned yet
@@ -2273,6 +2317,114 @@ class DoseVoice:
         # between "quiet" and "healthy", ease the ceiling in
         frac = 1.0 - (lvl / self.HEALTHY_SPEECH_RMS)
         return 1.0 + (self._max_gain - 1.0) * frac
+
+    # ── ROOM CALIBRATION ─────────────────────────────────────────────
+    # Read a few sentences aloud and the station measures what YOUR
+    # voice looks like through THIS microphone in THIS room, then sets
+    # the gate and the gain from the measurement instead of from
+    # numbers I guessed. Everything before this was a guess: a fixed
+    # gate ratio, a fixed "healthy" level, a fixed idea of how loud a
+    # room is. None of those know how far away you sit or what your
+    # kitchen sounds like.
+    CALIBRATION_LINES = (
+        "The station is ready when you are.",
+        "How many pills do I have left?",
+        "What do I need to take today?",
+    )
+
+    def calibration_state(self):
+        """What the calibration screen shows: (phase, level, note)."""
+        c = getattr(self, "_cal", None)
+        if not c:
+            return ("idle", 0.0, "")
+        return (c["phase"], c.get("level", 0.0), c.get("note", ""))
+
+    def start_calibration(self):
+        """Begin listening to the room, then to the user's voice."""
+        self._cal = {"phase": "room", "t0": time.time(), "room": [],
+                     "voice": [], "level": 0.0,
+                     "note": "Measuring the room — stay quiet."}
+        return True
+
+    def cancel_calibration(self):
+        self._cal = None
+
+    def _calibration_feed(self, rms):
+        """Called for every captured block while calibrating. Kept
+        deliberately cheap — it runs on the audio thread."""
+        c = self._cal
+        if not c:
+            return
+        c["level"] = rms
+        age = time.time() - c["t0"]
+        if c["phase"] == "room":
+            c["room"].append(rms)
+            if age >= 3.0:
+                room = sorted(c["room"])
+                c["floor"] = room[len(room) // 2] if room else 30.0
+                c["phase"] = "voice"
+                c["t0"] = time.time()
+                c["note"] = "Now read the sentence out loud."
+        elif c["phase"] == "voice":
+            # only blocks clearly above the measured room count as the
+            # person talking
+            if rms > max(40.0, c.get("floor", 30.0) * 2.5):
+                c["voice"].append(rms)
+            if age >= 12.0 or len(c["voice"]) >= 60:
+                self._finish_calibration()
+
+    def _finish_calibration(self):
+        c = self._cal
+        if not c:
+            return
+        voice = sorted(c.get("voice", []))
+        floor = c.get("floor", 30.0)
+        if len(voice) < 8:
+            c["phase"] = "failed"
+            c["note"] = ("I could not hear you clearly. Move closer, "
+                         "or check the microphone in Settings.")
+            return
+        # the 60th percentile of the blocks that were clearly speech —
+        # above the mumbles at the start and end of a sentence, below
+        # the one loud syllable
+        lvl = voice[int(len(voice) * 0.6)]
+        self._cal_profile = {
+            "floor": floor,
+            "voice": lvl,
+            # Gate halfway between the room and the voice, in log
+            # terms, so it rejects the room without cutting a quiet
+            # word. Clamped so a strange measurement can't make the
+            # station deaf.
+            "gate": max(40.0, min(lvl * 0.35, max(floor * 2.0, 60.0))),
+            "gain": max(1.0, min(TARGET_SPEECH_RMS / max(lvl, 1.0), 4.0)),
+            "when": time.time(),
+        }
+        self._save_calibration()
+        c["phase"] = "done"
+        c["note"] = ("Calibrated: your voice reads %.0f over a room of "
+                     "%.0f." % (lvl, floor))
+
+    def _cal_path(self):
+        return os.path.join(VOICE_DIR, "calibration.json")
+
+    def _save_calibration(self):
+        try:
+            os.makedirs(VOICE_DIR, exist_ok=True)
+            with open(self._cal_path(), "w") as f:
+                json.dump(self._cal_profile, f)
+        except Exception:
+            pass
+
+    def load_calibration(self):
+        try:
+            with open(self._cal_path()) as f:
+                p = json.load(f)
+            if p.get("voice", 0) > 0:
+                self._cal_profile = p
+                return True
+        except Exception:
+            pass
+        return False
 
     def watch_input_level(self):
         """Keep an eye on the microphone level for the first few
@@ -2392,6 +2544,10 @@ class DoseVoice:
             except Exception:
                 pass
             silence = b"\x00\x00" * SAMPLE_RATE      # 1 s of nothing
+            try:
+                self._whisper_transcribe(silence)
+            except Exception:
+                pass
             try:
                 self._moonshine_transcribe(silence)
             except Exception:
@@ -2537,13 +2693,15 @@ class DoseVoice:
                     detail = (getattr(self, "_ms_reason", "")
                               or ("downloading…" if attempt < 2
                                   else "download failed — retrying"))
-                rows.append(("Speech", ms is not None, detail[:40]))
+                rows.append(("Speech (fast)", ms is not None,
+                             detail[:40]))
 
-                # 2b) The stronger model, for the hard cases.
-                rows.append(("Speech+", self._whisper is not None,
+                # 2b) Whisper — the one that actually does the
+                #     hearing now.
+                rows.append(("Speech (main)", self._whisper is not None,
                              ("whisper %s" % self._whisper_size)
                              if self._whisper is not None
-                             else "not installed"))
+                             else "downloading…"))
 
                 # 3) The live listener. This is NOT a competing
                 #    recogniser: it is what puts your words on the
@@ -2654,6 +2812,8 @@ class DoseVoice:
         self._speech_level = 0.0   # typical RMS of actual speech
         self._nfloor = 50.0      # learned ambient noise floor (RMS)
         self._snr = 0.0          # how far the last block stood above it
+        self._cal = None         # calibration in progress, if any
+        self._cal_profile = None  # what calibration measured
         self._clip_blocks = 0    # blocks where the input saturated
         self._blocks_seen = 0
         self._clip_recent = 0.0
@@ -2715,7 +2875,16 @@ class DoseVoice:
                 self._nfloor = max(1.0, nf)
                 # Speech has to stand clear of the room, not merely be
                 # audible in it.
-                gate = max(40.0, self._nfloor * NOISE_GATE_RATIO)
+                prof = getattr(self, "_cal_profile", None)
+                if prof:
+                    # measured in THIS room, with THIS microphone, in
+                    # YOUR voice — trusted over any general rule, but
+                    # still allowed to rise if the room gets louder
+                    # than it was on the day
+                    gate = max(prof["gate"],
+                               self._nfloor * NOISE_GATE_RATIO)
+                else:
+                    gate = max(40.0, self._nfloor * NOISE_GATE_RATIO)
                 self._snr = rms / max(1.0, self._nfloor)
                 # Is the input saturating? A clipped sample carries no
                 # information the recogniser can use, and it is what
@@ -2724,6 +2893,8 @@ class DoseVoice:
                     peak = audioop.max(data, 2)
                 except Exception:
                     peak = 0
+                if self._cal is not None:
+                    self._calibration_feed(rms_raw)
                 if peak >= 31000:
                     self._clip_blocks += 1
                     self._clip_recent = time.time()

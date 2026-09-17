@@ -919,6 +919,8 @@ class DoseApp:
             self._draw_mic_report(c)
         elif self.mode == "micmeter":
             self._draw_mic_meter(c)
+        elif self.mode == "calibrate":
+            self._draw_calibrate(c)
         elif self.mode == "sysinfo":
             self._draw_sysinfo(c)
         elif self.mode == "btaudio":
@@ -946,7 +948,8 @@ class DoseApp:
             active = getattr(self, "_te_return", "storage")
         if active == "dosealert":
             active = getattr(self, "_alert_return", "home")
-        if active in ("micreport", "btaudio", "micmeter", "sysinfo"):
+        if active in ("micreport", "btaudio", "micmeter", "sysinfo",
+                      "calibrate"):
             active = "settings"
         if active in ("hold", "spin", "confirmdisp", "dispensed",
                       "qtyconfirm", "addmed"):
@@ -4849,12 +4852,16 @@ class DoseApp:
         show_report = (r is not None and r <= 5
                        and getattr(self, "_mic_report_lines", None))
         buttons = [("MIC LEVEL", self._open_mic_meter, False),
+                   # read a few lines and it tunes itself to this room
+                   ("TUNE ROOM", self._open_calibrate, False),
                    ("TEST SPKR", self._speaker_test, False),
                    ("RESCAN", self._audio_rescan, False)]
         if show_report:
             buttons.append(("DETAILS", self._open_mic_report, False))
         buttons.append(("CLOSE", self._bt_close, True))
-        bw = 108
+        # fit the row to the card, whatever it holds (56..646)
+        bw = max(72, min(108, (590 - 8 * (len(buttons) - 1))
+                         // len(buttons)))
         bx = 56
         for label, cb, primary in buttons:
             b_img = _pil_rounded_rect(bw, 44, 14, DOSE_BLUE if primary
@@ -4958,6 +4965,139 @@ class DoseApp:
     def _close_mic_meter(self):
         self._meter_run = False
         self.mode = "btaudio"
+        self._draw_frame()
+
+    # ── ROOM CALIBRATION SCREEN ──────────────────────────────────────
+    def _open_calibrate(self):
+        self._prev_mode = self.mode
+        self.mode = "calibrate"
+        self._cal_line = 0
+        try:
+            if self.voice:
+                self.voice.start_calibration()
+        except Exception:
+            pass
+        self._calibrate_tick()
+        self._draw_frame()
+
+    def _close_calibrate(self):
+        try:
+            if self.voice:
+                self.voice.cancel_calibration()
+        except Exception:
+            pass
+        self.mode = getattr(self, "_prev_mode", "settings") or "settings"
+        self._draw_frame()
+
+    def _calibrate_tick(self):
+        if self.mode != "calibrate":
+            return
+        self._draw_frame()
+        self.root.after(120, self._calibrate_tick)
+
+    def _draw_calibrate(self, c):
+        """Teach the station this room and this voice.
+
+        Every threshold before this was a number I picked: how far
+        above the room speech has to sit, what counts as a healthy
+        level, how much to amplify. None of them know how far away you
+        sit, how loud you talk, or what your kitchen sounds like. Here
+        it measures all three from you, once, and uses that instead."""
+        t = self.theme
+        c.create_image(26, 20, image=self._get_tk_image(
+            "cal_card", _pil_rounded_rect(620, 440, 22, t["card_bg"])),
+            anchor="nw")
+        c.create_text(56, 36, text="TUNE TO THIS ROOM",
+                      font=self.font_label, fill=t["muted"], anchor="nw")
+
+        phase, level, note = ("idle", 0.0, "")
+        try:
+            if self.voice:
+                phase, level, note = self.voice.calibration_state()
+        except Exception:
+            pass
+
+        lines = []
+        try:
+            lines = list(self.voice.CALIBRATION_LINES) if self.voice else []
+        except Exception:
+            pass
+
+        if phase == "room":
+            head, colour = "Listening to the room…", t["fg"]
+            sub = "Stay quiet for a moment."
+        elif phase == "voice":
+            head, colour = "Now read this out loud:", DOSE_BLUE_LT
+            sub = lines[0] if lines else "Hello."
+        elif phase == "done":
+            head, colour = "Done — tuned to this room.", "#2ECC71"
+            sub = note
+        elif phase == "failed":
+            head, colour = "I could not hear you.", "#F1C40F"
+            sub = note
+        else:
+            head, colour = "Read a few lines and I'll tune to you.", \
+                t["fg"]
+            sub = ("I'll measure how loud the room is and how loud your "
+                   "voice is from where you sit, then set my levels "
+                   "from that instead of guessing.")
+
+        c.create_text(323, 78, text=head, font=self.font_title,
+                      fill=colour, anchor="n", width=560)
+        c.create_text(323, 118, text=sub, font=self.font_small,
+                      fill=t["muted"] if phase != "voice" else t["fg"],
+                      anchor="n", width=540)
+
+        # live level bar — seeing it move is what tells you it is
+        # actually hearing you
+        bx, bw, bh = 56, 560, 30
+        by = 208
+        c.create_image(bx, by, image=self._get_tk_image(
+            "cal_bar_bg", _pil_rounded_rect(bw, bh, 10,
+                                            t["elevated_bg"])),
+            anchor="nw")
+        frac = max(0.0, min(1.0, float(level) / 6000.0))
+        if frac > 0.01:
+            c.create_image(bx, by, image=self._get_tk_image(
+                "cal_bar_%02d" % int(frac * 40),
+                _pil_rounded_rect(max(8, int(bw * frac)), bh, 10,
+                                  DOSE_BLUE)), anchor="nw")
+        c.create_text(323, by + bh + 12, text="%d" % int(level),
+                      font=self.font_tiny, fill=t["muted"], anchor="n")
+
+        prof = getattr(self.voice, "_cal_profile", None) if self.voice \
+            else None
+        if prof:
+            c.create_text(
+                323, 286,
+                text="saved: voice %.0f · room %.0f · gate %.0f · "
+                     "boost %.1fx" % (prof.get("voice", 0),
+                                      prof.get("floor", 0),
+                                      prof.get("gate", 0),
+                                      prof.get("gain", 1.0)),
+                font=self.font_tiny, fill="#2ECC71", anchor="n",
+                width=560)
+
+        for label, x0, cb in (
+                ("START" if phase in ("idle", "done", "failed")
+                 else "LISTENING…", 56, self._restart_calibration),
+                ("CLOSE", 466, self._close_calibrate)):
+            c.create_image(x0, 400, image=self._get_tk_image(
+                "cal_%s" % label, _pil_rounded_rect(
+                    150, 44, 14, DOSE_BLUE if label == "CLOSE"
+                    else t["elevated_bg"])), anchor="nw")
+            c.create_text(x0 + 75, 422, text=label,
+                          font=self.font_small_bold,
+                          fill="#06101E" if label == "CLOSE" else t["fg"],
+                          anchor="center")
+            self._click_zones.append((x0, 400, x0 + 150, 444, cb))
+
+    def _restart_calibration(self):
+        try:
+            if self.voice:
+                self.voice.start_calibration()
+        except Exception:
+            pass
         self._draw_frame()
 
     def _draw_mic_meter(self, c):
