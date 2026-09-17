@@ -346,18 +346,34 @@ SPECULATE_AFTER = float(os.environ.get("DOSE_SPECULATE_AFTER", "0.18"))
 # next word, not done — so we wait longer before closing the turn. This
 # is what stops a short endpoint from clipping "how many ... sertraline
 # ... do i have left" into "how many".
-# Words a sentence cannot END on — someone saying one of these is
-# reaching for the next word. Object pronouns ("it", "them", "one") and
-# time words are deliberately ABSENT: "what time is it" and "did i take
-# them" are finished sentences.
+# Words a sentence genuinely cannot END on: articles, possessives,
+# prepositions, conjunctions and fillers. Someone who stops here is
+# reaching for the next word, always, whatever the phrase happens to
+# match.
 HANGING_WORDS = frozenset("""
-a an the my your his her its our their this that these those and or but
-so if when while with for to of in on at from about into than then
-because is are was were be been am do does did have has had can could
-should would will shall may might must i you he she we they
-take taken taking need want get got give show tell how what when where
-which who why um uh er hmm like just every each
+a an the my your his her its our their this that these those
+and or but so if while with for to of in on at from about into than
+then because um uh er hmm like just every each another some
+i we they he she
 """.split())
+# Note the subject pronouns at the end: "how many sertraline do I" is
+# obviously unfinished, however many words precede it. Object pronouns
+# are NOT here — "did I take it", "thank you" are finished sentences.
+
+# Words that only mean "still talking" in a SHORT fragment.
+#
+# Auxiliaries and question words end finished sentences all the time —
+# "how many pills do I have", "yes I did", "which one" — so treating
+# them as never-final made real questions wait the full mid-thought
+# grace for nothing. But "what" on its own is not a question, it is
+# the first word of one, and answering it as "say that again" is
+# exactly what turned "what time is it" into "what" on the device.
+SHORT_FRAGMENT_WORDS = frozenset("""
+what when where which who why how is are was were be been am
+do does did have has had can could should would will shall may
+might must take taken taking need want get got give show tell
+""".split())
+SHORT_FRAGMENT_MAX = 2
 
 
 
@@ -1260,22 +1276,16 @@ class DoseVoice:
         runs when the first attempt produced something unusable. The
         common case stays fast; the failures get the better model.
         Both are MIT and run entirely on-device."""
+        # NOT loaded here. Whisper only runs when the fast recogniser
+        # cannot make out what was said, which is a minority of turns —
+        # and holding a loaded model in memory costs RAM and startup
+        # time on every single boot for something that may never be
+        # used. It loads on first need instead. _whisper_size still
+        # reports what WOULD load, so the audit page is honest about
+        # it before it has been needed.
         self._whisper = None
-        self._whisper_size = ""
-        try:
-            from faster_whisper import WhisperModel
-            for size in WHISPER_MODELS:
-                try:
-                    self._whisper = WhisperModel(
-                        size, device="cpu", compute_type="int8",
-                        cpu_threads=STT_THREADS, num_workers=1)
-                    self._whisper_size = size
-                    break
-                except Exception:
-                    self._whisper = None
-                    continue
-        except Exception:
-            self._whisper = None
+        self._whisper_loaded = False
+        self._whisper_size = WHISPER_MODELS[0] if WHISPER_MODELS else ""
         try:
             import moonshine_onnx
             self._moonshine = moonshine_onnx
@@ -1321,10 +1331,34 @@ class DoseVoice:
         except Exception:
             return True
 
+    def _load_whisper(self):
+        """Bring up the escalation model, once, on first need."""
+        if self._whisper_loaded:
+            return self._whisper
+        self._whisper_loaded = True
+        try:
+            from faster_whisper import WhisperModel
+        except Exception:
+            self._whisper_size = "not installed"
+            return None
+        for size in WHISPER_MODELS:
+            try:
+                self._whisper = WhisperModel(
+                    size, device="cpu", compute_type="int8",
+                    cpu_threads=STT_THREADS, num_workers=1)
+                self._whisper_size = size
+                return self._whisper
+            except Exception:
+                self._whisper = None
+        self._whisper_size = "unavailable"
+        return None
+
     def _whisper_transcribe(self, audio_bytes):
         """The stronger model, for when the fast one came back with
         something that meant nothing."""
-        if self._whisper is None or not audio_bytes:
+        if not audio_bytes:
+            return ""
+        if self._load_whisper() is None:
             return ""
         path = None
         try:
@@ -3021,10 +3055,9 @@ class DoseVoice:
             except Exception:
                 pass
             silence = b"\x00\x00" * SAMPLE_RATE      # 1 s of nothing
-            try:
-                self._whisper_transcribe(silence)
-            except Exception:
-                pass
+            # Warm the FAST model only. Whisper is deliberately left
+            # cold: loading it here would put its cost on every boot
+            # for something most turns never touch.
             try:
                 self._moonshine_transcribe(silence)
             except Exception:
@@ -3175,10 +3208,14 @@ class DoseVoice:
 
                 # 2b) Whisper — the one that actually does the
                 #     hearing now.
-                rows.append(("Speech (main)", self._whisper is not None,
-                             ("whisper %s" % self._whisper_size)
-                             if self._whisper is not None
-                             else "downloading…"))
+                if self._whisper is not None:
+                    detail, good = "whisper %s" % self._whisper_size, True
+                elif self._whisper_loaded:
+                    detail, good = self._whisper_size, False
+                else:
+                    detail, good = ("%s (loads when needed)"
+                                    % self._whisper_size), True
+                rows.append(("Speech (backup)", good, detail))
 
                 # 3) The live listener. This is NOT a competing
                 #    recogniser: it is what puts your words on the
@@ -4028,7 +4065,9 @@ class DoseVoice:
         if not t:
             return ENDPOINT_UNPARSED
         words = t.split()
-        dangling = words[-1] in HANGING_WORDS
+        dangling = (words[-1] in HANGING_WORDS
+                    or (len(words) <= SHORT_FRAGMENT_MAX
+                        and words[-1] in SHORT_FRAGMENT_WORDS))
 
         if _nlu_mod is None:
             return ENDPOINT_DANGLING if dangling else ENDPOINT_UNPARSED
@@ -4041,18 +4080,50 @@ class DoseVoice:
         if intent.name in ("crisis", "emergency"):
             return 0.0
 
-        # WHAT WAS SAID outranks how it ends. Plenty of finished
-        # sentences end on a function word — "what time is it", "did i
-        # take it" — so the mid-thought rule only applies when the
-        # sentence does not already stand on its own.
-        if dangling and not intent.complete:
+        # ASK THE MATCHER THAT WILL ACTUALLY ANSWER IT.
+        #
+        # The endpointer was consulting only the pattern set, while the
+        # replies come from a wider matcher — navigation, the time, the
+        # personality lines, the add-medication flow all live there. So
+        # "open storage" and "how many pills do i have" were judged
+        # incomplete and sat waiting, even though the station knew
+        # perfectly well how to answer them the moment they were said.
+        complete = intent.complete
+        if not complete:
+            try:
+                norm = " " + re.sub(r"[^a-z0-9' ]", " ",
+                                    t.lower()).strip() + " "
+                norm = re.sub(r"\s+", " ", norm)
+                hit = self._match_builtin(norm)
+                complete = bool(hit and hit[0])
+            except Exception:
+                pass
+
+        # A FRAGMENT IS NOT A SENTENCE, however well it parses.
+        #
+        # "What" on its own matches the pattern for "say that again"
+        # and therefore counted as a COMPLETE command — so the turn
+        # committed 0.35 s after it, and "what time is it" was answered
+        # as "what". That is the exact failure reported from the
+        # device.
+        #
+        # Length decides. One to three words ending on a function word
+        # is somebody mid-sentence, whatever it happens to match; four
+        # or more that parse cleanly can be trusted to stand alone. It
+        # also fixes the other direction — "how many pills do i have"
+        # ends on "have" and was waiting the full 2.2 s for no reason.
+        # Judged on the STRICT parse. The wider matcher below includes
+        # a phonetic fallback, and letting a loose sound-alike match
+        # shorten the mid-thought grace is how a half-finished
+        # sentence gets answered.
+        if dangling and (len(words) < 4 or not intent.complete):
             return ENDPOINT_DANGLING
 
         # room to change their mind: "my metformin — no wait, the other"
         if intent.name in ("dispense", "cancel"):
             return ENDPOINT_CORRECTION
         # a complete, unambiguous command: answer now
-        if intent.complete:
+        if complete:
             return ENDPOINT_STABLE
         return ENDPOINT_UNPARSED
 

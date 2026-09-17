@@ -444,6 +444,56 @@ ok("_voice_panel_box" in click and "_voice_dismiss" in click,
 ok(click.index("_voice_state") < click.index("_click_zones"),
    "and it is checked before any button underneath it")
 
+print("== 5e. a FRAGMENT is not a sentence ==")
+# From the device: "what time is it" was answered as "what". The word
+# "what" on its own matches the pattern for "say that again", counted
+# as a complete command, and committed 0.35 s later — cutting off the
+# rest of the question.
+frag = ListenEngine()
+frag._med_names = lambda: ["Sertraline", "Atorvastatin"]
+frag._flow = None
+
+MUST_WAIT = ["what", "how", "when", "which", "did i", "have i",
+             "ive been thinking about", "umm what about my",
+             "how many of my", "i want to take my", "can i"]
+for phrase in MUST_WAIT:
+    w = frag._endpoint_wait(phrase)
+    ok(w >= dv.ENDPOINT_DANGLING - 0.01,
+       "%-28r waits %.2fs — it is somebody mid-sentence" % (phrase, w))
+
+MUST_COMMIT = ["what time is it", "whats next", "open storage",
+               "go to settings", "how am i doing", "add a medication",
+               "did i take my sertraline", "what do i take today",
+               "how many pills do i have",
+               "how many sertraline do i have left"]
+for phrase in MUST_COMMIT:
+    w = frag._endpoint_wait(phrase)
+    ok(w <= dv.ENDPOINT_STABLE + 0.01,
+       "%-36r commits in %.2fs — it is a finished question"
+       % (phrase, w))
+
+for phrase in ("i want to kill myself", "chest pain"):
+    ok(frag._endpoint_wait(phrase) == 0.0,
+       "%r is never made to wait" % phrase)
+
+ok("SHORT_FRAGMENT_WORDS" in VSRC,
+   "question words and auxiliaries only mean 'still talking' in a "
+   "short fragment — they end finished sentences all the time")
+ok(dv.SHORT_FRAGMENT_MAX <= 3,
+   "which is %d words or fewer" % dv.SHORT_FRAGMENT_MAX)
+ok("have" not in dv.HANGING_WORDS,
+   "'have' is not treated as never-final: 'how many pills do i have' "
+   "is a question, and it was waiting the full grace for nothing")
+ok("the" in dv.HANGING_WORDS and "my" in dv.HANGING_WORDS
+   and "about" in dv.HANGING_WORDS,
+   "while articles, possessives and prepositions still are")
+ew = VSRC.split("def _endpoint_wait")[1].split("\n    def ")[0]
+ok("intent.complete" in ew and "_match_builtin" in ew,
+   "the endpointer asks the matcher that will actually answer, so a "
+   "question it can answer is not left waiting")
+ok("STRICT parse" in ew,
+   "but a loose phonetic match may NOT shorten the mid-thought grace")
+
 print("== 6. silence alone never invents an utterance ==")
 e = ListenEngine(recog_time=0.05)
 

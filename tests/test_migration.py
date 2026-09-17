@@ -292,9 +292,12 @@ ok("library not installed" in loader,
 
 ok("_ms_reason" in vsrc.split('rows.append(("Speech (fast)"')[0][-900:],
    "Settings shows the real reason on the Speech row")
-ok('"Speech (main)"' in vsrc and '"Speech (fast)"' in vsrc,
-   "and names the two recognisers separately, so it is obvious which "
-   "one is actually doing the hearing")
+ok('"Speech (backup)"' in vsrc and '"Speech (fast)"' in vsrc,
+   "and names the two recognisers separately — 'fast' does the "
+   "hearing, 'backup' escalates — so which one is working is never "
+   "a guess")
+ok("loads when needed" in vsrc,
+   "the backup says it is not loaded rather than claiming to be ready")
 ok("download failed" in vsrc,
    "and stops claiming 'downloading' once it plainly is not")
 

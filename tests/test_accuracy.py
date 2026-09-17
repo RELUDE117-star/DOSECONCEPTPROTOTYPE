@@ -433,10 +433,16 @@ for fast, slow, want in (("urk", "open storage the", "open storage the"),
     ok(got == want,
        "fast=%r slow=%r -> %r" % (fast, slow, got))
 
+lw = VSRC.split("def _load_whisper")[1].split("\n    def ")[0]
+ok("WHISPER_MODELS" in lw,
+   "the stronger model comes from the configured chain")
+ok('compute_type="int8"' in lw, "in int8 so it fits a Pi 4")
 pr = VSRC.split("def _probe_moonshine")[1].split("\n    def ")[0]
-ok("small.en" in pr,
-   "the stronger model is whisper small.en, an accuracy step up")
-ok('compute_type="int8"' in pr, "in int8 so it fits a Pi 4")
+ok("_whisper_loaded = False" in pr,
+   "and it is NOT loaded at startup — most turns never need it, and "
+   "a loaded model costs RAM on every boot")
+ok("_load_whisper" in VSRC.split("def _whisper_transcribe")[1][:400],
+   "it loads on first need instead")
 ok("_whisper_prompt" in VSRC,
    "and it is told this cabinet's medication names, the same way "
    "the fast model is given key terms")
