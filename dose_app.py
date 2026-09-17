@@ -3893,6 +3893,8 @@ class DoseApp:
         # with something that does not parse. Giving up quickly is not
         # an accuracy strategy.
         ("faster_whisper", "faster-whisper"),
+        # the voice detector: 1.3 MB, tells a person from a tap
+        ("silero_vad", "silero-vad"),
     )
 
     def _swap_voice_engine(self):
@@ -4520,7 +4522,8 @@ class DoseApp:
                             [sys.executable, "-m", "pip", "install",
                              "sounddevice", "vosk", "piper-tts", "qrcode", "audioop-lts",
                              "rapidfuzz", "jellyfish", "moonshine-voice",
-                             "faster-whisper", "useful-moonshine-onnx"],
+                             "faster-whisper", "useful-moonshine-onnx",
+                             "silero-vad"],
                             capture_output=True, timeout=900, env=env)
                 except Exception:
                     pass

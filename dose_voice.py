@@ -165,6 +165,68 @@ ENDPOINT_MAX_UTTERANCE = float(os.environ.get("DOSE_MAX_UTTERANCE", "8.0"))
 # far-field microphone exists to avoid.
 NOISE_GATE_RATIO = float(os.environ.get("DOSE_NOISE_GATE", "3.0"))
 
+# How close a mis-transcribed request has to sound to a command before
+# we act on it. Measured: at anything from 70 to 80 this matches 11 of
+# 12 realistic mishears and never once fires on a medication name, a
+# crisis phrase, or a medical question — the things that must never be
+# guessed at.
+VOCAB_THRESHOLD = float(os.environ.get("DOSE_VOCAB_THRESHOLD", "76"))
+
+# ── WHAT IT CAN BE ASKED, IN WORDS PEOPLE USE ────────────────────────
+# Matched phonetically as a last resort, so a mis-transcribed request
+# still lands on the right action. Kept to things the station can
+# actually DO — it is a medication cabinet, not a chatbot, and an
+# assistant that pretends to understand everything is worse than one
+# that says plainly when it does not.
+COMMAND_VOCAB = {
+    "nav:home": ("home", "main screen", "go back", "start screen"),
+    # "my pills" is deliberately NOT here: it collides with questions
+    # about how many are left, and with phrases the user has taught.
+    # A screen name has to be a screen name.
+    "nav:storage": ("storage", "my medications", "medicine cabinet",
+                    "the cabinet", "medication screen"),
+    "nav:settings": ("settings", "options", "preferences", "setup"),
+    "nav:user": ("my profile", "my record", "my stats", "my history",
+                 "user screen", "my progress", "my account"),
+    "time": ("what time is it", "the time", "current time"),
+    "date": ("what day is it", "todays date", "what is the date"),
+    "remaining_today": ("what do i take today", "what is left today",
+                        "my doses today", "todays medication",
+                        "what do i need today", "anything left today"),
+    "next_dose": ("what is next", "next dose", "when is my next dose",
+                  "what do i take next", "when is the next one"),
+    "taken_today": ("did i take my medicine", "have i taken my pills",
+                    "am i caught up", "did i miss anything"),
+    "count": ("how many are left", "how many pills do i have",
+              "pill count", "am i running low"),
+    "adherence": ("how am i doing", "my score", "my adherence",
+                  "am i on track"),
+    "addmed": ("add a medication", "add a new medication",
+               "register a medication", "new prescription"),
+}
+
+# Every id above must be one _dispatch can actually act on. "help",
+# "repeat" and "cancel" are handled earlier in respond() and are NOT
+# listed here on purpose: routing to an id the dispatcher does not
+# know produces "Instruction unclear", which is worse than the keyword
+# rules that already catch them.
+# Single distinctive words that belong to a COMMAND, never to a
+# medication. A one-word name pulled out of a sentence can only be
+# compared against these — "nekst" cannot be scored against a phrase
+# like "what is next", because the length guard in the matcher
+# (correctly) refuses to compare a 5-letter word with a 10-letter one.
+COMMAND_WORDS = (
+    "next", "time", "today", "tonight", "date", "day", "count",
+    "left", "remaining", "schedule", "score", "adherence", "record",
+    "profile", "storage", "settings", "home", "medicine", "medication",
+    "medications", "pills", "doses", "dose", "everything",
+)
+
+assert all(k.startswith("nav:") or k in {
+    "time", "date", "remaining_today", "next_dose", "taken_today",
+    "count", "adherence", "addmed"} for k in COMMAND_VOCAB), \
+    "COMMAND_VOCAB contains an intent _dispatch cannot handle"
+
 # ── THE RECOGNISER ───────────────────────────────────────────────────
 # Whisper, in order of preference. The HuggingFace audio course builds
 # its assistant's transcription stage on openai/whisper-base.en for CPU
@@ -290,6 +352,35 @@ INFER_THREADS = max(1, min(2, CPU_CORES - _RESERVED_CORES))
 _STARTUP_LOAD = _load_now()
 if _STARTUP_LOAD > CPU_CORES - _RESERVED_CORES:
     INFER_THREADS = 1
+
+# ── SILERO VAD ───────────────────────────────────────────────────────
+# A real speech/not-speech model instead of an energy threshold.
+#
+# Energy cannot tell a voice from a tap running, a fan, or a door —
+# it only knows loud from quiet. That is why a running sink defeated
+# it: the noise was louder than the gate, so it counted as speech, the
+# turn never ended and the recogniser was handed water. Silero is a
+# 1.3 MB ONNX model that answers "is this 32 ms of audio a human
+# voice?" in well under a millisecond on a Cortex-A72, and it is what
+# the modular speech-to-speech pipelines use for exactly this job.
+#
+# It decides three things here: when a turn starts, when it ends, and
+# whether you have started talking over her.
+VAD_THRESHOLD = float(os.environ.get("DOSE_VAD_THRESHOLD", "0.5"))
+# Frames Silero must call speech before we believe it — one frame is
+# 32 ms, so 2 frames is 64 ms. Short enough to feel instant, long
+# enough that a cupboard door is not a sentence.
+VAD_MIN_SPEECH_FRAMES = int(os.environ.get("DOSE_VAD_MIN_FRAMES", "2"))
+
+# ── BARGE-IN ─────────────────────────────────────────────────────────
+# Talking over her stops her. People interrupt each other constantly;
+# an assistant you have to wait out is the thing that feels like a
+# machine. The bar is deliberately higher than for normal listening —
+# her own voice is leaking back from a speaker inches away, so this
+# must be sure before it cuts her off mid-sentence.
+BARGE_IN = os.environ.get("DOSE_BARGE_IN", "1") not in ("0", "false")
+BARGE_THRESHOLD = float(os.environ.get("DOSE_BARGE_THRESHOLD", "0.75"))
+BARGE_FRAMES = int(os.environ.get("DOSE_BARGE_FRAMES", "4"))  # ~128 ms
 
 # Transcription is a SHORT BURST — a few hundred milliseconds, once per
 # thing you say — so it gets EVERY core. The reservation above protects
@@ -825,6 +916,162 @@ class DoseVoice:
             return self._clean_text(" ".join(parts))
         except Exception:
             return ""
+
+    # ── the voice detector ───────────────────────────────────────────
+    def _load_vad(self):
+        """Load Silero once. Returns the session, or None."""
+        if getattr(self, "_vad", "unset") != "unset":
+            return self._vad
+        self._vad = None
+        self._vad_reason = ""
+        try:
+            import numpy as np          # noqa: F401  (needed below)
+            import onnxruntime as ort
+        except Exception as e:
+            self._vad_reason = "onnxruntime missing (%s)" % str(e)[:40]
+            return None
+        path = None
+        try:
+            import silero_vad
+            base = os.path.dirname(silero_vad.__file__)
+            for name in ("silero_vad_16k_op15.onnx", "silero_vad.onnx"):
+                cand = os.path.join(base, "data", name)
+                if os.path.exists(cand):
+                    path = cand
+                    break
+        except Exception:
+            pass
+        if path is None:
+            cand = os.path.join(VOICE_DIR, "silero_vad.onnx")
+            if os.path.exists(cand):
+                path = cand
+        if path is None:
+            self._vad_reason = "model not installed"
+            return None
+        try:
+            opts = ort.SessionOptions()
+            # one thread: it runs on the audio thread, every 32 ms, and
+            # must never contend with transcription or the camera
+            opts.inter_op_num_threads = 1
+            opts.intra_op_num_threads = 1
+            opts.log_severity_level = 4
+            self._vad = ort.InferenceSession(
+                path, sess_options=opts,
+                providers=["CPUExecutionProvider"])
+            self._vad_state = None
+            self._vad_path = path
+        except Exception as e:
+            self._vad = None
+            self._vad_reason = str(e)[:60]
+        return self._vad
+
+    VAD_FRAME = 512          # samples at 16 kHz = 32 ms
+
+    def vad_speech_prob(self, pcm_bytes):
+        """Probability that this frame is a human voice, 0..1.
+        Returns None when Silero isn't available, so callers fall back
+        to the energy gate rather than going deaf."""
+        sess = self._load_vad()
+        if sess is None:
+            return None
+        try:
+            import numpy as np
+            a = np.frombuffer(pcm_bytes, dtype=np.int16)
+            if a.size < self.VAD_FRAME:
+                return None
+            a = a[:self.VAD_FRAME].astype(np.float32) / 32768.0
+            if self._vad_state is None:
+                self._vad_state = np.zeros((2, 1, 128), dtype=np.float32)
+            names = {i.name for i in sess.get_inputs()}
+            feed = {"input": a.reshape(1, -1)}
+            if "sr" in names:
+                feed["sr"] = np.array(SAMPLE_RATE, dtype=np.int64)
+            if "state" in names:
+                feed["state"] = self._vad_state
+            out = sess.run(None, feed)
+            if len(out) > 1 and getattr(out[1], "shape", None) == (2, 1, 128):
+                self._vad_state = out[1]
+            return float(np.ravel(out[0])[0])
+        except Exception:
+            self._vad = None          # stop trying on a broken model
+            return None
+
+    def reset_vad(self):
+        self._vad_state = None
+
+    def is_speech(self, frame, energetic):
+        """Is this frame a human voice?
+
+        Energy says "something is here". Silero says "that something
+        is a person". Both have to agree — which is what a running tap
+        cannot do, because it is loud but it is not a voice.
+
+        FAILS OPEN, deliberately. If Silero is unavailable, broken, or
+        disagrees with clear audio often enough to look wrong, its vote
+        is dropped and energy decides alone. A voice detector that
+        silently vetoes everything would make the station deaf, and a
+        deaf medication device is far worse than a slightly noisy one.
+        """
+        if not energetic:
+            return False
+        if not self._vad_trusted:
+            return True
+        p = self.vad_speech_prob(frame)
+        if p is None:
+            return True                      # no detector: energy alone
+        self._vad_seen += 1
+        speech = p >= VAD_THRESHOLD
+        if speech:
+            self._vad_agreed += 1
+        # After a few hundred frames of audio that energy called
+        # signal, a working detector will have agreed with some of it.
+        # If it has agreed with almost none, it is not doing the job we
+        # think it is — stop listening to it rather than go deaf.
+        if self._vad_seen >= 300:
+            if self._vad_agreed < self._vad_seen * 0.02:
+                self._vad_trusted = False
+                self._vad_reason = "disagreed with clear audio — ignored"
+            self._vad_seen = self._vad_agreed = 0
+        return speech
+
+    def _detect_barge_in(self, data):
+        """Have they started talking while she is still speaking?
+
+        Requires SUSTAINED voice — a couple of consecutive frames
+        Silero calls speech — so a cough, a door, or her own voice
+        leaking back through the speaker does not cut her off. Once it
+        fires, playback stops immediately and the turn becomes theirs.
+        Interrupting an assistant is how people actually talk; waiting
+        politely for it to finish a sentence you no longer want is
+        the thing that makes one feel like a machine."""
+        if not BARGE_IN or not self._vad_trusted:
+            return
+        try:
+            import audioop
+            if audioop.rms(data, 2) < max(120.0, self._nfloor * 2.5):
+                self._barge_frames = 0
+                return
+        except Exception:
+            return
+        p = self.vad_speech_prob(data)
+        if p is None:
+            return
+        if p >= BARGE_THRESHOLD:
+            self._barge_frames = getattr(self, "_barge_frames", 0) + 1
+            if self._barge_frames >= BARGE_FRAMES:
+                self._barge = True
+                self._stop_playback()
+        else:
+            self._barge_frames = 0
+
+    def _stop_playback(self):
+        """Cut the audio that is playing, now."""
+        proc = getattr(self, "_play_proc", None)
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
 
     def _probe_moonshine(self):
         """Moonshine for speed, Whisper for when speed was not enough.
@@ -2287,6 +2534,14 @@ class DoseVoice:
             # a high floor means the room is the problem, not the
             # software or even the microphone.
             ("Room noise", self._room_note(), self._nfloor < 250),
+            ("Voice detector",
+             ("Silero · listening" if self._vad_trusted
+              and getattr(self, "_vad", None) not in (None, "unset")
+              else (getattr(self, "_vad_reason", "") or "energy only")),
+             bool(self._vad_trusted
+                  and getattr(self, "_vad", None) not in (None, "unset"))),
+            ("Talk over me", "yes — it stops" if BARGE_IN else "off",
+             BARGE_IN),
             ("Endpoint", "%.2fs done · %.1fs mid-thought"
              % (ENDPOINT_STABLE, ENDPOINT_DANGLING),
              ENDPOINT_STABLE <= 0.5),
@@ -2813,6 +3068,10 @@ class DoseVoice:
         self._nfloor = 50.0      # learned ambient noise floor (RMS)
         self._snr = 0.0          # how far the last block stood above it
         self._cal = None         # calibration in progress, if any
+        self._vad_trusted = True  # cleared if Silero looks wrong
+        self._vad_seen = 0
+        self._vad_agreed = 0
+        self._barge = False      # user started talking over her
         self._cal_profile = None  # what calibration measured
         self._clip_blocks = 0    # blocks where the input saturated
         self._blocks_seen = 0
@@ -2828,7 +3087,15 @@ class DoseVoice:
             """Common path for every capture backend: gate, resample
             to 16 kHz, apply auto-gain, feed the queue, service the
             live level meter."""
-            if self._muted or self.state == "speaking":
+            if self._muted:
+                return
+            if self.state == "speaking":
+                # BARGE-IN. Her own voice is coming out of a speaker
+                # inches away, so "is anything loud" is useless here —
+                # but "is this a HUMAN VOICE that is not the clip we
+                # are playing" is answerable, and that is the whole
+                # reason a real voice detector is worth its 1.3 MB.
+                self._detect_barge_in(data)
                 return
             if self._native_rate != SAMPLE_RATE:
                 try:
@@ -2899,7 +3166,8 @@ class DoseVoice:
                     self._clip_blocks += 1
                     self._clip_recent = time.time()
                 self._blocks_seen += 1
-                if rms > gate:                     # real signal, not hiss
+                energetic = rms > gate
+                if energetic and self.is_speech(data, True):
                     # stamp the moment: the endpointer uses this to cut
                     # the instant the user stops talking
                     self._last_voice_ts = time.time()
@@ -2911,7 +3179,7 @@ class DoseVoice:
                     g = max(1.0, min(3000.0 / rms, self._agc_ceiling()))
                     # rise quickly toward target, no pumping
                     self._gain = self._gain * 0.5 + g * 0.5
-                else:
+                elif not energetic:
                     self._gain = 1.0               # ambient: leave clean
                 if self._gain > 1.05:
                     data = audioop.mul(data, 2, self._gain)
@@ -3757,10 +4025,26 @@ class DoseVoice:
             routes.sort(key=lambda r: r[0][0] != won)
         for cmd, label in routes:
             try:
-                r = subprocess.run(cmd, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL,
-                                   timeout=120, env=self._audio_env())
-                if r.returncode == 0:
+                # Popen, not run(): playback has to be INTERRUPTIBLE so
+                # barge-in can cut her off the moment you start talking.
+                # subprocess.run() gives no handle to stop.
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, env=self._audio_env())
+                self._play_proc = proc
+                try:
+                    rc = proc.wait(timeout=120)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    rc = -1
+                finally:
+                    self._play_proc = None
+                if self._barge:
+                    return label          # stopped on purpose
+                if rc == 0:
                     self._play_route = cmd[0]
                     return label
             except Exception:
@@ -3883,6 +4167,8 @@ class DoseVoice:
         ready long before the previous one finishes, so it comes out
         as one continuous reply with no gap in the middle."""
         self._last_reply = text
+        self._barge = False
+        self._barge_frames = 0
         self._set_ui_state("speaking", user_text=user_text,
                            reply_text=text)
         try:
@@ -3937,9 +4223,11 @@ class DoseVoice:
             else:
                 self._speak_uncached(chunks[0])
 
-            # 4) the remainder, each as soon as it exists
+            # 4) the remainder, each as soon as it exists — unless
+            #    they have started talking, in which case the rest of
+            #    the sentence is no longer wanted
             for i in range(1, len(chunks)):
-                if self._stop.is_set():
+                if self._stop.is_set() or self._barge:
                     break
                 done[i].wait(timeout=20)
                 path = ready.get(i)
@@ -4022,7 +4310,14 @@ class DoseVoice:
             # she has stopped speaking; clear whatever the microphone
             # picked up of her own voice before listening again
             self._drain(rec)
+            self.reset_vad()
             self._last_voice_ts = 0.0
+            if self._barge:
+                # They cut her off. That is not a failure to handle —
+                # it is them taking their turn, so take it immediately
+                # rather than waiting out a pause they already filled.
+                self._barge = False
+                self._barge_frames = 0
 
             if self._closed.is_set():
                 break
@@ -4156,6 +4451,46 @@ class DoseVoice:
         def has(*phrases):
             return any(p in t for p in phrases)
 
+        def med_route(intent_id, name):
+            """A route that depends on a medication NAME.
+
+            Several patterns here happily pull a "drug name" out of a
+            sentence — "what's next" gives "nekst", "did I take my
+            medisin" gives "medisin". If that name is not actually a
+            medication, this was not a question about one, and
+            answering "that medication is not in my database" is both
+            wrong and a dead end. Returning None instead lets the
+            phonetic command matcher below have a go at what they
+            probably meant."""
+            name = (name or "").strip()
+            if not name:
+                return (intent_id, None)
+            try:
+                key, md = self._find_med(name)
+                if md:
+                    return (intent_id, name)
+            except Exception:
+                return (intent_id, name)
+            # Not a medication we have. Two very different cases:
+            #
+            #   "how many BANANA pills do I have"  — they named a real
+            #       thing we do not stock. Say so, so they can correct
+            #       it and teach us the right name.
+            #   "what's NEKST"                     — that is not a name
+            #       at all, it is a mis-transcribed command word.
+            #
+            # Only the second should fall through. The test is whether
+            # the extracted name itself sounds like part of a command.
+            if _nlu_mod is not None:
+                try:
+                    if _nlu_mod.match_choice(
+                            name, {"cmd": COMMAND_WORDS},
+                            threshold=80.0):
+                        return None
+                except Exception:
+                    pass
+            return (intent_id, name)
+
         if has(" add a new medication", " add new medication",
                " add a medication", " add medication", " new medication ",
                " add a new pill", " add a prescription",
@@ -4189,7 +4524,20 @@ class DoseVoice:
             what = m.group(1).strip()
             if what in GENERIC_MEDS:
                 return ("taken_today", None)
-            return ("taken_check", what)
+            # a generic word, misheard — "did i take my medisin" is
+            # still a question about the whole day, not about a drug
+            # named "medisin". Checked BEFORE the medication route,
+            # which would otherwise answer first and never reach here.
+            if _nlu_mod is not None:
+                try:
+                    if _nlu_mod.match_choice(what, {"g": GENERIC_MEDS},
+                                             threshold=80.0):
+                        return ("taken_today", None)
+                except Exception:
+                    pass
+            r = med_route("taken_check", what)
+            if r:
+                return r
         if has(" did i take everything ", " have i taken everything ",
                " am i up to date ", " am i caught up ",
                " did i miss anything ", " have i missed anything "):
@@ -4202,7 +4550,9 @@ class DoseVoice:
             m = re.search(r"how (?:many|much) ([a-z ]+?) "
                           r"(?:do i have|is left|left) ", t)
         if m:
-            return ("count", m.group(1))
+            r = med_route("count", m.group(1))
+            if r:
+                return r
         if has(" how many pills ", " pill count ", " how many do i have "):
             return ("count", None)
 
@@ -4234,12 +4584,16 @@ class DoseVoice:
         m = re.search(r"when (?:do|should|will) i take "
                       r"(?:my |the )?([a-z ]+?) $", t)
         if m:
-            return ("schedule", m.group(1))
+            r = med_route("schedule", m.group(1))
+            if r:
+                return r
 
         m = re.search(r"(?:how (?:do|should) i take|tell me about|"
                       r"what is|whats|what's) (?:my |the )?([a-z ]+?) $", t)
         if m:
-            return ("med_info", m.group(1))
+            r = med_route("med_info", m.group(1))
+            if r:
+                return r
 
         if has(" what time is it ", " what time ", " the time "):
             return ("time", None)
@@ -4328,6 +4682,28 @@ class DoseVoice:
             if hit and (arg or nlu_i.name not in ("pills_left", "did_take",
                                                   "dispense")):
                 return hit
+
+        # ── TRULY LAST: what does this SOUND like?
+        #    Everything above is exact-ish matching. This asks "which
+        #    of the things I can actually do does this sound most
+        #    like?", and it is the difference between a station that
+        #    answers only to remembered phrases and one that acts on
+        #    what you meant.
+        #
+        #    It runs dead last on purpose. It used to run earlier and
+        #    hijacked "how many banana pills do I have left" into
+        #    "opening storage" — which not only answered the wrong
+        #    thing but broke the teaching flow, where the station is
+        #    supposed to say it does not have that one so you can
+        #    correct it and give it the real name.
+        if _nlu_mod is not None and len(t.split()) <= 8:
+            try:
+                hit = _nlu_mod.match_choice(t, COMMAND_VOCAB,
+                                            threshold=VOCAB_THRESHOLD)
+                if hit:
+                    return (hit, None)
+            except Exception:
+                pass
         return None
 
     # ══════════════════════════════════════════════════════════════════

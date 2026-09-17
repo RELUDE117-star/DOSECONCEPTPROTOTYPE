@@ -34,6 +34,7 @@ probe "piper"              || PIP_PKGS="$PIP_PKGS piper-tts"
 probe "rapidfuzz"          || PIP_PKGS="$PIP_PKGS rapidfuzz"
 probe "jellyfish"          || PIP_PKGS="$PIP_PKGS jellyfish"
 probe "moonshine_voice"    || PIP_PKGS="$PIP_PKGS moonshine-voice"
+probe "silero_vad"         || PIP_PKGS="$PIP_PKGS silero-vad"
 # Python 3.13 removed stdlib audioop; audioop-lts restores it
 python3 -c "import audioop" 2>/dev/null || PIP_PKGS="$PIP_PKGS audioop-lts"
 command -v pip3 >/dev/null 2>&1 || APT_PKGS="$APT_PKGS python3-pip"
@@ -184,6 +185,10 @@ if [ ! -f "$VOICE_DIR/.bt_ready3" ]; then
     # what was said. Accuracy matters more than the extra download.
     python3 -m pip install --break-system-packages faster-whisper 2>/dev/null \
         || python3 -m pip install faster-whisper 2>/dev/null || true
+    # Silero VAD — a real speech/not-speech model. 1.3 MB, and it is
+    # what lets the station tell your voice from a running tap.
+    python3 -m pip install --break-system-packages silero-vad 2>/dev/null \
+        || python3 -m pip install silero-vad 2>/dev/null || true
     python3 -m pip install --break-system-packages useful-moonshine-onnx 2>/dev/null \
         || python3 -m pip install useful-moonshine-onnx 2>/dev/null || true
     touch "$VOICE_DIR/.bt_ready3"

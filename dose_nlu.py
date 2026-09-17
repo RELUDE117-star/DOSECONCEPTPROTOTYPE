@@ -173,8 +173,14 @@ def match_choice(text, options, threshold=SCREEN_MATCH_THRESHOLD):
     toks = normalize(text).replace("'", "").split()
     if not toks:
         return None
+    # Windows up to SIX words, plus the whole phrase. It used to stop
+    # at three, which meant a four-word command like "how am i doing"
+    # could never be matched at all — the window was shorter than the
+    # thing being matched.
     grams = {" ".join(toks[i:i + n]).replace(" ", "")
-             for n in (1, 2, 3) for i in range(len(toks) - n + 1)}
+             for n in range(1, 7)
+             for i in range(max(0, len(toks) - n + 1))}
+    grams.add("".join(toks))
     best_key, best_score = None, 0.0
     for key, aliases in options.items():
         for alias in aliases:

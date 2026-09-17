@@ -448,6 +448,62 @@ ok("ACCURACY_ORDER" in ms, "deliberately, not by accident")
 ok("tiny — the only one available" in ms,
    "and if tiny really is all there is, it says so on screen")
 
+print("== 15. it acts on what you MEANT, without hijacking ==")
+# The phonetic command vocabulary runs dead last. An earlier version
+# ran it sooner and turned "how many banana pills do I have left" into
+# "opening storage" — which answered the wrong thing AND broke the
+# teaching flow, where the station must say it does not have that one
+# so you can correct it.
+MISHEARD_CMD = [
+    ("whats nekst", ("next", "nothing further")),
+    ("what time izit", ("the time is",)),
+    ("how am i doin", ("adherence", "percent")),
+    ("pil count", ("sertraline",)),
+    ("my adherance", ("adherence", "percent")),
+    ("todays medicashun", ("sertraline",)),
+    ("am i running lo", ("sertraline",)),
+    ("did i take my medisin", ("still to take", "not yet", "logged")),
+    ("my recerd", ("record",)),
+    ("open storge", ("storage",)),
+    ("go to setings", ("settings",)),
+]
+for phrase, wants in MISHEARD_CMD:
+    _v._flow = None
+    reply, _ = says(phrase)
+    low = reply.lower()
+    ok(any(w in low for w in wants)
+       and not any(b in low for b in ("unclear", "insufficient",
+                                      "did not copy", "didn't catch")),
+       "%-24r -> %s" % (phrase, reply[:44]))
+
+print("== 16. ...and never at the expense of naming a drug ==")
+# An unknown drug name must still be reported as unknown, because
+# that is what lets the user correct it.
+for phrase in ("how many banana pills do i have left",
+               "how many happy pills do i have left"):
+    _v._flow = None
+    reply, _ = says(phrase)
+    ok("do not have" in reply.lower() or "not have" in reply.lower(),
+       "%-40r still says it does not have that one" % phrase)
+    ok("storage" not in reply.lower(),
+       "%-40r is NOT turned into a screen change" % phrase)
+
+# and nothing dangerous is ever matched phonetically
+import dose_voice as _dvv                                    # noqa: E402
+NEVER = ["sertraline", "atorvastatin", "metformin",
+         "i want to kill myself", "chest pain",
+         "should i take a double dose", "can i drink alcohol with this",
+         "what are the side effects", "dispense my sertraline"]
+for phrase in NEVER:
+    ok(_nlu.match_choice(phrase, _dvv.COMMAND_VOCAB,
+                         threshold=_dvv.VOCAB_THRESHOLD) is None,
+       "%-34r is never matched to a command" % phrase)
+
+ok(all(k.startswith("nav:") or k in {
+    "time", "date", "remaining_today", "next_dose", "taken_today",
+    "count", "adherence", "addmed"} for k in _dvv.COMMAND_VOCAB),
+   "every command in the vocabulary is one the dispatcher can act on")
+
 print()
 print("accuracy suite: %d passed, %d failed" % (PASSED, FAILED))
 if FAILED:
