@@ -217,6 +217,16 @@ KEYBOARD_ROWS = [
     ["SPACE"],
 ]
 
+# A GitHub token is letters, digits and underscores — the medication
+# keyboard has none of the last two, so it cannot type one. This
+# layout can, and is used only for that.
+KEYBOARD_ROWS_TOKEN = [
+    list("1234567890"),
+    list("QWERTYUIOP"),
+    list("ASDFGHJKL") + ["_"],
+    ["SHIFT"] + list("ZXCVBNM") + ["DEL"],
+]
+
 
 # ── PIL Drawing Helpers ───────────────────────────────────────────────────
 
@@ -2365,11 +2375,26 @@ class DoseApp:
         self._kbd_imgs[key] = tk_img
         return tk_img
 
-    def _show_keyboard(self):
+    def _kbd_rows(self):
+        return (KEYBOARD_ROWS_TOKEN
+                if getattr(self, "_kbd_purpose", "med") == "token"
+                else KEYBOARD_ROWS)
+
+    def _show_keyboard(self, purpose="med"):
         if getattr(self, '_kbd_overlay', None):
             return
-        self._kbd_text = self._draft["name"]
-        self._kbd_shift = True
+        self._kbd_purpose = purpose
+        if purpose == "token":
+            # start from whatever is already stored, so a typo can be
+            # corrected rather than retyped
+            try:
+                self._kbd_text = (self._audit_token() or "")
+            except Exception:
+                self._kbd_text = ""
+            self._kbd_shift = False
+        else:
+            self._kbd_text = self._draft["name"]
+            self._kbd_shift = True
         t = self.theme
         kbd_h = 280
         # The overlay canvas is created ONCE and redrawn in place — the old
@@ -2387,7 +2412,9 @@ class DoseApp:
 
     def _hide_keyboard(self, save=False):
         if getattr(self, '_kbd_overlay', None):
-            if save:
+            if save and getattr(self, "_kbd_purpose", "med") == "token":
+                self._save_typed_token(self._kbd_text)
+            elif save:
                 self._draft["name"] = self._kbd_text
             self._kbd_overlay.destroy()
             self._kbd_overlay = None
@@ -2423,7 +2450,7 @@ class DoseApp:
         key_gap = 4
         start_y = 60
 
-        for row_idx, row in enumerate(KEYBOARD_ROWS):
+        for row_idx, row in enumerate(self._kbd_rows()):
             row_y = start_y + row_idx * (key_h + key_gap)
             if len(row) == 1 and row[0] == "SPACE":
                 # Space bar
@@ -2474,7 +2501,7 @@ class DoseApp:
         key_gap = 4
         start_y = 60
 
-        for row_idx, row in enumerate(KEYBOARD_ROWS):
+        for row_idx, row in enumerate(self._kbd_rows()):
             row_y = start_y + row_idx * (key_h + key_gap)
             if not (row_y <= y <= row_y + key_h):
                 continue
@@ -5898,6 +5925,60 @@ class DoseApp:
             return False
         return tok.startswith(("ghp_", "github_pat_", "gho_", "ghs_"))
 
+    def _save_typed_token(self, tok):
+        """Store a token typed on the station itself.
+
+        This is the last piece that made posting impossible without a
+        terminal or a USB stick. It never goes into the repository —
+        this repo is public, and a `repo`-scoped token is full
+        read/write access to EVERY repository on the account, so a
+        copy in a public file would hand that to anyone who cloned
+        it. It lives on the device, readable only by its owner."""
+        tok = (tok or "").strip()
+        if not self._looks_like_token(tok):
+            self._audit_status = ("that does not look like a GitHub "
+                                  "token — it starts ghp_ or "
+                                  "github_pat_")
+            return False
+        try:
+            os.makedirs(APP_DIR, exist_ok=True)
+            dest = os.path.join(APP_DIR, "github_token")
+            with open(dest, "w") as f:
+                f.write(tok)
+            os.chmod(dest, 0o600)
+        except Exception as e:
+            self._audit_status = "could not save: %s" % str(e)[:40]
+            return False
+        self._audit_status = "token saved — checking it…"
+        self._draw_frame()
+        threading.Thread(target=self._verify_token, daemon=True,
+                         name="token-check").start()
+        return True
+
+    def _verify_token(self):
+        """Ask GitHub whether the token actually works, and say so.
+        A token that is stored but rejected is worse than none — it
+        looks configured and silently fails."""
+        try:
+            import urllib.request
+            tok = self._audit_token()
+            req = urllib.request.Request(
+                "https://api.github.com/repos/%s" % REPO,
+                headers={"Authorization": "Bearer " + (tok or ""),
+                         "Accept": "application/vnd.github+json",
+                         "User-Agent": "dose-station"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                info = json.loads(r.read().decode())
+            perms = info.get("permissions") or {}
+            if perms.get("push") or perms.get("admin"):
+                self._audit_status = ("token works — SEND TO GITHUB is "
+                                      "ready")
+            else:
+                self._audit_status = ("token reaches GitHub but cannot "
+                                      "write to this repository")
+        except Exception as e:
+            self._audit_status = "token rejected: %s" % str(e)[:44]
+
     def _audit_token(self):
         for cand in self.AUDIT_TOKEN_PATHS:
             try:
@@ -6042,19 +6123,28 @@ class DoseApp:
                 status, self.font_tiny, 590), font=self.font_tiny,
                 fill=DOSE_BLUE_LT, anchor="nw")
 
-        for label, x0, cb in (("REFRESH", 42, self._draw_frame),
-                              ("SEND TO GITHUB", 222, self._post_audit),
-                              ("CLOSE", 496, self._close_audit)):
-            c.create_image(x0, 418, image=self._get_tk_image(
-                "audit_%s" % label, _pil_rounded_rect(
-                    150, 40, 12, DOSE_BLUE if label == "CLOSE"
-                    else t["elevated_bg"])), anchor="nw")
-            c.create_text(x0 + 75, 438, text=label,
+        buttons = [("REFRESH", self._draw_frame)]
+        if not have_tok:
+            buttons.append(("ENTER TOKEN",
+                            lambda: self._show_keyboard("token")))
+        buttons.append(("SEND TO GITHUB", self._post_audit))
+        buttons.append(("CLOSE", self._close_audit))
+        bwid = max(96, min(160, (590 - 8 * (len(buttons) - 1))
+                           // len(buttons)))
+        bxp = 42
+        for label, cb in buttons:
+            primary = label == "CLOSE"
+            c.create_image(bxp, 414, image=self._get_tk_image(
+                "audit_b_%s" % label, _pil_rounded_rect(
+                    bwid, 40, 12,
+                    DOSE_BLUE if primary else t["elevated_bg"])),
+                anchor="nw")
+            c.create_text(bxp + bwid // 2, 434, text=label,
                           font=self.font_small_bold,
-                          fill="#06101E" if label == "CLOSE" else t["fg"],
+                          fill="#06101E" if primary else t["fg"],
                           anchor="center")
-            self._click_zones.append((x0, 418, x0 + 150, 458, cb))
-
+            self._click_zones.append((bxp, 414, bxp + bwid, 454, cb))
+            bxp += bwid + 8
     # ── ROOM CALIBRATION SCREEN ──────────────────────────────────────
     def _open_calibrate(self):
         if self.mode != "calibrate":

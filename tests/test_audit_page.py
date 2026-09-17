@@ -473,6 +473,35 @@ alltext3 = " ".join(
 ok("not understood" in alltext3,
    "and the page shows the miss count at a glance")
 
+print("== 6c. the token can be typed on the station itself ==")
+# No terminal, no USB stick, no editing files over SSH. This was the
+# last thing that made posting impossible from the device.
+SRCK = open(os.path.join(ROOT, "dose_app.py"), errors="ignore").read()
+ok("KEYBOARD_ROWS_TOKEN" in SRCK,
+   "there is a keyboard layout that can type a token")
+rows_t = SRCK.split("KEYBOARD_ROWS_TOKEN = [")[1].split("]\n")[0]
+ok('"1234567890"' in rows_t, "with digits")
+ok('"_"' in rows_t, "and an underscore — a token has both, and the "
+   "medication keyboard has neither, so it could not type one")
+ok('_show_keyboard("token")' in SRCK, "reachable from the audit page")
+ok("_save_typed_token" in SRCK, "and what is typed gets saved")
+ok("_verify_token" in SRCK,
+   "then CHECKED against GitHub — a token that is stored but "
+   "rejected looks configured and silently fails")
+
+sv = SRCK.split("def _save_typed_token")[1].split("\n    def ")[0]
+ok("_looks_like_token" in sv, "junk is rejected before it is stored")
+ok("0o600" in sv, "and it is written owner-only")
+ok("APP_DIR" in sv and "repo" not in sv.split('"""')[2],
+   "onto the device, never into the repository")
+
+app._audit_status = ""
+app.AUDIT_TOKEN_PATHS = (os.path.join(_tf3.mkdtemp(), "none"),)
+ok(app._save_typed_token("not a token") is False,
+   "typing nonsense is refused")
+ok("does not look like" in app._audit_status,
+   "and says why: %r" % app._audit_status[:44])
+
 print("== 7b. THE FULL AUDIT TEST ==")
 # A scripted run through the REAL listening path, scored, with a
 # verdict naming which part is at fault. This is the thing that turns
