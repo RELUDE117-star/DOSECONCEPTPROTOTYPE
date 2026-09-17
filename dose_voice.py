@@ -1678,28 +1678,53 @@ class DoseVoice:
         self._online_cache = (ok, now)
         return ok
 
+    # A hard wall-clock budget for the whole cloud attempt. Cloud STT
+    # must NEVER freeze a turn — if it has not answered within this, we
+    # abandon it and let the local model reply. gradio_client's own
+    # connect/cold-start can stall for tens of seconds, which is exactly
+    # what made the station look deaf, so the budget is enforced here on
+    # a worker thread the turn does not wait past.
+    CLOUD_BUDGET_S = float(os.environ.get("DOSE_CLOUD_BUDGET", "5.0"))
+
     def _cloud_transcribe(self, audio_bytes):
-        """Transcribe via the free cloud chain. Returns
-        (text, engine_tag, secs). Never raises."""
-        try:
-            import dose_cloud_stt as _c
-            path = self._write_wav(audio_bytes)
+        """Transcribe via the free cloud chain, under a hard time
+        budget. Returns (text, engine_tag, secs). Never raises, never
+        blocks the turn longer than CLOUD_BUDGET_S."""
+        box = {"text": "", "eng": "cloud", "secs": 0.0}
+
+        def work():
             try:
-                res, _all = _c.cloud_transcribe(path, language="en")
-            finally:
+                import dose_cloud_stt as _c
+                path = self._write_wav(audio_bytes)
                 try:
-                    os.unlink(path)
-                except Exception:
-                    pass
-            if res and res.ok:
-                return res.text, "cloud:" + res.engine, res.secs
-            # record why, so the audit can show it
-            if res and res.error:
-                self._cloud_error = "%s: %s" % (res.engine, res.error)
-            return "", "cloud", (res.secs if res else 0.0)
-        except Exception as e:
-            self._cloud_error = str(e)[:80]
-            return "", "cloud", 0.0
+                    res, _all = _c.cloud_transcribe(
+                        path, order=_c.available_providers(),
+                        language="en")
+                finally:
+                    try:
+                        os.unlink(path)
+                    except Exception:
+                        pass
+                if res and res.ok:
+                    box["text"] = res.text
+                    box["eng"] = "cloud:" + res.engine
+                    box["secs"] = res.secs
+                elif res and res.error:
+                    self._cloud_error = "%s: %s" % (res.engine, res.error)
+            except Exception as e:
+                self._cloud_error = str(e)[:80]
+
+        th = threading.Thread(target=work, daemon=True,
+                              name="cloud-stt")
+        th.start()
+        th.join(self.CLOUD_BUDGET_S)
+        if th.is_alive():
+            # cloud is taking too long — abandon it for THIS turn and let
+            # local answer. The worker is a daemon; it dies with the app.
+            self._cloud_error = "timed out after %.1fs — used local" \
+                % self.CLOUD_BUDGET_S
+            return "", "cloud", self.CLOUD_BUDGET_S
+        return box["text"], box["eng"], box["secs"]
 
     def _better_transcribe(self, audio_bytes, vosk_text, allow_cloud=True):
         """Work out what was actually said, trying harder when the
@@ -3576,9 +3601,9 @@ class DoseVoice:
                         rows.append(("Speech (cloud)", True,
                                      "off (DOSE_STT_MODE=local)"))
                     elif not provs:
-                        rows.append(("Speech (cloud)", False,
-                                     "unavailable — install gradio_client "
-                                     "or add groq_key"))
+                        rows.append(("Speech (cloud)", True,
+                                     "no key — running LOCAL. Add groq_key "
+                                     "(fast) or hf_token to offload."))
                     else:
                         on = self._is_online()
                         # note when HF is anonymous vs on the user's quota

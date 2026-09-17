@@ -499,9 +499,12 @@ def ab_stt(wav_path, language="en"):
         rows.append({"engine": "cloud", "text": "", "secs": 0.0,
                      "error": "offline — cloud engines skipped"})
         return rows, online
-    # run ALL configured providers (want_all), so we can diff them
-    _, results = cloud.cloud_transcribe(wav_path, language=language,
-                                        want_all=True)
+    # run ALL providers (want_all), so we can diff them. The diagnostic
+    # runs offline, so anonymous HF is allowed here even though the live
+    # assistant requires a credential for it.
+    _, results = cloud.cloud_transcribe(
+        wav_path, order=cloud.available_providers(anonymous_ok=True),
+        language=language, want_all=True)
     for r in results:
         rows.append({"engine": r.engine, "text": r.text,
                      "secs": r.secs, "error": r.error})

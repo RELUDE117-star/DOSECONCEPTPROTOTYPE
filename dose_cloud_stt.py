@@ -312,19 +312,26 @@ def _gradio_client_available():
 
 
 # ── the fallback chain ────────────────────────────────────────────────
-def available_providers():
+def available_providers(anonymous_ok=False):
     """Which cloud providers can be used right now, in preference order.
 
-    The point of this whole module is that the Pi stops doing the STT
-    work — so the Hugging Face ZeroGPU Space counts as available WITHOUT
-    a token: gradio_client can call a public Space anonymously (a token
-    only raises the free daily quota). That means a fresh device offloads
-    to the cloud out of the box, with nothing to configure. Groq still
-    needs its free key, because there is no anonymous Groq. Set
-    DOSE_STT_MODE=local to force everything back onto the Pi."""
+    LIVE path (anonymous_ok=False, the default): a provider is only
+    offered if it has a real credential — Groq needs its free key, HF
+    needs a token. This matters because an ANONYMOUS Hugging Face
+    ZeroGPU call goes through gradio_client, whose connect/cold-start
+    can block for many seconds; putting that in the middle of a
+    conversation made the station look deaf. So the live assistant only
+    goes to the cloud when a credential makes it fast and reliable, and
+    otherwise stays on the quick local model.
+
+    DIAGNOSTIC path (anonymous_ok=True): the A/B tool may use HF
+    anonymously, because that runs offline where a slow call is fine.
+
+    Set DOSE_STT_MODE=local to force everything back onto the Pi."""
     have = []
     gk = groq_key()
-    hf_ok = _gradio_client_available()      # token optional
+    ht = hf_token()
+    hf_ok = bool(ht) or (anonymous_ok and _gradio_client_available())
     for name in provider_order():
         if name == "groq" and gk:
             have.append("groq")

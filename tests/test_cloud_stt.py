@@ -45,20 +45,25 @@ ok("gradio_client" in src, "HF free ZeroGPU path via gradio_client")
 ok("rate_limited" in src,
    "a rate-limit is caught and flagged, not paid around")
 
-print("== 2. cloud offloads by default; local is the fallback ==")
+print("== 2. LIVE path needs a credential; anon HF is diagnostic-only ==")
 for k in ("GROQ_API_KEY", "HF_TOKEN", "HUGGINGFACE_TOKEN",
           "HUGGING_FACE_HUB_TOKEN", "GROQ_MODEL"):
     os.environ.pop(k, None)
-# HF ZeroGPU counts as available with NO token (anonymous) as long as
-# gradio_client is installed — so a fresh device offloads out of the box.
-# Groq still needs its free key.
-provs = cloud.available_providers()
-ok("groq" not in provs, "Groq is NOT offered without its free key")
-ok(("hf" in provs) == cloud._gradio_client_available(),
-   "HF is offered iff gradio_client is present, token optional "
-   "(anonymous ZeroGPU) — the Pi offloads with zero config")
+# The LIVE assistant only goes to the cloud with a real credential. An
+# anonymous HF ZeroGPU call goes through gradio_client, whose cold-start
+# can stall for many seconds — putting that in a live turn made the mic
+# look deaf. So with no key, the live path offers NOTHING and the Pi
+# stays on the fast local model.
+live = cloud.available_providers()             # anonymous_ok=False
+ok(live == [],
+   "no credential -> live cloud offers nothing (Pi stays local, mic "
+   "keeps working): %r" % live)
+# The DIAGNOSTIC path may use anonymous HF, because it runs offline.
+diag = cloud.available_providers(anonymous_ok=True)
+ok(("hf" in diag) == cloud._gradio_client_available(),
+   "diagnostic path allows anonymous HF when gradio_client is present")
 ok(cloud.hf_is_authenticated() is False,
-   "with no token, HF runs on the shared anonymous free quota")
+   "with no token, HF (diagnostic) is on the shared anonymous quota")
 w, allr = cloud.cloud_transcribe("/does/not/exist.wav", order=[])
 ok(not w.ok and "no cloud provider" in w.error,
    "an EMPTY order returns a clean error, never a crash")
@@ -200,6 +205,50 @@ v3._trim_silence = lambda a, keep_ms=140: a
 got3 = v3._better_transcribe(b"x" * 4000, "")
 ok(got3 == "open settings",
    "cloud FAILED -> local fallback answers, no crash (%r)" % got3)
+
+# THE DEAFNESS REGRESSION: a cloud call that HANGS must not freeze the
+# turn. _cloud_transcribe enforces a hard budget on a worker thread; the
+# turn must return the LOCAL answer within roughly that budget.
+import time as _t                                             # noqa: E402
+v4 = dv.DoseVoice.__new__(dv.DoseVoice)
+v4._med_names = lambda: []
+for a, val in (("_raw_vosk", ""), ("_raw_fast", ""), ("_raw_slow", ""),
+               ("_raw_cloud", ""), ("_fw_conf", 0.0),
+               ("_fast_choice", "whisper")):
+    setattr(v4, a, val)
+v4.CLOUD_BUDGET_S = 0.5          # tiny budget for the test
+v4._cloud_enabled = lambda: True
+v4._is_online = lambda ttl=30.0: True
+v4._fast_transcribe = lambda a: ("open storage", "whisper-tiny.en")
+v4._whisper_transcribe = lambda a: ""
+v4._trim_silence = lambda a, keep_ms=140: a
+v4._write_wav = lambda a: "/tmp/_hang.wav"
+
+# real _cloud_transcribe with a provider that sleeps far past the budget
+import dose_cloud_stt as _cc                                  # noqa: E402
+_real_ct = _cc.cloud_transcribe
+
+
+def _hanging(*a, **k):
+    _t.sleep(30)                 # would hang the turn if not bounded
+    return _cc.Result("groq", "too late"), []
+
+
+_cc.cloud_transcribe = _hanging
+_cc.available_providers = lambda anonymous_ok=False: ["groq"]
+t0 = _t.time()
+got4 = v4._better_transcribe(b"x" * 4000, "")
+elapsed = _t.time() - t0
+_cc.cloud_transcribe = _real_ct
+ok(got4 == "open storage",
+   "a HANGING cloud call -> local answer still returned (%r)" % got4)
+ok(elapsed < 2.0,
+   "the turn was NOT frozen by the hung cloud call (%.2fs, budget 0.5s)"
+   % elapsed)
+
+ctsrc = vsrc.split("def _cloud_transcribe")[1].split("\n    def ")[0]
+ok("join(self.CLOUD_BUDGET_S)" in ctsrc and "is_alive()" in ctsrc,
+   "cloud runs on a worker joined with a hard budget — never blocks")
 
 print("== 6. voice_diagnostics: measurements ==")
 import voice_diagnostics as vd                                # noqa: E402
