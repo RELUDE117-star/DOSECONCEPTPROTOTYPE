@@ -9,6 +9,23 @@ Durable facts for future sessions. **No secrets in this file, ever.**
 
 ## Direct access (after bootstrap)
 - SSH alias: **`dose-pi`** → user `claudeagent`, key `~/.ssh/dose_pi_claude_ed25519` (Mac only).
+- Authorised dev key: Ed25519, fingerprint
+  `SHA256:sNBB8HJA4yPXgAbXSGyFNJunODwia11ILumD/dvB2Hk` (Ryan's MacBook Pro).
+  Public half is in `tools/claude_dev_authorized_keys`; the private half
+  exists only on that Mac and must never leave it.
+- Mac `~/.ssh/config` entry to append (do not disturb other hosts):
+  ```
+  Host dose-pi
+      HostName <pi-hostname>.local        # or the LAN IP from the bootstrap status
+      User claudeagent
+      IdentityFile ~/.ssh/dose_pi_claude_ed25519
+      IdentitiesOnly yes
+      ServerAliveInterval 30
+      ServerAliveCountMax 4
+  ```
+- Finding the Pi from the Mac (LAN only; no router port is opened):
+  `dns-sd -B _ssh._tcp` , `ping raspberrypi.local`, or read
+  `~/dose-home-station/claude-bootstrap-status.json` on the device.
 - The dedicated account, key-only SSH, and dev sudo are provisioned by
   `tools/bootstrap_claude_access.py`, which runs on the Pi after a normal
   GitHub update (idempotent; state in `/var/lib/dose-claude-bootstrap/` or
