@@ -360,6 +360,14 @@ TARGET_SPEECH_RMS = float(os.environ.get("DOSE_TARGET_RMS", "3000"))
 # Above this the input is too hot and the hardware level gets stepped
 # down, whatever a previous run left behind in the mixer.
 HOT_SPEECH_RMS = float(os.environ.get("DOSE_HOT_RMS", "6000"))
+# Below this, speech is too quiet for the recogniser and the hardware
+# capture is stepped UP. This is the recovery path for a mic left stuck
+# low by the down-only watchdog (device reported voice RMS 15).
+LOW_SPEECH_RMS = float(os.environ.get("DOSE_LOW_RMS", "500"))
+# Where the hardware capture starts before the auto-leveller tunes it.
+# Moderate on purpose: high enough to lift a stuck-low USB capsule off
+# near-silence, low enough not to slam a hot one into clipping.
+DEFAULT_CAPTURE_LEVEL = int(os.environ.get("DOSE_DEFAULT_CAPTURE", "70"))
 # the shortest of the graces, used where a single number is needed
 ENDPOINT_SILENCE = ENDPOINT_STABLE
 
@@ -3283,16 +3291,16 @@ class DoseVoice:
                          name="input-level").start()
 
     def trim_capture_if_clipping(self):
-        """Measure the input level and turn the microphone DOWN if it
-        is saturating.
+        """Keep the microphone at a usable level — turning it DOWN when
+        it saturates AND UP when it is too quiet.
 
-        The capture gain was being pinned at 100%, which on a cheap USB
-        capsule is past its clipping point — a clap saturates and room
-        tone reads hot. A clipped waveform carries less for the
-        recogniser than a quiet one, and no amount of software can put
-        back what the converter threw away. So: watch what fraction of
-        blocks hit full scale and step the hardware down until they
-        don't. Called periodically; does nothing when the level is fine.
+        This used to only ever step DOWN. That was half a control loop:
+        once the level had been pulled down (from a too-hot spell) it
+        could never come back, ALSA persisted the low setting across
+        reboots, and on the AIRHUG that low setting mapped to
+        near-silence (a device reported voice RMS 15 — effectively
+        deaf). It is now symmetric and converges: clipping/too-hot steps
+        it down, too-quiet steps it up, a healthy signal is left alone.
         """
         seen = getattr(self, "_blocks_seen", 0)
         if seen < 80:                    # ~10 s of audio, enough to judge
@@ -3304,36 +3312,39 @@ class DoseVoice:
         self._clip_ratio = ratio
         self._clip_blocks = 0
         self._blocks_seen = 0
-        # more than 2% of blocks saturating is not a loud moment, it is
-        # a level that is set too high
-        # Two reasons to turn the input down. Hard clipping is the
-        # obvious one. The other is a signal that is simply too HOT —
-        # speech arriving near full scale is not clipped, but it has no
-        # headroom, it drags the measured room floor up with it, and
-        # it is harder for the recogniser than a clean signal at a
-        # third of full scale.
-        #
-        # This also repairs a mixer that an EARLIER version of this
-        # software pinned to 100%. ALSA remembers that setting across
-        # runs, so simply deciding to stop touching the level does not
-        # undo it — the level has to be actively walked back down.
+        cur = self._capture_level if self._capture_level \
+            else DEFAULT_CAPTURE_LEVEL
+
+        # DOWN: hard clipping, or speech arriving too hot (no headroom,
+        # drags the room floor up, harder for the recogniser than a
+        # clean signal at a third of full scale).
         hot = speech > HOT_SPEECH_RMS
-        if ratio <= 0.02 and not hot:
-            return None
-        cur = self._capture_level if self._capture_level else 100
-        if cur > 30:
+        if (ratio > 0.02 or hot) and cur > 30:
             self._capture_level = max(30, cur - 10)
-            # re-learn at the new level rather than stepping again on
-            # stale measurements
+            self._speech_level = 0.0     # re-learn at the new level
+            self._apply_capture_level()
+            return self._capture_level
+
+        # UP: speech was heard but it is far too quiet, and it is NOT
+        # clipping — the capture is set too low (the stuck-low case).
+        # Step up and re-measure. Capped below 100 so we never sit at
+        # the pinned-100% level that overdrives a cheap capsule.
+        if speech and speech < LOW_SPEECH_RMS and ratio <= 0.02 \
+                and cur < 90:
+            self._capture_level = min(90, cur + 10)
             self._speech_level = 0.0
-            card = (self._forced_card or (None,))[0]
-            if card is not None:
-                try:
-                    self._max_capture(card)
-                except Exception:
-                    pass
+            self._apply_capture_level()
             return self._capture_level
         return None
+
+    def _apply_capture_level(self):
+        """Push the current _capture_level to the live capture card."""
+        card = (self._forced_card or (None,))[0]
+        if card is not None:
+            try:
+                self._max_capture(card)
+            except Exception:
+                pass
 
     def _vad_note(self):
         """What the voice detector is doing, in words. It is a file we
@@ -3750,11 +3761,19 @@ class DoseVoice:
         self._clip_blocks = 0    # blocks where the input saturated
         self._blocks_seen = 0
         self._clip_recent = 0.0
-        # None = leave the hardware level exactly as it is. Only set
-        # when DOSE_CAPTURE_LEVEL asks, or when the clipping watchdog
-        # has had to pull it down.
+        # START FROM A KNOWN, SANE CAPTURE LEVEL.
+        #
+        # "Leave the hardware alone" failed badly: the clipping watchdog
+        # only ever stepped the level DOWN (from a too-hot spell), ALSA
+        # persisted that across reboots, and on the AIRHUG the low
+        # setting mapped to near-silence — a device reported voice RMS
+        # 15, effectively deaf. So we now set a MODERATE default at
+        # startup (overriding any stuck-low persisted value) and let the
+        # symmetric auto-leveller move it up OR down from there.
+        # DOSE_CAPTURE_LEVEL still pins an exact value if asked.
         _lvl = os.environ.get("DOSE_CAPTURE_LEVEL", "").strip()
-        self._capture_level = int(_lvl) if _lvl.isdigit() else None
+        self._capture_level = (int(_lvl) if _lvl.isdigit()
+                               else DEFAULT_CAPTURE_LEVEL)
         self._last_voice_ts = 0.0  # last block that carried real speech
 
         def ingest(data):

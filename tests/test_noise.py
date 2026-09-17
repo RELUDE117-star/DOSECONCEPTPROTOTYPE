@@ -272,13 +272,12 @@ ok('["cap", "unmute"]' in cap,
 ok("if self._capture_level:" in cap,
    "a percentage is forced ONLY when something asks for one")
 
-# with nothing asking, nothing is forced
-import importlib                                            # noqa: E402
-os.environ.pop("DOSE_CAPTURE_LEVEL", None)
-importlib.reload(dv)
-fresh = object.__new__(dv.DoseVoice)
-_lvl = os.environ.get("DOSE_CAPTURE_LEVEL", "").strip()
-ok(not _lvl, "no capture level is set by default")
+# A SANE default level is now set at startup (the fix for a mic left
+# stuck near-silent by the old down-only watchdog: a device reported
+# voice RMS 15). It is moderate, not pinned to 100%.
+ok(0 < dv.DEFAULT_CAPTURE_LEVEL < 100,
+   "a moderate default capture level is set at startup (%d%%), not "
+   "left at whatever the mixer was stuck on" % dv.DEFAULT_CAPTURE_LEVEL)
 
 trim = object.__new__(DoseVoice)
 trim._capture_level = None
@@ -291,31 +290,52 @@ trim._blocks_seen, trim._clip_blocks = 10, 10
 ok(trim.trim_capture_if_clipping() is None,
    "it will not judge the level on a handful of blocks")
 
-# a clean signal -> left alone
+# a clean, healthy signal -> left alone (not too hot, not too quiet)
 trim._blocks_seen, trim._clip_blocks = 200, 0
 ok(trim.trim_capture_if_clipping() is None,
    "a clean input is left alone")
 ok(trim._capture_level is None,
-   "and the hardware level is never touched")
+   "and the hardware level is not touched for a healthy signal")
 
 # an occasional loud moment is NOT a level problem
 trim._blocks_seen, trim._clip_blocks = 200, 3      # 1.5%
 ok(trim.trim_capture_if_clipping() is None,
    "one loud moment does not trigger a change")
 
-# persistent clipping -> stepped down, and it keeps stepping
+# persistent clipping -> stepped DOWN from the default, keeps stepping
 trim._blocks_seen, trim._clip_blocks = 200, 40     # 20%
 lvl = trim.trim_capture_if_clipping()
-ok(lvl == 90,
-   "persistent clipping DOES step it down as a safety net, starting "
-   "from whatever the mixer holds (-> %s%%)" % lvl)
+ok(lvl == dv.DEFAULT_CAPTURE_LEVEL - 10,
+   "persistent clipping steps it down from the default (%d -> %s%%)"
+   % (dv.DEFAULT_CAPTURE_LEVEL, lvl))
 for _ in range(12):
-    trim._speech_level = 2000.0
+    trim._speech_level = 8000.0        # keep it hot so it keeps stepping
     trim._blocks_seen, trim._clip_blocks = 200, 40
     trim.trim_capture_if_clipping()
 ok(trim._capture_level == 30,
    "it keeps stepping down to a floor, never to nothing (%d%%)"
    % trim._capture_level)
+
+# THE FIX: a mic that is far too QUIET is stepped UP (recovery from the
+# stuck-low state that made a device deaf at RMS 15).
+up = object.__new__(DoseVoice)
+up._forced_card = None
+up._clip_recent = 0.0
+up._capture_level = 40             # stuck low
+up._speech_level = 60.0            # far below LOW_SPEECH_RMS
+up._blocks_seen, up._clip_blocks = 200, 0     # not clipping
+lvl_up = up.trim_capture_if_clipping()
+ok(lvl_up == 50,
+   "a too-quiet input is stepped UP, not left deaf (%s -> %s%%)"
+   % (40, lvl_up))
+# it climbs until it stops being starved, capped below the pinned 100%
+for _ in range(12):
+    up._speech_level = 60.0
+    up._blocks_seen, up._clip_blocks = 200, 0
+    up.trim_capture_if_clipping()
+ok(up._capture_level == 90,
+   "it climbs toward a usable level, capped at 90%% (got %d%%)"
+   % up._capture_level)
 
 ok("audioop.max" in VSRC and "31000" in VSRC,
    "clipping is measured from the samples, not guessed")
