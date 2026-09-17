@@ -7,7 +7,17 @@ Durable facts for future sessions. **No secrets in this file, ever.**
 - USB mic: **AIRHUG** (enumerates as `card 5,0 A28 AIRHU` in recent audits — confirm with `arecord -l`).
 - USB speaker (separate from the mic). Audio via **PipeWire/PulseAudio** over ALSA.
 
-## Direct access (after bootstrap)
+## Direct access (CONFIRMED WORKING)
+- `ssh dose-pi` — **verified**: logs in as `claudeagent` with key auth, no password.
+- Device: hostname **`raspberrypi`** (`raspberrypi.local`), LAN IPv4
+  **`192.168.4.154`** (DHCP — prefer the `.local` name).
+- Pi host key fingerprint (first seen): `SHA256:ySNWexiarII8Tlbedsc2UYeZnOgDmLAu5ZCXxu6GwuU`.
+- **IMPORTANT — two different homes on this machine.** The voice app runs as
+  **`rjarv1`**, so the application lives at **`/home/rjarv1/dose-home-station`**,
+  NOT under `/home/claudeagent`. Over SSH always use the absolute path; `~`
+  as `claudeagent` is the wrong directory. Bootstrap status is at
+  `/home/rjarv1/dose-home-station/claude-bootstrap-status.json` (or
+  `/var/lib/dose-claude-bootstrap/status.json` if it ran as root).
 - SSH alias: **`dose-pi`** → user `claudeagent`, key `~/.ssh/dose_pi_claude_ed25519` (Mac only).
 - Authorised dev key: Ed25519, fingerprint
   `SHA256:sNBB8HJA4yPXgAbXSGyFNJunODwia11ILumD/dvB2Hk` (Ryan's MacBook Pro).
