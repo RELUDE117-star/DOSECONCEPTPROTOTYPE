@@ -451,20 +451,37 @@ except Exception as e:
     print("  Whisper not installed yet (%s) — the app will fetch it."
           % str(e)[:60])
     sys.exit(0)
-models = [m for m in os.environ.get(
-    "DOSE_WHISPER_MODELS",
-    "distil-small.en,small.en,base.en,tiny.en").split(",") if m]
-for m in models:
+# We need BOTH: the FAST model (tiny.en, the lead recogniser) and the
+# ESCALATION model (base.en). The old script grabbed only one, so the
+# other loaded mid-conversation the first time it was needed. Fetch
+# both now, fast one first.
+fast = os.environ.get("DOSE_FAST_WHISPER", "tiny.en")
+esc = [m for m in os.environ.get(
+    "DOSE_WHISPER_MODELS", "base.en,distil-small.en,tiny.en").split(",")
+    if m]
+wanted, seen = [], set()
+for m in [fast] + esc:
+    if m and m not in seen:
+        seen.add(m); wanted.append(m)
+got_fast, got_esc = False, False
+for m in wanted:
     try:
         print("  Downloading the speech model (%s)..." % m)
         sys.stdout.flush()
         WhisperModel(m, device="cpu", compute_type="int8")
         print("  Speech model ready: %s" % m)
-        sys.exit(0)
+        if m == fast:
+            got_fast = True
+        else:
+            got_esc = True
+        # stop once we have the fast model and one escalation model
+        if got_fast and got_esc:
+            break
     except Exception as e:
         print("  %s unavailable (%s)" % (m, str(e)[:70]))
-print("  No Whisper model could be downloaded — the app will keep "
-      "retrying and use the fast recogniser meanwhile.")
+if not got_fast:
+    print("  Fast model could not be downloaded — the app will keep "
+          "retrying.")
 PYEOF
 
 python3 - <<'PYEOF'

@@ -210,14 +210,15 @@ print("== 8. two recognisers, with distinct jobs ==")
 # Whisper was removed for speed and is back for accuracy. It is not a
 # competing recogniser: it only runs when the fast one returns
 # something that does not parse.
-ok("moonshine" in vsrc.lower(), "Moonshine does the hearing")
 ok("faster_whisper" in vsrc,
-   "Whisper is available for the cases it cannot make out")
+   "faster-whisper is the fast path and the escalation")
+ok("moonshine" in vsrc.lower(),
+   "moonshine is still available if it wins the race on a board")
 bt = vsrc.split("def _better_transcribe")[1].split("\n    def ")[0]
-ok(bt.index("_moonshine_transcribe") < bt.index("_whisper_transcribe"),
+ok(bt.index("_fast_transcribe") < bt.index("_whisper_transcribe"),
    "the fast recogniser answers first")
-ok("self._usable(ms)" in bt,
-   "and Whisper escalates only when that answer is unusable")
+ok("self._usable(fast)" in bt,
+   "and the base.en model escalates only when that answer is unusable")
 ok(vsrc.index("base.en") < vsrc.index("distil-small.en"),
    "with base.en as the default — the bigger models take SECONDS per "
    "utterance on a Pi 4")
@@ -290,8 +291,11 @@ ok("for arch_name in available" in loader,
 ok("library not installed" in loader,
    "a missing library is reported as that, not as 'downloading'")
 
-ok("_ms_reason" in vsrc.split('rows.append(("Speech (fast)"')[0][-900:],
-   "Settings shows the real reason on the Speech row")
+_fast_row_ctx = vsrc.split('rows.append(("Speech (fast)"')[0][-900:]
+ok("_ms_reason" in _fast_row_ctx
+   and "_whisper_fast_size" in _fast_row_ctx,
+   "Settings shows the real reason on the Speech row — for whichever "
+   "engine leads, never blank")
 ok('"Speech (backup)"' in vsrc and '"Speech (fast)"' in vsrc,
    "and names the two recognisers separately — 'fast' does the "
    "hearing, 'backup' escalates — so which one is working is never "

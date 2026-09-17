@@ -399,7 +399,7 @@ for t in JUNK:
 
 VSRC = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
 bt = VSRC.split("def _better_transcribe")[1].split("\n    def ")[0]
-ok("self._usable(ms)" in bt,
+ok("self._usable(fast)" in bt,
    "its answer is only accepted if it actually means something")
 ok("_whisper_transcribe" in bt,
    "otherwise the stronger model gets a turn on the SAME audio")
@@ -415,11 +415,14 @@ class _Pick(DoseVoice):
         self._f, self._s = fast, slow
         self._med_names = lambda: ["Sertraline"]
 
-    def _moonshine_transcribe(self, a):
-        return self._f
+    def _fast_transcribe(self, a):
+        return self._f, "fast"
 
     def _whisper_transcribe(self, a):
         return self._s
+
+    def _trim_silence(self, a, keep_ms=140):
+        return a
 
     def _write_wav(self, a):
         return None
@@ -463,10 +466,10 @@ ok("tiny.en" in _dvm.WHISPER_MODELS[-1],
    "tiny is the LAST resort, not the first fallback")
 ok(len(_dvm.WHISPER_MODELS) >= 3,
    "with a chain to fall back through if one will not download")
-ok(bt.index("_moonshine_transcribe") < bt.index("_whisper_transcribe"),
+ok(bt.index("_fast_transcribe") < bt.index("_whisper_transcribe"),
    "the FAST model answers first — I had Whisper leading and on a Pi "
    "that is seconds per utterance, every utterance")
-ok("_usable(ms)" in bt,
+ok("_usable(fast)" in bt,
    "and the stronger model escalates only when that answer is "
    "unusable")
 ok(_dvm.STT_THREADS > _dvm.INFER_THREADS,

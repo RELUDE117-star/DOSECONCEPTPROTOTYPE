@@ -324,6 +324,13 @@ ok("could not change" in tune,
 print("== 6. nothing lazy-loads inside the conversation ==")
 ok("def warm_models" in VOICE_SRC, "models are warmed at startup")
 ok("self.warm_models()" in VOICE_SRC, "the warm-up actually runs")
+wm = VOICE_SRC.split("def warm_models")[1].split("\n    def ")[0]
+ok("_synth(" in wm,
+   "Piper is warmed with a REAL synth, not just loaded — the first "
+   "synthesize_wav pays the ONNX graph cost (device: first words out "
+   "3.59 s), so it happens at boot, not in the first reply")
+ok("_load_whisper_fast" in wm and "_race_fast_engines" in wm,
+   "the fast recogniser is warmed and raced at startup too")
 ok("_play_route" in VOICE_SRC,
    "the working audio player is remembered, not re-probed per sentence")
 ok("_np.frombuffer" in VOICE_SRC,
@@ -343,11 +350,16 @@ ok(os.environ.get("OMP_NUM_THREADS") == str(dv.INFER_THREADS),
 # because recognition runs DURING the pause (section 5), and because
 # the burst gets every core rather than the continuous budget.
 bt = VOICE_SRC.split("def _better_transcribe")[1].split("\n    def ")[0]
-ok(bt.index("_moonshine_transcribe") < bt.index("_whisper_transcribe"),
+ok(bt.index("_fast_transcribe") < bt.index("_whisper_transcribe"),
    "the FAST recogniser answers first — it is the one that fits the "
    "latency budget")
-ok("self._usable(ms)" in bt,
-   "and the stronger one escalates only when that answer is unusable")
+ok("self._usable(fast)" in bt,
+   "and the stronger base.en escalates only when that answer is unusable")
+# The fast engine is CHOSEN by a race on the real hardware, not assumed
+ok("_race_fast_engines" in VOICE_SRC and "_fast_choice" in VOICE_SRC,
+   "the fast recogniser is whichever WON a startup race on this board")
+ok("_trim_silence" in bt,
+   "dead air is trimmed before transcription — length is compute cost")
 ok("beam_size=1" in VOICE_SRC,
    "escalation decodes greedily — a beam search is several times "
    "slower for a fraction of a percent on short commands")

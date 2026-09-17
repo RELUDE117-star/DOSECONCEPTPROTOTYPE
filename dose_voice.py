@@ -312,6 +312,20 @@ WHISPER_MODELS = tuple(filter(None, os.environ.get(
     "DOSE_WHISPER_MODELS",
     "base.en,distil-small.en,tiny.en").split(",")))
 
+# THE FAST PATH is chosen on the actual hardware, not assumed.
+#
+# A real device measured moonshine tiny at 4.47 SECONDS on one word —
+# 30x slower than it should be, and the single biggest reason the
+# station felt broken. Rather than guess whether moonshine or Whisper
+# is faster on a given board (moonshine advertises itself as faster,
+# yet lost badly here), the station RACES them once at startup on
+# identical audio and uses whichever actually wins. FAST_WHISPER_MODEL
+# is the Whisper contender; base.en stays the escalation model for the
+# minority of turns the fast one can't make out. Set DOSE_FAST_ENGINE
+# to "moonshine" or "whisper" to skip the race and pin one.
+FAST_WHISPER_MODEL = os.environ.get("DOSE_FAST_WHISPER", "tiny.en")
+FAST_ENGINE_PIN = os.environ.get("DOSE_FAST_ENGINE", "").strip().lower()
+
 
 
 # ── LEVELS ───────────────────────────────────────────────────────────
@@ -1404,23 +1418,46 @@ class DoseVoice:
         self._whisper_size = "unavailable"
         return None
 
-    def _whisper_transcribe(self, audio_bytes):
-        """The stronger model, for when the fast one came back with
-        something that meant nothing."""
-        if not audio_bytes:
-            return ""
-        if self._load_whisper() is None:
+    def _load_whisper_fast(self):
+        """The FAST Whisper contender — tiny.en, int8, greedy. This is
+        the one that races moonshine at startup and, on a Pi 4, usually
+        wins by a mile: CTranslate2's int8 kernels are far quicker on
+        these A72 cores than moonshine's ONNX path turned out to be."""
+        if getattr(self, "_whisper_fast_loaded", False):
+            return self._whisper_fast
+        self._whisper_fast_loaded = True
+        self._whisper_fast = None
+        self._whisper_fast_size = FAST_WHISPER_MODEL
+        try:
+            from faster_whisper import WhisperModel
+        except Exception:
+            self._whisper_fast_size = "not installed"
+            return None
+        try:
+            self._whisper_fast = WhisperModel(
+                FAST_WHISPER_MODEL, device="cpu", compute_type="int8",
+                cpu_threads=STT_THREADS, num_workers=1)
+        except Exception:
+            self._whisper_fast = None
+            self._whisper_fast_size = "unavailable"
+        return self._whisper_fast
+
+    def _fw_transcribe(self, model, audio_bytes, vad=True, beam_size=1):
+        """Run one faster-whisper model over an utterance.
+
+        beam_size=1 is greedy — a beam search is several times slower
+        for a fraction of a percent of word error on short commands,
+        and on a Pi that trade is not close. vad can be turned off for
+        the startup race so the timing measures full compute rather
+        than being flattered by silence-skipping."""
+        if not audio_bytes or model is None:
             return ""
         path = None
         try:
             path = self._write_wav(audio_bytes)
-            # beam_size=1 — greedy. I had this at 5 for accuracy, and
-            # a beam search is several times slower for a fraction of
-            # a percent of word error on short commands. On a Pi that
-            # trade is not close.
-            segs, _info = self._whisper.transcribe(
-                path, language="en", beam_size=1,
-                vad_filter=True, condition_on_previous_text=False,
+            segs, _info = model.transcribe(
+                path, language="en", beam_size=beam_size,
+                vad_filter=vad, condition_on_previous_text=False,
                 initial_prompt=self._whisper_prompt())
             return self._clean_text(" ".join(sg.text for sg in segs))
         except Exception:
@@ -1431,6 +1468,11 @@ class DoseVoice:
                     os.unlink(path)
                 except Exception:
                     pass
+
+    def _whisper_transcribe(self, audio_bytes):
+        """The stronger ESCALATION model (base.en), for when the fast
+        recogniser came back with something that meant nothing."""
+        return self._fw_transcribe(self._load_whisper(), audio_bytes)
 
     def _whisper_prompt(self):
         """Tell Whisper what this device is about. Naming the actual
@@ -1465,85 +1507,160 @@ class DoseVoice:
         text = re.sub(r"[^a-z0-9' ]", " ", text)
         return " ".join(text.split())
 
+    def _trim_silence(self, audio_bytes, keep_ms=140):
+        """Cut dead air off the front and back of an utterance.
+
+        Transcription time scales with audio length, so a buffer that
+        carries a second of silence before "what" makes the recogniser
+        do a second of pointless work. Trimming to the voiced part is
+        the cheapest speed-up there is and it helps whichever engine
+        runs. Energy-gated at 20 ms resolution, with a small margin so
+        no word gets clipped."""
+        try:
+            import numpy as np
+            raw = bytes(audio_bytes)[:len(audio_bytes) // 2 * 2]
+            a = np.frombuffer(raw, dtype=np.int16)
+            win = max(1, int(SAMPLE_RATE * 0.02))
+            n = a.size // win
+            if n < 4:
+                return audio_bytes
+            frames = a[:n * win].reshape(n, win).astype(np.float32)
+            energy = np.sqrt((frames ** 2).mean(axis=1))
+            peak = float(energy.max())
+            if peak <= 0:
+                return audio_bytes
+            thr = max(peak * 0.08, 150.0)
+            voiced = np.where(energy > thr)[0]
+            if voiced.size == 0:
+                return audio_bytes
+            pad = max(1, int(keep_ms / 20))
+            lo = max(0, int(voiced[0]) - pad)
+            hi = min(n, int(voiced[-1]) + 1 + pad)
+            trimmed = a[lo * win: hi * win].tobytes()
+            return trimmed or audio_bytes
+        except Exception:
+            return audio_bytes
+
+    def _fast_engine(self):
+        """Which recogniser leads on THIS board. Pinned by env, else
+        whatever won the startup race, else Whisper (never the
+        proven-slow moonshine by default)."""
+        if FAST_ENGINE_PIN in ("moonshine", "whisper"):
+            return FAST_ENGINE_PIN
+        return getattr(self, "_fast_choice", "") or "whisper"
+
+    def _fast_transcribe(self, audio_bytes):
+        """Run the fast recogniser chosen for this board.
+        Returns (text, engine_tag)."""
+        eng = self._fast_engine()
+        if eng == "moonshine" and self._moonshine_v2() is not None:
+            return self._moonshine_transcribe(audio_bytes), "moonshine"
+        fw = self._load_whisper_fast()
+        if fw is not None:
+            return (self._fw_transcribe(fw, audio_bytes),
+                    "whisper-%s" % (getattr(self, "_whisper_fast_size",
+                                            FAST_WHISPER_MODEL)))
+        if self._moonshine_v2() is not None:
+            return self._moonshine_transcribe(audio_bytes), "moonshine"
+        return "", eng
+
+    def _race_fast_engines(self):
+        """Time both fast recognisers ONCE, on identical audio, on the
+        real hardware — then use whichever actually wins.
+
+        This is the whole answer to "moonshine says it's faster but the
+        device clocked it at 4.47 s". We stop arguing about which is
+        faster and measure it here, on this exact board, so the fast
+        path is always the one that is actually fast."""
+        if FAST_ENGINE_PIN in ("moonshine", "whisper"):
+            self._fast_choice = FAST_ENGINE_PIN
+            return
+        try:
+            import numpy as np
+            n = int(SAMPLE_RATE * 1.5)
+            tt = np.arange(n) / float(SAMPLE_RATE)
+            sig = (np.sin(2 * np.pi * 180 * tt)
+                   + 0.5 * np.sin(2 * np.pi * 330 * tt)
+                   + 0.3 * np.sin(2 * np.pi * 90 * tt))
+            sig += 0.2 * np.random.default_rng(0).standard_normal(n)
+            sig = sig / (float(np.max(np.abs(sig))) or 1.0)
+            buf = (sig * 8000).astype(np.int16).tobytes()
+        except Exception:
+            buf = b"\x00\x00" * int(SAMPLE_RATE * 1.5)
+
+        ms_secs = float("inf")
+        if self._moonshine_v2() is not None:
+            try:
+                t0 = time.time()
+                self._moonshine_transcribe(buf)
+                ms_secs = time.time() - t0
+            except Exception:
+                pass
+        fw_secs = float("inf")
+        fw = self._load_whisper_fast()
+        if fw is not None:
+            try:
+                t0 = time.time()
+                self._fw_transcribe(fw, buf, vad=False)
+                fw_secs = time.time() - t0
+            except Exception:
+                pass
+        self._ms_race_secs = ms_secs
+        self._fw_race_secs = fw_secs
+        if fw is not None and fw_secs <= ms_secs:
+            self._fast_choice = "whisper"
+        elif self._moonshine_v2() is not None and ms_secs < float("inf"):
+            self._fast_choice = "moonshine"
+        else:
+            self._fast_choice = "whisper"
+
     def _better_transcribe(self, audio_bytes, vosk_text):
         """Work out what was actually said, trying harder when the
         first answer means nothing.
 
-        Order matters. Moonshine is fast and biased toward this
-        cabinet's drug names, so it goes first and usually settles it.
-        If what comes back does not parse to anything — the "(urk)"
-        case — the stronger Whisper model gets a turn on the SAME
-        audio. Giving up quickly is not an accuracy strategy."""
+        The FAST recogniser — the one that won the startup race on this
+        board — answers first and usually settles it. If what comes
+        back does not parse to anything, the stronger base.en model
+        gets a turn on the SAME audio. Giving up quickly is not an
+        accuracy strategy."""
         if not audio_bytes:
             return vosk_text
         t_start = time.time()
-
-        # 1) THE FAST MODEL ANSWERS. Moonshine is built for exactly
-        #    this — a short command, on a small CPU — and it is biased
-        #    toward this cabinet's drug names.
-        #
-        #    I had Whisper running first here. On a Pi 4 that is
-        #    seconds per utterance, every utterance, and it made the
-        #    assistant unusable. Whisper is the better model and it
-        #    stays, but as an ESCALATION for the cases the fast one
-        #    cannot make out — not in the path of every sentence.
+        audio_bytes = self._trim_silence(audio_bytes)
         self._raw_vosk = vosk_text or ""
         self._raw_fast = ""
         self._raw_slow = ""
-        ms = self._moonshine_transcribe(audio_bytes)
-        self._raw_fast = ms or ""
-        self._t_fast = time.time() - t_start
-        if ms and self._usable(ms):
-            self._t_slow = 0.0
-            self._last_engine = "moonshine"
-            return ms
 
-        # 2) It came back with nothing we can act on. Now the stronger
-        #    model gets a turn on the same audio — with a hard time
-        #    limit, because a correct answer that arrives after the
-        #    person has given up is not a correct answer.
+        # 1) THE FAST PATH answers.
+        fast, feng = self._fast_transcribe(audio_bytes)
+        self._raw_fast = fast or ""
+        self._t_fast = time.time() - t_start
+        if fast and self._usable(fast):
+            self._t_slow = 0.0
+            self._last_engine = feng
+            return fast
+
+        # 2) Nothing we can act on — the stronger base.en model gets a
+        #    turn on the same audio.
         t_wh = time.time()
         wh = self._whisper_transcribe(audio_bytes)
         self._raw_slow = wh or ""
         self._t_slow = time.time() - t_wh
-        self._last_engine = "whisper" if wh else "moonshine"
+        self._last_engine = "whisper" if wh else feng
         if wh and self._usable(wh):
             self._whisper_saves = getattr(self, "_whisper_saves", 0) + 1
             return wh
 
-        # 3) Neither parsed. Hand back the one with MORE IN IT.
-        #
-        #    This used to prefer the fast model's answer simply because
-        #    it came first, which meant a turn where it produced "urk"
-        #    and the stronger model produced "open storage the" was
-        #    reported as "urk" — throwing away the transcript that the
-        #    phonetic matcher could actually have worked with. A
-        #    longer, more word-like answer is the better near-miss.
-        cands = [c for c in (ms, wh)
+        # 3) Neither parsed. Hand back the one with MORE IN IT — a
+        #    longer, more word-like answer is the better near-miss for
+        #    the phonetic matcher than a confident scrap.
+        cands = [c for c in (fast, wh)
                  if c and not (_nlu_mod
                                and _nlu_mod.looks_hallucinated(c))]
         if cands:
             best = max(cands, key=lambda c: (len(c.split()), len(c)))
-            self._last_engine = ("moonshine" if best == ms
-                                 else "whisper")
+            self._last_engine = feng if best == fast else "whisper"
             return best
-        # the same model through the plain ONNX package
-        if self._moonshine is not None:
-            path = None
-            try:
-                path = self._write_wav(audio_bytes)
-                out = self._moonshine.transcribe(path, "moonshine/base")
-                text = self._clean_text(" ".join(out) if out else "")
-                if text:
-                    return text
-            except Exception:
-                pass
-            finally:
-                if path:
-                    try:
-                        os.unlink(path)
-                    except Exception:
-                        pass
         return vosk_text
 
     def _probe_device(self, index, native_rate):
@@ -3114,25 +3231,57 @@ class DoseVoice:
             except Exception:
                 pass
             silence = b"\x00\x00" * SAMPLE_RATE      # 1 s of nothing
+            # WARM WHISPER — both the fast tiny.en and the base.en
+            # escalation — in the background, at low priority.
+            #
+            # Lazy loading moved this cost into the middle of a
+            # conversation: the device logged a 26.6-second turn where
+            # it "heard nothing", which was the first escalation paying
+            # to load the model while somebody stood there waiting.
+            # Loading it here costs nothing anyone can feel.
+            try:
+                self._load_whisper_fast()
+                self._fw_transcribe(self._whisper_fast, silence)
+            except Exception:
+                pass
             try:
                 self._moonshine_transcribe(silence)
             except Exception:
                 pass
-            # WARM WHISPER TOO — in the background, at low priority.
-            #
-            # I made this lazy to save RAM at boot, and that moved the
-            # cost somewhere far worse: into the middle of a
-            # conversation. The device logged a 26.6-second turn where
-            # it "heard nothing" — that was the first escalation
-            # paying to load the model while somebody stood there
-            # waiting. Loading it here costs nothing anyone can feel.
             try:
                 self._load_whisper()
                 self._whisper_transcribe(silence)
             except Exception:
                 pass
+            # Now RACE them on this board and pin the winner as the
+            # fast path — the fix for "moonshine says it's faster but
+            # clocked 4.47 s here". Done last, after both are warm, so
+            # the timing is inference cost, not model loading.
             try:
-                self._load_piper()
+                self._race_fast_engines()
+            except Exception:
+                pass
+            # WARM PIPER WITH A REAL SYNTH — not just a load.
+            #
+            # Loading the voice does not touch the ONNX graph; the
+            # FIRST synthesize_wav pays the graph-optimisation cost, and
+            # the device measured that as "first words out 3.59 s" on
+            # the very first reply. Running one throwaway synth here
+            # moves that entire cost to boot, so the first thing the
+            # user hears comes out immediately.
+            try:
+                voice = self._load_piper()
+                fd, wp = tempfile.mkstemp(suffix=".wav",
+                                          dir=TMP_AUDIO_DIR)
+                os.close(fd)
+                try:
+                    with wave.open(wp, "wb") as w:
+                        self._synth(voice, "ready", w)
+                finally:
+                    try:
+                        os.unlink(wp)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             self._warmed = True
@@ -3259,26 +3408,45 @@ class DoseVoice:
                 rows.append(("Voice", pok,
                              VOICE_NAME if pok else "downloading…"))
 
-                # 2) HEARING — Moonshine Base does the transcription.
-                self._ms_v2 = "unset"
-                ms = self._moonshine_v2()
-                if ms is not None:
-                    detail = "moonshine %s" % (
-                        (self._ms_arch_used or "").split("_")[0].lower()
-                        or self.STT_ARCH)
+                # 2) HEARING — the FAST path is whichever recogniser won
+                #    the startup race on THIS board. Show which, and the
+                #    two measured times so the choice is auditable.
+                choice = self._fast_engine()
+                fw = self._load_whisper_fast()
+                msr = getattr(self, "_ms_race_secs", None)
+                fwr = getattr(self, "_fw_race_secs", None)
+                if choice == "moonshine":
+                    self._ms_v2 = "unset"
+                    good = self._moonshine_v2() is not None
+                    if good:
+                        label = "moonshine %s" % (
+                            (self._ms_arch_used or "").split("_")[0]
+                            .lower() or self.STT_ARCH or "?")
+                    else:
+                        # never leave it blank — say WHY
+                        label = (getattr(self, "_ms_reason", "")
+                                 or "download failed")
                 else:
-                    # never leave it saying "downloading…" forever —
-                    # say what actually went wrong
-                    detail = (getattr(self, "_ms_reason", "")
-                              or ("downloading…" if attempt < 2
-                                  else "download failed — retrying"))
-                rows.append(("Speech (fast)", ms is not None,
-                             detail[:40]))
+                    good = fw is not None
+                    size = getattr(self, "_whisper_fast_size",
+                                   FAST_WHISPER_MODEL)
+                    # size doubles as the reason when it failed to load
+                    # ("not installed" / "unavailable"), so the row is
+                    # never silently blank
+                    label = "whisper %s" % size
+                if msr is not None and fwr is not None \
+                        and (msr < float("inf") or fwr < float("inf")):
+                    def _fmt(x):
+                        return "%.2fs" % x if x < float("inf") else "-"
+                    label += " (race ms %s / wh %s)" % (_fmt(msr),
+                                                        _fmt(fwr))
+                rows.append(("Speech (fast)", good, label[:52]))
 
-                # 2b) Whisper — the one that actually does the
-                #     hearing now.
+                # 2b) The base.en escalation model — runs only when the
+                #     fast path comes back with nothing usable.
                 if self._whisper is not None:
-                    detail, good = "whisper %s" % self._whisper_size, True
+                    detail, good = ("whisper %s (escalation)"
+                                    % self._whisper_size), True
                 elif self._whisper_loaded:
                     detail, good = self._whisper_size, False
                 else:

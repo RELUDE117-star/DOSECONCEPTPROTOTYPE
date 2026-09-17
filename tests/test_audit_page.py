@@ -77,8 +77,8 @@ class FakeVoice:
     def turn_report(self):
         return [
             ("You stopped talking", "0.45 s wait", True, "policy"),
-            ("Heard by", "moonshine", True, "base"),
-            ("  fast model", "0.31 s", True, "moonshine"),
+            ("Heard by", "whisper-tiny.en", True, "fast"),
+            ("  fast model", "0.31 s", True, "whisper"),
             ("  escalated", "1.42 s", True, "whisper"),
             ("Understood", "0.002 s", True, "on-device"),
             ("First words out", "0.18 s", True, "cached"),
@@ -97,7 +97,7 @@ class FakeVoice:
 
     def model_status(self):
         return [("Voice", True, "en_US-hfc_female-medium"),
-                ("Speech (fast)", True, "moonshine base"),
+                ("Speech (fast)", True, "whisper tiny.en"),
                 ("Speech (main)", True, "whisper base.en"),
                 ("Live listener", True, "on-screen text")]
 
