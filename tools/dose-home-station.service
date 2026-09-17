@@ -1,0 +1,60 @@
+# DOSE Home Station — systemd USER unit for the kiosk account (rjarv1).
+#
+# WHY THIS EXISTS
+# A device audit on 2026-09-17 found the app had no service of any kind. It
+# was started by an x-terminal-emulator running DOSE.sh out of a *Desktop*
+# folder, while the application itself lived in ~/dose-home-station — two
+# different trees, no restart on crash, no start at boot, no captured logs,
+# and the whole thing died with its terminal window. On a medication
+# dispenser that is not an acceptable way to run.
+#
+# This is a USER unit, not a system one, because the app is a Tkinter kiosk
+# UI that needs the logged-in graphical session. It is bound to
+# graphical-session.target so it starts when the desktop comes up and stops
+# when it goes away.
+#
+# INSTALL:  bash tools/install_service.sh
+# (run it as rjarv1 on the Pi — see that script for what it does)
+
+[Unit]
+Description=DOSE Home Station (medication dispenser + voice assistant)
+Documentation=https://github.com/relude117-star/doseconceptprototype
+PartOf=graphical-session.target
+After=graphical-session.target
+
+# Restart on crash, but do not loop forever: 5 starts in 5 minutes and it
+# stays down, so a boot-looping app is visible as a failed unit instead of
+# silently thrashing the SD card and the USB audio stack.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dose-home-station
+
+# The launcher installs deps/models, tunes the CPU governor, then execs
+# python3 dose_app.py. Keep this pointing at the APP directory's copy —
+# the Desktop copy is the ambiguity this unit exists to remove.
+ExecStartPre=/bin/mkdir -p %h/dose-home-station/logs
+ExecStart=/bin/bash %h/dose-home-station/DOSE.sh
+
+Restart=always
+RestartSec=5
+
+# The kiosk display. Adjust if the session is ever not :0.
+Environment=DISPLAY=:0
+
+# SIGTERM to the whole group, and give the app time to release the USB
+# audio device before anything harsher. A capture killed with SIGKILL does
+# not run its cleanup and strands the ALSA PCM — that is exactly the fault
+# this audit found inside the app, and it applies just as much to how we
+# stop the app itself.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+StandardOutput=append:%h/dose-home-station/logs/dose.log
+StandardError=append:%h/dose-home-station/logs/dose.log
+
+[Install]
+WantedBy=graphical-session.target
