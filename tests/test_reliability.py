@@ -178,7 +178,7 @@ class ListenEngine(DoseVoice):
     def _set_ui_state(self, *a, **k):
         pass
 
-    def _better_transcribe(self, audio, hint):
+    def _better_transcribe(self, audio, hint, allow_cloud=True):
         n = len(audio)
         time.sleep(self.recog_time)
         self.calls.append(n)
@@ -371,7 +371,7 @@ class ChoppyRec:
 class WholeUtteranceEngine(ListenEngine):
     """Records the transcript the policy finally committed."""
 
-    def _better_transcribe(self, audio, hint):
+    def _better_transcribe(self, audio, hint, allow_cloud=True):
         self.calls.append(hint)
         return hint          # whatever the listener accumulated
 

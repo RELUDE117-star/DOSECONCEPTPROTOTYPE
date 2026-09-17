@@ -216,7 +216,7 @@ class ListenEngine(DoseVoice):
     def _set_ui_state(self, *a, **k):
         pass
 
-    def _better_transcribe(self, audio, hint):
+    def _better_transcribe(self, audio, hint, allow_cloud=True):
         self.recog_calls += 1
         time.sleep(RECOG)
         return "what do i take today"

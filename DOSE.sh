@@ -34,6 +34,11 @@ probe "piper"              || PIP_PKGS="$PIP_PKGS piper-tts"
 probe "rapidfuzz"          || PIP_PKGS="$PIP_PKGS rapidfuzz"
 probe "jellyfish"          || PIP_PKGS="$PIP_PKGS jellyfish"
 probe "moonshine_voice"    || PIP_PKGS="$PIP_PKGS moonshine-voice"
+# gradio_client lets the Pi use a FREE Hugging Face ZeroGPU Whisper
+# Space instead of running Whisper locally. Optional — cloud STT also
+# works through Groq with plain HTTP, and everything falls back to the
+# local model offline.
+probe "gradio_client"      || PIP_PKGS="$PIP_PKGS gradio_client"
 # Python 3.13 removed stdlib audioop; audioop-lts restores it
 python3 -c "import audioop" 2>/dev/null || PIP_PKGS="$PIP_PKGS audioop-lts"
 command -v pip3 >/dev/null 2>&1 || APT_PKGS="$APT_PKGS python3-pip"
@@ -601,6 +606,26 @@ fi
 if [ -f "$APP_DIR/github_token" ]; then
     chmod 600 "$APP_DIR/github_token" 2>/dev/null || true
 fi
+
+# ── Cloud STT credentials (free tiers) off a USB stick, once ──
+# Same idea for the transcription providers: drop a file named
+# 'groq_key' (Groq free tier) or 'hf_token' (Hugging Face free ZeroGPU)
+# on a stick and the Pi hands STT to the cloud, keeping the local model
+# only for offline. Neither ever goes in the repository.
+for CRED in groq_key hf_token; do
+    if [ ! -s "$APP_DIR/$CRED" ]; then
+        for D in /media/*/ /media/*/*/ /mnt/*/ /run/media/*/*/; do
+            if [ -s "$D$CRED" ]; then
+                cp "$D$CRED" "$APP_DIR/$CRED" 2>/dev/null && {
+                    chmod 600 "$APP_DIR/$CRED"
+                    echo "  $CRED imported from $D"
+                    break
+                }
+            fi
+        done
+    fi
+    [ -f "$APP_DIR/$CRED" ] && chmod 600 "$APP_DIR/$CRED" 2>/dev/null || true
+done
 
 # ── EVERYTHING READY? ──
 # A single gate before launch. The app used to open while pieces were

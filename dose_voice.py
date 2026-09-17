@@ -1646,15 +1646,72 @@ class DoseVoice:
         else:
             self._fast_choice = "whisper"
 
-    def _better_transcribe(self, audio_bytes, vosk_text):
+    # ── cloud STT: primary when online, free tiers only ──────────────
+    def _cloud_enabled(self):
+        """Is cloud STT switched on AND actually configured?
+
+        DOSE_STT_MODE: "auto" (default) uses cloud when a free provider
+        is configured and the net is up; "cloud" forces it; "local"
+        turns it off entirely. Cloud is skipped silently when no
+        credential is present, so a fresh device just runs local."""
+        mode = os.environ.get("DOSE_STT_MODE", "auto").strip().lower()
+        if mode == "local":
+            return False
+        try:
+            import dose_cloud_stt as _c
+            return bool(_c.available_providers())
+        except Exception:
+            return False
+
+    def _is_online(self, ttl=30.0):
+        """Cached internet check — a socket connect per utterance would
+        be wasteful, and connectivity does not change second to second."""
+        now = time.time()
+        cached = getattr(self, "_online_cache", None)
+        if cached is not None and now - cached[1] < ttl:
+            return cached[0]
+        try:
+            import dose_cloud_stt as _c
+            ok = _c.is_online()
+        except Exception:
+            ok = False
+        self._online_cache = (ok, now)
+        return ok
+
+    def _cloud_transcribe(self, audio_bytes):
+        """Transcribe via the free cloud chain. Returns
+        (text, engine_tag, secs). Never raises."""
+        try:
+            import dose_cloud_stt as _c
+            path = self._write_wav(audio_bytes)
+            try:
+                res, _all = _c.cloud_transcribe(path, language="en")
+            finally:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+            if res and res.ok:
+                return res.text, "cloud:" + res.engine, res.secs
+            # record why, so the audit can show it
+            if res and res.error:
+                self._cloud_error = "%s: %s" % (res.engine, res.error)
+            return "", "cloud", (res.secs if res else 0.0)
+        except Exception as e:
+            self._cloud_error = str(e)[:80]
+            return "", "cloud", 0.0
+
+    def _better_transcribe(self, audio_bytes, vosk_text, allow_cloud=True):
         """Work out what was actually said, trying harder when the
         first answer means nothing.
 
-        The FAST recogniser — the one that won the startup race on this
-        board — answers first and usually settles it. If what comes
-        back does not parse to anything, the stronger base.en model
-        gets a turn on the SAME audio. Giving up quickly is not an
-        accuracy strategy."""
+        WHEN THE INTERNET IS UP, a free cloud recogniser answers first:
+        the Pi 4 is a poor place to run Whisper (4.47 s per utterance),
+        so transcription belongs off the box. Cloud is tried once per
+        turn (allow_cloud is False for the speculative pass, to spare
+        the free quota); the LOCAL model is the offline fallback and
+        also catches any cloud miss. A cloud failure never raises — it
+        just falls through to local."""
         if not audio_bytes:
             return vosk_text
         t_start = time.time()
@@ -1662,6 +1719,19 @@ class DoseVoice:
         self._raw_vosk = vosk_text or ""
         self._raw_fast = ""
         self._raw_slow = ""
+        self._raw_cloud = ""
+
+        # 0) CLOUD FIRST when it is available and this is the real
+        #    (non-speculative) pass.
+        if allow_cloud and self._cloud_enabled() and self._is_online():
+            ctext, ceng, csecs = self._cloud_transcribe(audio_bytes)
+            self._raw_cloud = ctext or ""
+            if ctext and self._usable(ctext):
+                self._t_fast = time.time() - t_start
+                self._t_slow = 0.0
+                self._last_engine = ceng
+                return ctext
+            # cloud unusable/failed — fall through to the local models
 
         # 1) THE FAST PATH answers.
         fast, feng = self._fast_transcribe(audio_bytes)
@@ -3494,6 +3564,29 @@ class DoseVoice:
                                     % self._whisper_size), True
                 rows.append(("Speech (backup)", good, detail))
 
+                # 2c) CLOUD STT — the primary path when online. Shows the
+                #     configured free providers and whether the net is up,
+                #     so it is obvious whether the Pi is offloading STT.
+                try:
+                    import dose_cloud_stt as _cs
+                    provs = _cs.available_providers()
+                    mode = os.environ.get("DOSE_STT_MODE",
+                                          "auto").lower()
+                    if mode == "local":
+                        rows.append(("Speech (cloud)", True,
+                                     "off (DOSE_STT_MODE=local)"))
+                    elif not provs:
+                        rows.append(("Speech (cloud)", True,
+                                     "no key — add groq_key or hf_token"))
+                    else:
+                        on = self._is_online()
+                        rows.append(("Speech (cloud)", True,
+                                     "%s · %s" % ("+".join(provs),
+                                     "online (PRIMARY)" if on
+                                     else "offline — using local")))
+                except Exception:
+                    pass
+
                 # 3) The live listener. This is NOT a competing
                 #    recogniser: it is what puts your words on the
                 #    screen while you are still talking, and it is the
@@ -4502,7 +4595,12 @@ class DoseVoice:
                 except Exception:
                     pass
                 try:
-                    box["text"] = self._better_transcribe(snapshot, hint)
+                    # speculative pass stays LOCAL — it may be discarded
+                    # if more speech arrives, and spending free cloud
+                    # quota on a throwaway is wasteful. The real pass in
+                    # finish() gets the cloud.
+                    box["text"] = self._better_transcribe(
+                        snapshot, hint, allow_cloud=False)
                 except Exception:
                     box["text"] = ""
                 ev.set()
@@ -4511,10 +4609,17 @@ class DoseVoice:
             return box
 
         def finish(final_buf, hint):
-            """The transcript for this turn — reusing the speculation
-            when no new speech has arrived since it started, otherwise
-            transcribing now."""
-            if spec and spec.get("voice_ts") == self._last_voice_ts:
+            """The transcript for this turn.
+
+            When cloud STT is the primary path, do the real cloud pass
+            here — the local speculation was only for the live on-screen
+            text and is not as accurate. When offline (or in local
+            mode), reuse the local speculation if no new speech arrived
+            since it started: that is the latency win, and it is only
+            safe to claim when we were not going to call the cloud."""
+            going_cloud = self._cloud_enabled() and self._is_online()
+            if not going_cloud and spec \
+                    and spec.get("voice_ts") == self._last_voice_ts:
                 spec["done"].wait(timeout=6)
                 if spec.get("text"):
                     self._spec_hits = getattr(self, "_spec_hits", 0) + 1
