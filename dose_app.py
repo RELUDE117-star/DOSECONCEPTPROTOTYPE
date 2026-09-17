@@ -1841,11 +1841,16 @@ class DoseApp:
             ("Tune To This Room", 7, "button", "calibrate", None),
         ]
 
-        # ── SCROLLING ────────────────────────────────────────────────
-        # Five rows fit; there are more than five. Drag the card to
-        # move through them, and a bar on the right shows where you
-        # are. Without this the new entries would simply not exist as
-        # far as anyone using the screen is concerned.
+        # ── SCROLLING — controls on the LEFT ─────────────────────────
+        # Five rows fit; there are eight. The old design put a thin
+        # scrollbar on the right and made the top/bottom half of a row
+        # the scroll target — but taps dispatch in reverse order, so
+        # each row's own button sat ON TOP of the scroll target and
+        # tapping to scroll did nothing at all. Now the controls live
+        # in their own column down the LEFT edge, with big UP / DOWN
+        # targets top and bottom and a position bar between them. They
+        # never overlap a row, because every row control starts to the
+        # right of this gutter.
         VISIBLE = 5
         row_h = card_h // VISIBLE
         max_scroll = max(0, len(items) - VISIBLE)
@@ -1854,34 +1859,66 @@ class DoseApp:
                             max_scroll))
         self._settings_scroll = scroll
 
+        # Left gutter reserved for the scroll controls. Rows are drawn
+        # starting at ROW_X, clear of it.
+        gutter_x, gutter_w = 34, 38
+        ROW_X = 84
         if max_scroll:
-            # position indicator down the right edge of the card
-            track_h = card_h - 16
-            thumb_h = max(28, int(track_h * VISIBLE / len(items)))
-            thumb_y = card_y + 8 + int(
+            btn_h = 62
+            up_y = card_y + 6
+            dn_y = card_y + card_h - 6 - btn_h
+            can_up = scroll > 0
+            can_dn = scroll < max_scroll
+            for tag, gy, active in (("set_up", up_y, can_up),
+                                    ("set_dn", dn_y, can_dn)):
+                c.create_image(gutter_x, gy, image=self._get_tk_image(
+                    "%s_%d" % (tag, int(active)),
+                    _pil_rounded_rect(gutter_w, btn_h, 12,
+                                      t["elevated_bg"] if active
+                                      else t["card_bg"])),
+                    anchor="nw")
+            cx = gutter_x + gutter_w // 2
+            up_col = DOSE_BLUE if can_up else t["divider"]
+            dn_col = DOSE_BLUE if can_dn else t["divider"]
+            # up-pointing triangle
+            c.create_polygon(cx, up_y + 20, cx - 13, up_y + 40,
+                             cx + 13, up_y + 40, fill=up_col, outline="")
+            # down-pointing triangle
+            c.create_polygon(cx, dn_y + btn_h - 20, cx - 13,
+                             dn_y + btn_h - 40, cx + 13,
+                             dn_y + btn_h - 40, fill=dn_col, outline="")
+            # position bar between the two buttons
+            track_top = up_y + btn_h + 8
+            track_bot = dn_y - 8
+            track_h = max(20, track_bot - track_top)
+            thumb_h = max(24, int(track_h * VISIBLE / len(items)))
+            thumb_y = track_top + int(
                 (track_h - thumb_h) * scroll / float(max_scroll))
-            c.create_image(628, card_y + 8, image=self._get_tk_image(
+            tx = cx - 2
+            c.create_image(tx, track_top, image=self._get_tk_image(
                 "set_track", _pil_rounded_rect(4, track_h, 2,
                                                t["divider"])),
                 anchor="nw")
-            c.create_image(628, thumb_y, image=self._get_tk_image(
+            c.create_image(tx, thumb_y, image=self._get_tk_image(
                 "set_thumb_%d" % scroll,
                 _pil_rounded_rect(4, thumb_h, 2, DOSE_BLUE)),
                 anchor="nw")
-            # tap the top / bottom eighth of the card to move
+            # Whole-button tap targets. Added here, but they sit in the
+            # gutter (x 34-72) while every row control starts at ROW_X
+            # (84+), so reverse dispatch never lets a row swallow them.
             self._click_zones.append(
-                (40, card_y, 624, card_y + row_h // 2,
+                (gutter_x, up_y, gutter_x + gutter_w, up_y + btn_h,
                  self._settings_scroll_up))
             self._click_zones.append(
-                (40, card_y + card_h - row_h // 2, 624,
-                 card_y + card_h, self._settings_scroll_down))
+                (gutter_x, dn_y, gutter_x + gutter_w, dn_y + btn_h,
+                 self._settings_scroll_down))
 
         for label, idx, kind, key, val in items:
             slot = idx - scroll
             if slot < 0 or slot >= VISIBLE:
                 continue          # scrolled out of view
             y = card_y + slot * row_h
-            px = 52
+            px = ROW_X
 
             if slot < VISIBLE - 1:
                 c.create_line(px, y + row_h, 622, y + row_h,
