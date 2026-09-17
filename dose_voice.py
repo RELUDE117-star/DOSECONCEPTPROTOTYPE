@@ -104,7 +104,13 @@ LEARN_PATH = os.path.join(VOICE_DIR, "learning.json")
 LEARN_FUZZ = 0.87          # similarity for a learned phrase to fire
 MAX_LEARNED = 300
 SAMPLE_RATE = 16000
-BLOCK_SIZE = 2000          # 0.125 s per block — snappy wake response
+# 64 ms per block, not 125 ms. The block size sets how often anything
+# can happen: how fast a push-to-talk request is noticed, how often
+# the live transcript on screen can update, and the granularity of the
+# endpointer. Halving it halves the floor on all three, and a 64 ms
+# block is still 8 Silero frames' worth of work every 64 ms — about
+# 2 ms of a core on a Pi.
+BLOCK_SIZE = int(os.environ.get("DOSE_BLOCK_SIZE", "1024"))
 COMMAND_TIMEOUT = 9.0      # seconds of silence before giving up
 FLOW_TIMEOUT = 20.0        # per-question timeout in multi-turn flows
 # After an answer the microphone stays open this long for a follow-up,
@@ -179,30 +185,84 @@ VOCAB_THRESHOLD = float(os.environ.get("DOSE_VOCAB_THRESHOLD", "76"))
 # assistant that pretends to understand everything is worse than one
 # that says plainly when it does not.
 COMMAND_VOCAB = {
-    "nav:home": ("home", "main screen", "go back", "start screen"),
+    "nav:home": (
+        "home", "main screen", "go back", "start screen", "the front",
+        "back to the start", "main menu", "the dashboard",
+    ),
     # "my pills" is deliberately NOT here: it collides with questions
     # about how many are left, and with phrases the user has taught.
     # A screen name has to be a screen name.
-    "nav:storage": ("storage", "my medications", "medicine cabinet",
-                    "the cabinet", "medication screen"),
-    "nav:settings": ("settings", "options", "preferences", "setup"),
-    "nav:user": ("my profile", "my record", "my stats", "my history",
-                 "user screen", "my progress", "my account"),
-    "time": ("what time is it", "the time", "current time"),
-    "date": ("what day is it", "todays date", "what is the date"),
-    "remaining_today": ("what do i take today", "what is left today",
-                        "my doses today", "todays medication",
-                        "what do i need today", "anything left today"),
-    "next_dose": ("what is next", "next dose", "when is my next dose",
-                  "what do i take next", "when is the next one"),
-    "taken_today": ("did i take my medicine", "have i taken my pills",
-                    "am i caught up", "did i miss anything"),
-    "count": ("how many are left", "how many pills do i have",
-              "pill count", "am i running low"),
-    "adherence": ("how am i doing", "my score", "my adherence",
-                  "am i on track"),
-    "addmed": ("add a medication", "add a new medication",
-               "register a medication", "new prescription"),
+    "nav:storage": (
+        "storage", "my medications", "medicine cabinet", "the cabinet",
+        "medication screen", "the storage screen", "my bottles",
+        "the medicine drawer", "what is loaded", "the inventory",
+    ),
+    "nav:settings": (
+        "settings", "options", "preferences", "setup", "the settings",
+        "configuration", "the options screen", "change a setting",
+        "system settings",
+    ),
+    "nav:user": (
+        "my profile", "my record", "my stats", "my history",
+        "user screen", "my progress", "my account", "my details",
+        "about me", "my information",
+    ),
+    "time": (
+        "what time is it", "the time", "current time", "got the time",
+        "do you have the time", "tell me the time", "what is the time",
+        "what time do you have", "clock",
+    ),
+    "date": (
+        "what day is it", "todays date", "what is the date",
+        "what day of the week is it", "what is today", "the date",
+        "todays day",
+    ),
+    "remaining_today": (
+        "what do i take today", "what is left today", "my doses today",
+        "todays medication", "what do i need today",
+        "anything left today", "what have i got today",
+        "what is on for today", "what is due today",
+        "what is still due", "what do i have left today",
+        "todays schedule", "my schedule today", "what is outstanding",
+        "anything else today", "what remains today",
+    ),
+    "next_dose": (
+        "what is next", "next dose", "when is my next dose",
+        "what do i take next", "when is the next one",
+        "what comes next", "when do i take the next one",
+        "what is coming up", "when is the next dose due",
+        "what is due next", "when do i take my next pill",
+        "how long until my next dose",
+    ),
+    "taken_today": (
+        "did i take my medicine", "have i taken my pills",
+        "am i caught up", "did i miss anything",
+        "have i taken everything", "did i take everything",
+        "am i up to date", "have i missed a dose",
+        "did i already take them", "have i had my medication",
+        "am i all done for today", "did i take them all",
+    ),
+    "count": (
+        "how many are left", "how many pills do i have", "pill count",
+        "am i running low", "how many do i have left",
+        "how much is left", "do i need a refill", "am i running out",
+        "what is my supply", "how many are in there",
+        "how many tablets are left", "do i have enough",
+    ),
+    "adherence": (
+        "how am i doing", "my score", "my adherence", "am i on track",
+        "how have i been doing", "am i doing well", "my track record",
+        "how good have i been", "am i keeping up",
+        "have i been taking them", "how is my streak",
+        "what is my score",
+    ),
+    "addmed": (
+        "add a medication", "add a new medication",
+        "register a medication", "new prescription", "add a new pill",
+        "put in a new medication", "set up a medication",
+        "i have a new prescription", "add something new",
+        "register a new bottle",
+    ),
 }
 
 # Every id above must be one _dispatch can actually act on. "help",
@@ -1065,13 +1125,19 @@ class DoseVoice:
             self._barge_frames = 0
 
     def _stop_playback(self):
-        """Cut the audio that is playing, now."""
+        """Cut the audio that is playing, now.
+
+        Reads the handle ONCE. It is set on the speaking thread and
+        cleared there too, so re-reading it could terminate a clip
+        that started after the interruption was decided."""
         proc = getattr(self, "_play_proc", None)
-        if proc is not None:
-            try:
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
                 proc.terminate()
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     def _probe_moonshine(self):
         """Moonshine for speed, Whisper for when speed was not enough.
@@ -2476,6 +2542,12 @@ class DoseVoice:
             "Safety protocol, Ryan: I cannot give medical advice. "
             "Never change a dose on your own — please contact your "
             "pharmacist or doctor. Protocol three: protect the patient.",
+            "I am sorry you are feeling that way, Ryan. I cannot tell "
+            "you what is causing it — please call your pharmacist or "
+            "doctor, and tell them what you have taken today. If it is "
+            "severe, if you are struggling to breathe, or if you think "
+            "you have taken too much, call 9 1 1, or poison control at "
+            "1 800, 2 2 2, 1 2 2 2, right now.",
             "This sounds like an emergency, Ryan. I am only an "
             "assistant — please call 9 1 1, or your local emergency "
             "number, right now. Poison control in the U S is "
@@ -4683,6 +4755,22 @@ class DoseVoice:
                                                   "dispense")):
                 return hit
 
+        # ── SAFETY BEFORE GUESSWORK ──────────────────────────────
+        #    If the pattern set thinks this is a medical question, a
+        #    crisis, an emergency, or someone feeling unwell, the
+        #    phonetic matcher below does NOT get a turn. Guessing is
+        #    fine when the worst case is the wrong screen; it is not
+        #    fine here.
+        #
+        #    This is not theoretical. Fuzz-testing the vocabulary found
+        #    "should i stop taking this" matching the SETTINGS screen
+        #    — a question about stopping a medication, answered by
+        #    opening a menu. One leak in 32 safety phrases, and one is
+        #    too many.
+        if nlu_i is not None and nlu_i.name in (
+                "medical_question", "crisis", "emergency", "unwell"):
+            return None
+
         # ── TRULY LAST: what does this SOUND like?
         #    Everything above is exact-ish matching. This asks "which
         #    of the things I can actually do does this sound most
@@ -4764,6 +4852,25 @@ class DoseVoice:
                     "advice. Never change a dose on your own — "
                     "please contact your pharmacist or doctor. "
                     "Protocol three: protect the patient."), False
+
+        # ── FEELING UNWELL ──────────────────────────────────────────
+        # "I don't feel well", "I feel dizzy", "I'm nauseous" used to
+        # fall all the way through to "I didn't catch that" — a shrug,
+        # to someone telling a MEDICATION device that something is
+        # wrong with them. Found by fuzzing the vocabulary, and it is
+        # the worst thing in this file to have got wrong.
+        #
+        # It cannot diagnose and does not try. What it can do is take
+        # it seriously, name the people who can help, and make sure
+        # nobody in real trouble is left talking to a wall.
+        if _crisis is not None and _crisis.name == "unwell":
+            return ("I am sorry you are feeling that way, Ryan. I "
+                    "cannot tell you what is causing it — please call "
+                    "your pharmacist or doctor, and tell them what you "
+                    "have taken today. If it is severe, if you are "
+                    "struggling to breathe, or if you think you have "
+                    "taken too much, call 9 1 1, or poison control at "
+                    "1 800, 2 2 2, 1 2 2 2, right now."), False
 
         # ── STRONG NLU SAFETY UNION (adds to the gates above, never
         #    weakens them): self-harm crisis, emergency and medical

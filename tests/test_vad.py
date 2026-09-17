@@ -147,11 +147,22 @@ ok(dv.BARGE_FRAMES >= 3,
 
 
 class FakeProc:
+    """Stands in for the playback process. poll() returns None while
+    it is still running, like subprocess.Popen."""
+
     def __init__(self):
         self.killed = False
 
+    def poll(self):
+        return None if not self.killed else 0
+
     def terminate(self):
         self.killed = True
+
+
+class FinishedProc(FakeProc):
+    def poll(self):
+        return 0                    # already ended on its own
 
 
 loud = (b"\x00\x40" * 512)          # comfortably above the floor
@@ -181,6 +192,14 @@ for _ in range(20):
     v._detect_barge_in(loud)
 ok(not v._barge,
    "loud audio that is not a voice never interrupts her")
+
+# a clip that already finished must not be "terminated" — the handle
+# may since have been reused by the next one
+v = fresh()
+v._play_proc = FinishedProc()
+v._stop_playback()
+ok(not v._play_proc.killed,
+   "a clip that has already ended is not terminated again")
 
 # quiet audio never does either
 v = fresh()

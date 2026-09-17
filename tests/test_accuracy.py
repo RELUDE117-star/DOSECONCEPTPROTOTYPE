@@ -504,6 +504,79 @@ ok(all(k.startswith("nav:") or k in {
     "count", "adherence", "addmed"} for k in _dvv.COMMAND_VOCAB),
    "every command in the vocabulary is one the dispatcher can act on")
 
+print("== 17. FUZZED vocabulary: broad, and still safe ==")
+# Every phrase in the command vocabulary, damaged the way a recogniser
+# damages speech — a dropped letter, a transposition, a missing word —
+# three times each. This is how the leak below was found; it is not a
+# hypothetical.
+import random as _rnd                                        # noqa: E402
+import dose_voice as _dv2                                    # noqa: E402
+_rnd.seed(7)
+
+
+def _mangle(phrase):
+    w = phrase.split()
+    r = _rnd.random()
+    if r < 0.35 and len(w) > 2:
+        w.pop(_rnd.randrange(len(w)))
+    out = " ".join(w)
+    i = _rnd.randrange(max(1, len(out) - 1))
+    if r < 0.7:
+        return out[:i] + out[i + 1:]
+    return out[:i] + out[i + 1:i + 2] + out[i:i + 1] + out[i + 2:]
+
+
+hit = tot = 0
+for intent, phrases in _dv2.COMMAND_VOCAB.items():
+    for phrase in phrases:
+        for _ in range(3):
+            tot += 1
+            if _nlu.match_choice(_mangle(phrase), _dv2.COMMAND_VOCAB,
+                                 threshold=_dv2.VOCAB_THRESHOLD) == intent:
+                hit += 1
+rate = 100.0 * hit / tot
+print("    %d/%d damaged phrases still resolved (%.1f%%)"
+      % (hit, tot, rate))
+ok(rate >= 90.0,
+   "%.1f%% of damaged phrasings still reach the right command" % rate)
+ok(tot >= 300, "across %d variations of %d phrases"
+   % (tot, sum(len(v) for v in _dv2.COMMAND_VOCAB.values())))
+
+# THE LEAK THIS FOUND: "should i stop taking this" matched the
+# SETTINGS screen — a question about stopping a medication, answered
+# by opening a menu. Safety intents now block the phonetic matcher
+# entirely.
+SAFETY_PHRASES = [
+    "should i stop taking this", "should i skip my dose",
+    "can i take two", "what happens if i take too much",
+    "can i drink alcohol with this", "what are the side effects",
+    "is it safe to take this", "should i take more",
+    "can i stop my metformin", "should i double up",
+    "i want to kill myself", "i want to end my life",
+    "chest pain", "i cant breathe", "i fell",
+    "i dont feel well", "i feel dizzy",
+]
+for phrase in SAFETY_PHRASES:
+    _v._flow = None
+    _app.nav_to = None
+    reply, went = says(phrase)
+    low = reply.lower()
+    ok(went in (None, "home"),
+       "%-34r never becomes a screen change (got %s)" % (phrase, went))
+    ok(any(w in low for w in ("pharmacist", "medical advice", "911",
+                              "988", "lifeline", "emergency",
+                              "not have to go", "how you are feeling",
+                              "cannot give")),
+       "%-34r gets its safety answer" % phrase)
+
+src_v = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
+mb = src_v.split("def _match_builtin")[1].split("\n    def ")[0]
+ok(mb.index('"medical_question", "crisis", "emergency", "unwell"')
+   < mb.index("TRULY LAST"),
+   "safety intents are checked BEFORE the phonetic matcher gets a "
+   "turn — guessing is fine when the worst case is the wrong screen, "
+   "and not fine here")
+
 print()
 print("accuracy suite: %d passed, %d failed" % (PASSED, FAILED))
 if FAILED:
