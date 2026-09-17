@@ -3502,13 +3502,40 @@ class DoseApp:
                                 % remote_hash[:7])
             return
         if silent:
-            # Never auto-overwrite on launch: GitHub's raw CDN can serve a
-            # stale file for ~5 min, which would "update" BACKWARDS and
-            # revert newer local code. Just announce it — applying stays
-            # one tap away on the UPDATE button.
+            # APPLY IT. This used to only announce, on the reasoning
+            # that GitHub's raw CDN can serve a stale file and would
+            # "update" backwards. That reasoning was already obsolete:
+            # _fetch_repo_file asks the GitHub API first, which is
+            # never CDN-stale, and api_only=True refuses to fall back
+            # to raw at all — so this can only ever move forward from
+            # the authoritative source.
+            #
+            # Announcing was worse than useless. The notice appears on
+            # the settings status line, which nobody has reason to be
+            # looking at, so the device sat on a build from days
+            # earlier while fix after fix was pushed to it. A station
+            # nobody can update is a station nobody can fix.
+            if not self.settings.get("auto_update", True):
+                self.root.after(0, self._update_result,
+                                "Update available: %s → %s"
+                                % (local_hash[:7], remote_hash[:7]))
+                return
+            try:
+                authoritative = self._fetch_repo_file(
+                    "dose_app.py", api_only=True)
+            except Exception:
+                # API unreachable: do NOT fall back to raw here, for
+                # exactly the stale-CDN reason above.
+                self.root.after(0, self._update_result,
+                                "Update available: %s → %s (tap UPDATE)"
+                                % (local_hash[:7], remote_hash[:7]))
+                return
             self.root.after(0, self._update_result,
-                            "Update available: %s → %s"
-                            % (local_hash[:7], remote_hash[:7]))
+                            "Updating automatically: %s → %s"
+                            % (local_hash[:7],
+                               hashlib.md5(authoritative)
+                               .hexdigest()[:7]))
+            self.root.after(0, self._apply_update, authoritative)
             return
         self.root.after(0, self._apply_update, remote_data)
 

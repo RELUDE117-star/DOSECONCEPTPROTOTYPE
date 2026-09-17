@@ -202,6 +202,30 @@ ok("nocache" in fetch, "with a cache-busted raw fallback")
 ok("api_only" in fetch,
    "and auto-updates can demand the authoritative source")
 
+# ── 6. the launch check APPLIES, it does not just announce ───────────
+# The device sat on a build from days earlier while fix after fix was
+# pushed to it. The launch check found the update every time and then
+# wrote a note on the settings status line, which nobody has reason to
+# be looking at. A station nobody can update is a station nobody can
+# fix.
+chk = SRC.split("def _do_update_check")[1].split("\n    def ")[0]
+ok("_apply_update" in chk.split("if silent:")[1],
+   "the silent launch check applies the update")
+ok("api_only=True" in chk,
+   "using the GitHub API only — never the raw CDN, which can serve a "
+   "stale file and would update BACKWARDS")
+ok('settings.get("auto_update", True)' in chk,
+   "and it can be switched off, defaulting to on")
+ok(chk.index("if silent:") < chk.index("api_only=True"),
+   "the authoritative re-fetch happens on the silent path")
+# an unreachable API must not fall back to raw for an auto-apply
+ok("tap UPDATE" in chk,
+   "if the API is unreachable it says so instead of auto-applying "
+   "something that might be stale")
+ok(chk.index("except Exception:\n                # API unreachable")
+   < chk.index("self.root.after(0, self._apply_update, authoritative)"),
+   "the unreachable case returns BEFORE anything is applied")
+
 print()
 print("update suite: %d passed, %d failed" % (PASSED, FAILED))
 if FAILED:
