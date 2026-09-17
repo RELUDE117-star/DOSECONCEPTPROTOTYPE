@@ -204,10 +204,14 @@ COMMAND_VOCAB = {
         "medication screen", "the storage screen", "my bottles",
         "the medicine drawer", "what is loaded", "the inventory",
     ),
+    # NOTE: no bare "setup" alias. It scored a perfect match against
+    # the "set up" in "set up a medication" and hijacked that command
+    # to the Settings screen. "settings", "options", "preferences" and
+    # "configuration" cover this intent without the collision.
     "nav:settings": (
-        "settings", "options", "preferences", "setup", "the settings",
+        "settings", "options", "preferences", "the settings",
         "configuration", "the options screen", "change a setting",
-        "system settings",
+        "system settings", "open settings",
     ),
     "nav:user": (
         "my profile", "my record", "my stats", "my history",
@@ -325,6 +329,14 @@ WHISPER_MODELS = tuple(filter(None, os.environ.get(
 # to "moonshine" or "whisper" to skip the race and pin one.
 FAST_WHISPER_MODEL = os.environ.get("DOSE_FAST_WHISPER", "tiny.en")
 FAST_ENGINE_PIN = os.environ.get("DOSE_FAST_ENGINE", "").strip().lower()
+
+# THE BENCHMARK the station scores itself against — the owner's targets,
+# in one place so the self-test and the audit report the same numbers.
+TARGET_ACCURACY = float(os.environ.get("DOSE_TARGET_ACCURACY", "99.5"))
+TARGET_LATENCY = float(os.environ.get("DOSE_TARGET_LATENCY", "0.5"))
+TARGET_LATENCY_WORST = float(os.environ.get("DOSE_TARGET_LATENCY_WORST",
+                                            "0.8"))
+TARGET_TEMP_MAX = float(os.environ.get("DOSE_TARGET_TEMP", "80"))
 
 
 
@@ -1449,7 +1461,11 @@ class DoseVoice:
         for a fraction of a percent of word error on short commands,
         and on a Pi that trade is not close. vad can be turned off for
         the startup race so the timing measures full compute rather
-        than being flattered by silence-skipping."""
+        than being flattered by silence-skipping. Also records the
+        model's own confidence (avg_logprob) in self._fw_conf, so a
+        confident-but-wrong reading can still be sent for a second
+        opinion."""
+        self._fw_conf = 0.0
         if not audio_bytes or model is None:
             return ""
         path = None
@@ -1459,7 +1475,12 @@ class DoseVoice:
                 path, language="en", beam_size=beam_size,
                 vad_filter=vad, condition_on_previous_text=False,
                 initial_prompt=self._whisper_prompt())
-            return self._clean_text(" ".join(sg.text for sg in segs))
+            segs = list(segs)
+            # worst (lowest) segment confidence — one weak segment is
+            # enough to want the stronger model to check it
+            lps = [getattr(s, "avg_logprob", 0.0) for s in segs]
+            self._fw_conf = min(lps) if lps else 0.0
+            return self._clean_text(" ".join(s.text for s in segs))
         except Exception:
             return ""
         finally:
@@ -1549,11 +1570,21 @@ class DoseVoice:
             return FAST_ENGINE_PIN
         return getattr(self, "_fast_choice", "") or "whisper"
 
+    # Below this average log-probability the fast model's reading is
+    # shaky enough that the stronger model should check it, EVEN if it
+    # happens to parse — this is the "confidently wrong" case that a
+    # parse-only test lets through. moonshine gives no confidence, so
+    # it is always treated as low (0.0 sentinel handled by the caller).
+    FAST_CONF_FLOOR = float(os.environ.get("DOSE_FAST_CONF_FLOOR",
+                                           "-0.85"))
+
     def _fast_transcribe(self, audio_bytes):
         """Run the fast recogniser chosen for this board.
-        Returns (text, engine_tag)."""
+        Returns (text, engine_tag). Sets self._fw_conf as a side
+        effect (0.0 when the engine reports no confidence)."""
         eng = self._fast_engine()
         if eng == "moonshine" and self._moonshine_v2() is not None:
+            self._fw_conf = 0.0        # moonshine reports none
             return self._moonshine_transcribe(audio_bytes), "moonshine"
         fw = self._load_whisper_fast()
         if fw is not None:
@@ -1561,6 +1592,7 @@ class DoseVoice:
                     "whisper-%s" % (getattr(self, "_whisper_fast_size",
                                             FAST_WHISPER_MODEL)))
         if self._moonshine_v2() is not None:
+            self._fw_conf = 0.0
             return self._moonshine_transcribe(audio_bytes), "moonshine"
         return "", eng
 
@@ -1633,9 +1665,17 @@ class DoseVoice:
 
         # 1) THE FAST PATH answers.
         fast, feng = self._fast_transcribe(audio_bytes)
+        fast_conf = getattr(self, "_fw_conf", 0.0)
         self._raw_fast = fast or ""
         self._t_fast = time.time() - t_start
-        if fast and self._usable(fast):
+        # Accept the fast answer only if it parses AND the model was
+        # reasonably sure of it. A confident score with a shaky reading
+        # (low avg_logprob) is exactly how a fast model hands back a
+        # clean-looking wrong answer, so that still gets a second
+        # opinion below. conf == 0.0 means "no confidence reported"
+        # (moonshine) — trusted, since it has no signal to distrust.
+        confident = fast_conf == 0.0 or fast_conf >= self.FAST_CONF_FLOOR
+        if fast and confident and self._usable(fast):
             self._t_slow = 0.0
             self._last_engine = feng
             return fast
@@ -5082,6 +5122,11 @@ class DoseVoice:
         st = self._st
         try:
             self._st_request = True     # ask the capture loop for turns
+            temp_max = 0.0
+            try:
+                temp_max = pi_health().get("temp_c", 0.0) or 0.0
+            except Exception:
+                pass
             for i, (phrase, want, why) in enumerate(self.SELF_TEST):
                 if not self._st or self._st.get("phase") != "run":
                     return
@@ -5092,6 +5137,14 @@ class DoseVoice:
                 got = self._st_capture()
                 st["results"].append(self._score_selftest(
                     phrase, want, why, got))
+                # watch the temperature climb across the whole test —
+                # "never overheats" is one of the benchmarks
+                try:
+                    temp_max = max(temp_max,
+                                   pi_health().get("temp_c", 0.0) or 0.0)
+                except Exception:
+                    pass
+            st["temp_max"] = temp_max
             st["phase"] = "done"
             st["finished"] = time.time()
         except Exception as e:
@@ -5199,6 +5252,31 @@ class DoseVoice:
                "  worst SNR        %.1f" % snr,
                ""]
 
+        # ── THE BENCHMARK: the three targets, PASS/FAIL ──
+        # These are the numbers to hit: recognise it every time, answer
+        # in under half a second, and never cook the Pi.
+        acc = 100.0 * good / n
+        temp_max = st.get("temp_max", 0.0) or 0.0
+        def _pf(ok):
+            return "PASS" if ok else "FAIL"
+        out.append("## TARGETS (the benchmark)")
+        out.append("  accuracy   %5.1f%%      target >= %.1f%%   %s"
+                   % (acc, TARGET_ACCURACY, _pf(acc >= TARGET_ACCURACY)))
+        out.append("  latency    %5.2fs p50   target <  %.2fs    %s"
+                   % (p50, TARGET_LATENCY, _pf(p50 < TARGET_LATENCY)))
+        out.append("  latency    %5.2fs worst target <  %.2fs    %s"
+                   % (worst, TARGET_LATENCY_WORST,
+                      _pf(worst < TARGET_LATENCY_WORST)))
+        out.append("  thermal    %5.1fC peak  target <  %.0fC     %s"
+                   % (temp_max, TARGET_TEMP_MAX,
+                      _pf(0 < temp_max < TARGET_TEMP_MAX)))
+        allpass = (acc >= TARGET_ACCURACY and p50 < TARGET_LATENCY
+                   and worst < TARGET_LATENCY_WORST
+                   and 0 < temp_max < TARGET_TEMP_MAX)
+        out.append("  OVERALL    %s" % ("ALL TARGETS MET"
+                                        if allpass else "NOT YET"))
+        out.append("")
+
         # ── the verdict: WHICH PART is at fault ──
         out.append("## WHAT TO FIX")
         if silent > n // 3:
@@ -5243,9 +5321,21 @@ class DoseVoice:
                       " · UNDER-VOLTAGE" if h["under_voltage"] else ""))
         out.append("  speech threads %d continuous / %d burst"
                    % (INFER_THREADS, STT_THREADS))
+        _fe = self._fast_engine()
+        if _fe == "moonshine":
+            _fast_lbl = "moonshine %s" % (
+                (self._ms_arch_used or "?").split("_")[0].lower())
+        else:
+            _fast_lbl = "whisper %s" % getattr(
+                self, "_whisper_fast_size", FAST_WHISPER_MODEL)
+        _msr = getattr(self, "_ms_race_secs", None)
+        _fwr = getattr(self, "_fw_race_secs", None)
+        if _msr is not None and _fwr is not None:
+            def _rf(x):
+                return ("%.2fs" % x) if x and x < float("inf") else "-"
+            _fast_lbl += " (race ms %s/wh %s)" % (_rf(_msr), _rf(_fwr))
         out.append("  fast model %s · backup %s"
-                   % ((self._ms_arch_used or "?").split("_")[0].lower(),
-                      self._whisper_size or "?"))
+                   % (_fast_lbl, self._whisper_size or "?"))
 
         out.append("")
         out.append("## EVERY PHRASE")

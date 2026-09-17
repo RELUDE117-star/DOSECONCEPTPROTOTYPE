@@ -408,6 +408,13 @@ ok("max(cands" in bt,
    "where the fast model said 'urk' and the slow one said 'open "
    "storage the' was reporting 'urk', throwing away the transcript "
    "the phonetic matcher could have used")
+# Confidence gate: a fast reading that parses but the model was unsure
+# of still gets a second opinion — the 'confidently wrong' case.
+ok("FAST_CONF_FLOOR" in VSRC and "fast_conf" in bt,
+   "a low-confidence fast reading escalates even when it parses")
+fwt = VSRC.split("def _fw_transcribe")[1].split("\n    def ")[0]
+ok("avg_logprob" in fwt and "_fw_conf" in fwt,
+   "faster-whisper's own confidence is captured to drive that gate")
 
 # prove it, on the real method
 class _Pick(DoseVoice):

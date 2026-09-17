@@ -550,6 +550,24 @@ for phrase in ("give me my sertraline", "dispense my pills"):
     v.respond(phrase)          # _start_dispense raises if it tries
     ok(True, "SAFE: %r never dispenses" % phrase)
 
+print("== 10. the station scores ITSELF against the benchmark ==")
+# The owner set the bar: recognise it ~every time, answer in under half
+# a second, never overheat. The self-test must report each target with a
+# PASS/FAIL, so a photo of the result says plainly whether we are there.
+for c in ("TARGET_ACCURACY", "TARGET_LATENCY", "TARGET_TEMP_MAX"):
+    ok(hasattr(dv, c), "the benchmark defines %s" % c)
+ok(dv.TARGET_ACCURACY >= 99.0 and dv.TARGET_LATENCY <= 0.5,
+   "the targets are the owner's: >=%.1f%% accuracy, <%.2fs latency"
+   % (dv.TARGET_ACCURACY, dv.TARGET_LATENCY))
+_sr = VOICE_SRC.split("def selftest_report")[1].split("\n    def ")[0]
+ok("## TARGETS" in _sr and "PASS" in _sr and "FAIL" in _sr,
+   "the self-test reports each target as PASS or FAIL")
+ok("temp_max" in _sr and "TARGET_TEMP_MAX" in _sr,
+   "including the peak temperature reached DURING the test")
+_rst = VOICE_SRC.split("def _run_selftest")[1].split("\n    def ")[0]
+ok("temp_max = max(" in _rst,
+   "the run tracks the hottest the Pi got across the whole test")
+
 print()
 print("latency suite: %d passed, %d failed" % (PASSED, FAILED))
 if FAILED:
