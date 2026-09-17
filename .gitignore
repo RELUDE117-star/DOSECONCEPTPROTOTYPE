@@ -28,3 +28,22 @@ claude-bootstrap-status.json
 claude-bootstrap/
 diagnostics/
 *.wav
+
+# --- private key material: NEVER committable (belt and braces) ---
+# Filename patterns (the .pub public halves are deliberately allowed
+# back in below, because a public key grants nothing and the Pi needs it).
+*_rsa
+*_dsa
+*_ecdsa
+*_ed25519
+*id_rsa*
+*id_dsa*
+*id_ecdsa*
+*id_ed25519*
+*.pem
+*.key
+*.p12
+*.pfx
+id_*
+!*.pub
+!tools/claude_dev_authorized_keys
