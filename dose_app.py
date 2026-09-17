@@ -1008,6 +1008,8 @@ class DoseApp:
             self._draw_calibrate(c)
         elif self.mode == "audit":
             self._draw_audit(c)
+        elif self.mode == "selftest":
+            self._draw_selftest(c)
         elif self.mode == "sysinfo":
             self._draw_sysinfo(c)
         elif self.mode == "btaudio":
@@ -1036,7 +1038,7 @@ class DoseApp:
         if active == "dosealert":
             active = getattr(self, "_alert_return", "home")
         if active in ("micreport", "btaudio", "micmeter", "sysinfo",
-                      "calibrate", "audit"):
+                      "calibrate", "audit", "selftest"):
             active = "settings"
         if active in ("hold", "spin", "confirmdisp", "dispensed",
                       "qtyconfirm", "addmed"):
@@ -1823,14 +1825,54 @@ class DoseApp:
              self.settings.get("constant_scan", False)),
             ("Voice Assistant", 4, "toggle", "voice_enabled",
              self.settings.get("voice_enabled", True)),
+            # Added below the fold — the list scrolls now.
+            ("Run Full Audit Test", 5, "button", "selftest", None),
+            ("Tune To This Room", 6, "button", "calibrate", None),
         ]
 
-        row_h = card_h // 5
+        # ── SCROLLING ────────────────────────────────────────────────
+        # Five rows fit; there are more than five. Drag the card to
+        # move through them, and a bar on the right shows where you
+        # are. Without this the new entries would simply not exist as
+        # far as anyone using the screen is concerned.
+        VISIBLE = 5
+        row_h = card_h // VISIBLE
+        max_scroll = max(0, len(items) - VISIBLE)
+        self._settings_max_scroll = max_scroll
+        scroll = max(0, min(getattr(self, "_settings_scroll", 0),
+                            max_scroll))
+        self._settings_scroll = scroll
+
+        if max_scroll:
+            # position indicator down the right edge of the card
+            track_h = card_h - 16
+            thumb_h = max(28, int(track_h * VISIBLE / len(items)))
+            thumb_y = card_y + 8 + int(
+                (track_h - thumb_h) * scroll / float(max_scroll))
+            c.create_image(628, card_y + 8, image=self._get_tk_image(
+                "set_track", _pil_rounded_rect(4, track_h, 2,
+                                               t["divider"])),
+                anchor="nw")
+            c.create_image(628, thumb_y, image=self._get_tk_image(
+                "set_thumb_%d" % scroll,
+                _pil_rounded_rect(4, thumb_h, 2, DOSE_BLUE)),
+                anchor="nw")
+            # tap the top / bottom eighth of the card to move
+            self._click_zones.append(
+                (40, card_y, 624, card_y + row_h // 2,
+                 self._settings_scroll_up))
+            self._click_zones.append(
+                (40, card_y + card_h - row_h // 2, 624,
+                 card_y + card_h, self._settings_scroll_down))
+
         for label, idx, kind, key, val in items:
-            y = card_y + idx * row_h
+            slot = idx - scroll
+            if slot < 0 or slot >= VISIBLE:
+                continue          # scrolled out of view
+            y = card_y + slot * row_h
             px = 52
 
-            if idx < 4:
+            if slot < VISIBLE - 1:
                 c.create_line(px, y + row_h, 622, y + row_h,
                               fill=t["divider"])
 
@@ -1871,12 +1913,31 @@ class DoseApp:
                 bw, bh = 120, 44
                 bx = 510
                 by = y + (row_h - bh) // 2
+                cap, act, sub = {
+                    "update": ("UPDATE", self._on_update_pressed, None),
+                    "selftest": ("RUN", self._open_selftest,
+                                 "Say ten phrases — scores itself and "
+                                 "says what to fix"),
+                    "calibrate": ("TUNE", self._open_calibrate,
+                                  "Read a line so it learns this room "
+                                  "and your voice"),
+                }.get(key, ("UPDATE", self._on_update_pressed, None))
                 btn_img = _pil_rounded_rect(bw, bh, 14, ACCENT_BLUE)
-                tk_btn = self._get_tk_image("update_btn", btn_img)
+                tk_btn = self._get_tk_image("set_btn_%s" % key, btn_img)
                 c.create_image(bx, by, image=tk_btn, anchor="nw")
-                c.create_text(bx + bw // 2, by + bh // 2, text="UPDATE",
+                c.create_text(bx + bw // 2, by + bh // 2, text=cap,
                               font=self.font_update_btn, fill="#FFFFFF",
                               anchor="center")
+                if sub:
+                    c.create_text(px + 64, y + row_h // 2 + 16,
+                                  text=self._fit_text(sub,
+                                                      self.font_small,
+                                                      430),
+                                  font=self.font_small,
+                                  fill=t["muted"], anchor="w")
+                    self._click_zones.append(
+                        (bx, by, bx + bw, by + bh, act))
+                    continue
 
                 status = getattr(self, '_update_status_text', '')
                 ver = "Build " + getattr(self, "_build_id", "?")
@@ -3005,6 +3066,17 @@ class DoseApp:
     # ══════════════════════════════════════════════════════════════════════
     #  CLICK HANDLING
     # ══════════════════════════════════════════════════════════════════════
+    def _settings_scroll_up(self):
+        self._settings_scroll = max(
+            0, getattr(self, "_settings_scroll", 0) - 1)
+        self._draw_frame()
+
+    def _settings_scroll_down(self):
+        self._settings_scroll = min(
+            getattr(self, "_settings_max_scroll", 0),
+            getattr(self, "_settings_scroll", 0) + 1)
+        self._draw_frame()
+
     def _on_canvas_click(self, event):
         x, y = event.x, event.y
         # A tap OUTSIDE the voice panel means "we're done here". It is
@@ -5310,6 +5382,199 @@ class DoseApp:
         self._meter_run = False
         self.mode = "btaudio"
         self._draw_frame()
+
+    # ── GUIDED SELF-TEST ─────────────────────────────────────────────
+    def _open_selftest(self):
+        if self.mode != "selftest":
+            self._prev_mode = self.mode
+        self.mode = "selftest"
+        self._selftest_tick()
+        self._draw_frame()
+
+    def _close_selftest(self):
+        try:
+            if self.voice:
+                self.voice.cancel_selftest()
+        except Exception:
+            pass
+        self.mode = getattr(self, "_prev_mode", "settings") or "settings"
+        self._draw_frame()
+
+    def _start_selftest(self):
+        try:
+            if self.voice and getattr(self.voice, "available", False):
+                self.voice.start_selftest()
+            else:
+                self._selftest_msg = "Voice assistant is not running."
+        except Exception as e:
+            self._selftest_msg = str(e)[:60]
+        self._draw_frame()
+
+    def _selftest_tick(self):
+        if self.mode != "selftest":
+            return
+        self._draw_frame()
+        self.root.after(400, self._selftest_tick)
+
+    def _post_selftest(self):
+        """Save the self-test report and post it, like the audit."""
+        def work():
+            try:
+                text = self.voice.selftest_report()
+            except Exception as e:
+                self._selftest_msg = "no report: %s" % str(e)[:40]
+                return
+            full = self.audit_report_text() + "\n\n" + text
+            try:
+                path = os.path.join(APP_DIR, "selftest-latest.txt")
+                with open(path, "w") as f:
+                    f.write(full)
+                saved = "saved to %s" % path
+            except Exception as e:
+                saved = "could not save: %s" % str(e)[:30]
+            tok = self._audit_token()
+            if not tok:
+                self._selftest_msg = saved
+                return
+            try:
+                import urllib.request
+                body = json.dumps({
+                    "title": "Self-test — build %s"
+                             % getattr(self, "_build_id", "?"),
+                    "body": "```\n" + full[:60000] + "\n```"}).encode()
+                req = urllib.request.Request(
+                    "https://api.github.com/repos/%s/issues" % REPO,
+                    data=body, method="POST",
+                    headers={"Authorization": "Bearer " + tok,
+                             "Accept": "application/vnd.github+json",
+                             "User-Agent": "dose-station",
+                             "Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    num = json.loads(r.read().decode()).get("number")
+                self._selftest_msg = "posted as issue #%s" % num
+            except Exception as e:
+                self._selftest_msg = "%s · post failed: %s" % (
+                    saved, str(e)[:36])
+
+        self._selftest_msg = "sending…"
+        self._draw_frame()
+        threading.Thread(target=work, daemon=True,
+                         name="selftest-post").start()
+
+    def _draw_selftest(self, c):
+        """Ask for a phrase, show what happened, score it."""
+        t = self.theme
+        c.create_image(26, 12, image=self._get_tk_image(
+            "st_card", _pil_rounded_rect(620, 456, 20, t["card_bg"])),
+            anchor="nw")
+        c.create_text(42, 22, text="FULL AUDIT TEST",
+                      font=self.font_label, fill=DOSE_BLUE_LT,
+                      anchor="nw")
+
+        st = {"phase": "idle", "index": 0, "total": 0, "results": []}
+        try:
+            if self.voice:
+                st = self.voice.selftest_state()
+        except Exception:
+            pass
+        phase = st.get("phase", "idle")
+        rows = st.get("results", [])
+
+        if phase == "idle":
+            c.create_text(
+                323, 70,
+                text="I will ask you to say ten things.\n"
+                     "Say each one normally, from where you "
+                     "usually stand.\n\n"
+                     "It records what each recogniser heard, what it "
+                     "did with it,\nhow long every stage took and "
+                     "what the microphone was\ngetting — then scores "
+                     "itself and says what to fix.",
+                font=self.font_small, fill=t["fg"], anchor="n",
+                width=560, justify="center")
+        elif phase == "run":
+            i = st.get("index", 0)
+            c.create_text(323, 60, text="%d of %d"
+                          % (i + 1, st.get("total", 0)),
+                          font=self.font_small, fill=t["muted"],
+                          anchor="n")
+            c.create_text(323, 92, text="Say:", font=self.font_small,
+                          fill=t["muted"], anchor="n")
+            c.create_text(323, 118,
+                          text='"%s"' % st.get("prompt", ""),
+                          font=self.font_title, fill=DOSE_BLUE_LT,
+                          anchor="n", width=570)
+            done = len(rows)
+            bx, bw = 56, 560
+            c.create_image(bx, 200, image=self._get_tk_image(
+                "st_track", _pil_rounded_rect(bw, 14, 6,
+                                              t["elevated_bg"])),
+                anchor="nw")
+            if done:
+                frac = done / float(max(1, st.get("total", 1)))
+                c.create_image(bx, 200, image=self._get_tk_image(
+                    "st_fill_%d" % done,
+                    _pil_rounded_rect(_qw(bw * frac, 8, 8), 14, 6,
+                                      DOSE_BLUE)), anchor="nw")
+        elif phase in ("done", "failed", "cancelled"):
+            good = sum(1 for r in rows if r.get("ok"))
+            n = max(1, len(rows))
+            pct = 100 * good // n
+            c.create_text(323, 58, text="%d%%" % pct,
+                          font=self.font_title,
+                          fill="#2ECC71" if pct >= 80 else "#F1C40F",
+                          anchor="n")
+            c.create_text(323, 92, text="%d of %d handled correctly"
+                          % (good, len(rows)), font=self.font_small,
+                          fill=t["fg"], anchor="n")
+
+        # per-phrase results, newest at the bottom
+        y = 232 if phase == "run" else 128
+        for r in rows[-9:]:
+            line = "%s %-22s -> %s" % (
+                "OK " if r.get("ok") else "BAD",
+                (r.get("asked") or "")[:22],
+                (r.get("heard") or "(nothing)")[:26])
+            c.create_text(56, y, text=self._fit_text(
+                line, self.font_tiny, 580), font=self.font_tiny,
+                fill="#2ECC71" if r.get("ok") else "#F1C40F",
+                anchor="nw")
+            y += 13
+            if r.get("fault"):
+                c.create_text(76, y, text=self._fit_text(
+                    r["fault"], self.font_tiny, 540),
+                    font=self.font_tiny, fill=t["muted"], anchor="nw")
+                y += 13
+            if y > 378:
+                break
+
+        msg = getattr(self, "_selftest_msg", "")
+        if msg:
+            c.create_text(42, 392, text=self._fit_text(
+                msg, self.font_tiny, 590), font=self.font_tiny,
+                fill=DOSE_BLUE_LT, anchor="nw")
+
+        buttons = [("START" if phase != "run" else "LISTENING…",
+                    self._start_selftest)]
+        if rows and phase != "run":
+            buttons.append(("SEND RESULT", self._post_selftest))
+        buttons.append(("CLOSE", self._close_selftest))
+        bw2 = max(100, min(170, (590 - 8 * (len(buttons) - 1))
+                           // len(buttons)))
+        bx = 42
+        for label, cb in buttons:
+            primary = label == "CLOSE"
+            c.create_image(bx, 414, image=self._get_tk_image(
+                "st_b_%s" % label, _pil_rounded_rect(
+                    bw2, 40, 12,
+                    DOSE_BLUE if primary else t["elevated_bg"])),
+                anchor="nw")
+            c.create_text(bx + bw2 // 2, 434, text=label,
+                          font=self.font_small_bold,
+                          fill="#06101E" if primary else t["fg"],
+                          anchor="center")
+            self._click_zones.append((bx, 414, bx + bw2, 454, cb))
+            bx += bw2 + 8
 
     # ── AUDIT PAGE ───────────────────────────────────────────────────
     # One screen, everything on it, nothing cut off — made to be

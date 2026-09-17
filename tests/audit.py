@@ -404,6 +404,65 @@ def voice_integration():
         app.root.update()
         time.sleep(0.01)
     assert not app.canvas.find_withtag("voice_ov"), "panel never hid"
+    # settings scrolls, and the rows past the fifth are reachable
+    app._nav("settings")
+    app.root.update()
+    app._settings_scroll = 0
+    app._draw_frame(); app.root.update()
+    top = " ".join(app.canvas.itemcget(i, "text")
+                   for i in app.canvas.find_all()
+                   if app.canvas.type(i) == "text")
+    for _ in range(6):
+        app._settings_scroll_down()
+    app.root.update()
+    bottom = " ".join(app.canvas.itemcget(i, "text")
+                      for i in app.canvas.find_all()
+                      if app.canvas.type(i) == "text")
+    assert "Run Full Audit Test" in bottom, "self-test row unreachable"
+    assert top != bottom, "settings did not scroll"
+    for _ in range(9):
+        app._settings_scroll_up()
+    app.root.update()
+    assert app._settings_scroll == 0, "scroll did not clamp at the top"
+    for _ in range(20):
+        app._settings_scroll_down()
+    app.root.update()
+    assert app._settings_scroll == app._settings_max_scroll, \
+        "scroll did not clamp at the bottom"
+
+    # the guided self-test screen draws in every phase
+    app._open_selftest()
+    app.root.update()
+    assert app.mode == "selftest"
+    for phase in ("idle", "run", "done", "failed", "cancelled"):
+        class _FakeST:
+            available = True
+
+            def selftest_state(self, _p=phase):
+                return {"phase": _p, "index": 2, "total": 10,
+                        "prompt": "what time is it", "why": "cmd",
+                        "results": [
+                            {"asked": "what time is it",
+                             "heard": "what time is it", "ok": True,
+                             "fault": ""},
+                            {"asked": "open storage", "heard": "",
+                             "ok": False, "fault": "HEARD NOTHING"}]}
+
+            def cancel_selftest(self):
+                pass
+
+            def start_selftest(self):
+                return True
+        _rv = app.voice
+        app.voice = _FakeST()
+        try:
+            app._draw_frame(); app.root.update()
+        finally:
+            app.voice = _rv
+    app._close_selftest()
+    app.root.update()
+    assert app.mode != "selftest"
+
     # room-calibration screen: opens, draws in every phase, closes
     app._open_calibrate()
     app.root.update()

@@ -3345,6 +3345,8 @@ class DoseVoice:
         self._vad_seen = 0
         self._vad_agreed = 0
         self._barge = False      # user started talking over her
+        self._st_want = False    # guided self-test wants a turn
+        self._st_result = None
         self._cal_profile = None  # what calibration measured
         self._clip_blocks = 0    # blocks where the input saturated
         self._blocks_seen = 0
@@ -3904,6 +3906,33 @@ class DoseVoice:
             # PUSH-TO-TALK: holding the Dose logo starts a listening
             # session directly, no wake word needed — the reliable way
             # in when "Hey Dose" isn't being detected.
+            # the guided self-test takes a turn through the SAME path
+            if getattr(self, "_st_want", False) and self.state == "idle":
+                self._drain(rec)
+                self._set_ui_state("listening")
+                text = self._listen_command(rec, timeout=12)
+                blocks = max(1, getattr(self, "_turn_blocks", 1))
+                self._st_result = {
+                    "heard": text or "",
+                    "vosk": getattr(self, "_raw_vosk", ""),
+                    "fast_text": getattr(self, "_raw_fast", ""),
+                    "slow_text": getattr(self, "_raw_slow", ""),
+                    "fast": getattr(self, "_t_fast", 0.0),
+                    "slow": getattr(self, "_t_slow", 0.0),
+                    "total": getattr(self, "_t_endpoint", 0.0)
+                    + getattr(self, "_t_fast", 0.0)
+                    + getattr(self, "_t_slow", 0.0),
+                    "secs": round(blocks * BLOCK_SIZE
+                                  / float(SAMPLE_RATE), 1),
+                    "peak": getattr(self, "_turn_peak", 0),
+                    "clip_pct": round(100.0
+                                      * getattr(self, "_turn_clip", 0)
+                                      / blocks),
+                    "snr": round(getattr(self, "_turn_snr", 0.0), 1),
+                }
+                self._set_ui_state("idle")
+                continue
+
             if self._ptt_requested and self.state == "idle":
                 self._ptt_requested = False
                 self._drain(rec)
@@ -4734,6 +4763,269 @@ class DoseVoice:
             "p50": tot[len(tot) // 2] if tot else 0,
             "worst": tot[-1] if tot else 0,
         }
+
+    # ── GUIDED SELF-TEST ─────────────────────────────────────────────
+    # A scripted run: the station asks for a phrase, listens, and
+    # records EXACTLY what happened — what each recogniser heard, what
+    # the language layer made of it, how long every stage took, and
+    # what the microphone was getting while you said it. At the end it
+    # scores itself and says which part is at fault.
+    #
+    # The phrases are chosen to separate the failure modes: a bare
+    # command, a medication name, a navigation request, a
+    # conversational reply, and a safety phrase that must never be
+    # mishandled.
+    SELF_TEST = (
+        ("what time is it", "time", "a plain command"),
+        ("what do I take today", "remaining_today", "the daily schedule"),
+        ("how many pills do I have left", "count", "an inventory question"),
+        ("open storage", "nav:storage", "navigation"),
+        ("go to settings", "nav:settings", "navigation"),
+        ("did I take my medicine today", "taken_today", "a status question"),
+        ("what is next", "next_dose", "the next dose"),
+        ("how am I doing", "adherence", "adherence"),
+        ("yes", "small_talk", "a one-word reply"),
+        ("thank you", "thanks", "conversational"),
+    )
+
+    def _st_capture(self):
+        """Wait for the capture loop to hand back ONE turn.
+
+        The self-test deliberately goes through the real listening
+        path — same microphone, same gate, same endpointer, same
+        recognisers. A test that used a private shortcut would prove
+        nothing about the thing people actually talk to."""
+        self._st_result = None
+        self._st_want = True
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if self._st_result is not None:
+                got = self._st_result
+                self._st_result = None
+                self._st_want = False
+                return got
+            if not self._st or self._st.get("phase") != "run":
+                break
+            time.sleep(0.05)
+        self._st_want = False
+        return {}
+
+    def selftest_state(self):
+        st = getattr(self, "_st", None)
+        if not st:
+            return {"phase": "idle", "index": 0,
+                    "total": len(self.SELF_TEST), "results": []}
+        return st
+
+    def start_selftest(self):
+        self._st = {"phase": "run", "index": 0,
+                    "total": len(self.SELF_TEST), "results": [],
+                    "started": time.time()}
+        threading.Thread(target=self._run_selftest, daemon=True,
+                         name="selftest").start()
+        return True
+
+    def cancel_selftest(self):
+        st = getattr(self, "_st", None)
+        if st:
+            st["phase"] = "cancelled"
+        self._st = None
+
+    def _run_selftest(self):
+        """Drive the whole script on a worker. Uses the real capture
+        path — there is no point testing anything else."""
+        st = self._st
+        try:
+            self._st_request = True     # ask the capture loop for turns
+            for i, (phrase, want, why) in enumerate(self.SELF_TEST):
+                if not self._st or self._st.get("phase") != "run":
+                    return
+                st["index"] = i
+                st["prompt"] = phrase
+                st["why"] = why
+                self._speak("Please say: %s" % phrase)
+                got = self._st_capture()
+                st["results"].append(self._score_selftest(
+                    phrase, want, why, got))
+            st["phase"] = "done"
+            st["finished"] = time.time()
+        except Exception as e:
+            st["phase"] = "failed"
+            st["error"] = str(e)[:120]
+        finally:
+            self._st_request = False
+
+    def _score_selftest(self, phrase, want, why, got):
+        """One line of the report: did it hear it, and did it act?"""
+        heard = (got or {}).get("heard", "")
+        rec = {
+            "asked": phrase, "why": why, "want": want,
+            "heard": heard,
+            "vosk": (got or {}).get("vosk", ""),
+            "fast": (got or {}).get("fast_text", ""),
+            "slow": (got or {}).get("slow_text", ""),
+            "secs": (got or {}).get("secs", 0),
+            "peak": (got or {}).get("peak", 0),
+            "clip_pct": (got or {}).get("clip_pct", 0),
+            "snr": (got or {}).get("snr", 0),
+            "t_fast": (got or {}).get("fast", 0),
+            "t_slow": (got or {}).get("slow", 0),
+            "t_total": (got or {}).get("total", 0),
+        }
+        if not heard:
+            rec.update(intent="-", ok=False, words=0,
+                       fault="HEARD NOTHING")
+            return rec
+        try:
+            intent = _nlu_mod.parse(heard, self._med_names()).name \
+                if _nlu_mod else "?"
+        except Exception:
+            intent = "?"
+        # what the station would actually DO with it
+        acted = "?"
+        try:
+            norm = " " + re.sub(r"[^a-z0-9' ]", " ",
+                                heard.lower()).strip() + " "
+            hit = self._match_builtin(re.sub(r"\s+", " ", norm))
+            if hit and hit[0]:
+                acted = hit[0]
+            elif self._match_small_talk(heard):
+                acted = "small_talk"
+            elif intent != "unknown":
+                acted = intent
+        except Exception:
+            pass
+        rec["intent"] = acted
+        # word-level accuracy of the transcript against what was asked
+        a = set(phrase.lower().split())
+        b = set(heard.lower().split())
+        rec["words"] = round(100.0 * len(a & b) / max(1, len(a)))
+        rec["ok"] = (acted == want) or (
+            want == "small_talk" and acted in ("small_talk", "thanks"))
+        if rec["ok"] and rec["words"] < 60:
+            # It got there anyway — the phonetic matcher recovered a
+            # bad transcript. Worth knowing: the ACTION was right but
+            # the recogniser was not.
+            rec["fault"] = "recovered from a mishear"
+        elif rec["ok"]:
+            rec["fault"] = ""
+        elif rec["words"] < 60:
+            rec["fault"] = "MISHEARD"
+        else:
+            rec["fault"] = "heard it, did not act"
+        return rec
+
+    def selftest_report(self):
+        """Score, verdict, and what to fix — as text."""
+        st = getattr(self, "_st", None) or {}
+        rows = st.get("results", [])
+        if not rows:
+            return "No self-test has been run."
+        n = len(rows)
+        good = sum(1 for r in rows if r.get("ok"))
+        misheard = sum(1 for r in rows if r.get("fault") == "MISHEARD")
+        recovered = sum(1 for r in rows
+                        if r.get("fault") == "recovered from a mishear")
+        silent = sum(1 for r in rows
+                     if r.get("fault") == "HEARD NOTHING")
+        inact = sum(1 for r in rows
+                    if r.get("fault") == "heard it, did not act")
+        words = [r.get("words", 0) for r in rows if r.get("heard")]
+        wacc = round(sum(words) / max(1, len(words)))
+        times = sorted(r.get("t_total", 0) for r in rows)
+        p50 = times[len(times) // 2] if times else 0
+        worst = times[-1] if times else 0
+        clip = max([r.get("clip_pct", 0) for r in rows] or [0])
+        snr = min([r.get("snr", 0) for r in rows if r.get("heard")]
+                  or [0])
+
+        out = ["## SELF-TEST RESULT",
+               "  score            %d/%d  (%d%%)" % (good, n,
+                                                     100 * good // n),
+               "  word accuracy    %d%%" % wacc,
+               "  typical turn     %.2f s" % p50,
+               "  worst turn       %.2f s" % worst,
+               "  heard nothing    %d" % silent,
+               "  misheard         %d" % misheard,
+               "  heard, no action %d" % inact,
+               "  recovered        %d  (acted right despite a bad "
+               "transcript)" % recovered,
+               "  worst clipping   %d%%" % clip,
+               "  worst SNR        %.1f" % snr,
+               ""]
+
+        # ── the verdict: WHICH PART is at fault ──
+        out.append("## WHAT TO FIX")
+        if silent > n // 3:
+            out.append("  AUDIO PATH. It heard nothing on %d of %d. The "
+                       "microphone is not reaching the recogniser — "
+                       "check the device in Settings > Audio, and run "
+                       "TUNE ROOM." % (silent, n))
+        elif clip > 5:
+            out.append("  INPUT TOO HOT. %d%% of blocks clipped. The "
+                       "capture level is overdriven; a clipped "
+                       "waveform carries less than a quiet one."
+                       % clip)
+        elif snr and snr < 4:
+            out.append("  ROOM TOO NOISY. Best signal-to-noise was "
+                       "%.1f. Speech has to stand clear of the room; "
+                       "this is a microphone-placement problem, not a "
+                       "software one." % snr)
+        elif misheard > inact and misheard:
+            out.append("  RECOGNITION. %d of %d were misheard (word "
+                       "accuracy %d%%). The audio is fine and the "
+                       "rules are fine; the model is the limit."
+                       % (misheard, n, wacc))
+        elif inact:
+            out.append("  VOCABULARY. %d were heard correctly and still "
+                       "not acted on — the words reached the station "
+                       "and it did not know what they meant. That is "
+                       "fixable in the rules." % inact)
+        elif worst > 2.0:
+            out.append("  SPEED. Everything was understood, but the "
+                       "worst turn took %.1f s." % worst)
+        else:
+            out.append("  Nothing. %d/%d, typical turn %.2f s."
+                       % (good, n, p50))
+
+        h = pi_health()
+        out.append("")
+        out.append("## HARDWARE DURING THE TEST")
+        out.append("  load %.2f on %d cores · %d MHz (%s) · %.1f C%s%s"
+                   % (h["load"], h["cores"], h["mhz"],
+                      h["governor"] or "?", h["temp_c"],
+                      " · THROTTLING" if h["throttled"] else "",
+                      " · UNDER-VOLTAGE" if h["under_voltage"] else ""))
+        out.append("  speech threads %d continuous / %d burst"
+                   % (INFER_THREADS, STT_THREADS))
+        out.append("  fast model %s · backup %s"
+                   % ((self._ms_arch_used or "?").split("_")[0].lower(),
+                      self._whisper_size or "?"))
+
+        out.append("")
+        out.append("## EVERY PHRASE")
+        for r in rows:
+            out.append("  [%s] asked : %r  (%s)"
+                       % ("OK " if r.get("ok") else "BAD",
+                          r.get("asked"), r.get("why")))
+            out.append("       heard : %r  (%d%% of the words)"
+                       % (r.get("heard"), r.get("words", 0)))
+            if r.get("vosk") or r.get("fast") or r.get("slow"):
+                out.append("       live=%r fast=%r slow=%r"
+                           % (r.get("vosk"), r.get("fast"),
+                              r.get("slow")))
+            out.append("       action: %s (wanted %s)%s"
+                       % (r.get("intent"), r.get("want"),
+                          "  <-- " + r["fault"] if r.get("fault")
+                          else ""))
+            out.append("       audio : %.1fs peak %s clip %s%% snr %s"
+                       % (r.get("secs", 0) or 0, r.get("peak"),
+                          r.get("clip_pct"), r.get("snr")))
+            out.append("       timing: fast %.2fs slow %.2fs total %.2fs"
+                       % (r.get("t_fast", 0), r.get("t_slow", 0),
+                          r.get("t_total", 0)))
+            out.append("")
+        return "\n".join(out)
 
     def turn_report(self):
         """What the last turn actually cost, stage by stage.

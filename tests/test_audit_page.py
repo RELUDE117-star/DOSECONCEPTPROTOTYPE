@@ -473,6 +473,87 @@ alltext3 = " ".join(
 ok("not understood" in alltext3,
    "and the page shows the miss count at a glance")
 
+print("== 7b. THE FULL AUDIT TEST ==")
+# A scripted run through the REAL listening path, scored, with a
+# verdict naming which part is at fault. This is the thing that turns
+# "it sucks" into a repairable statement.
+import dose_voice as _dvs                                    # noqa: E402
+st = object.__new__(_dvs.DoseVoice)
+st._med_names = lambda: ["Sertraline"]
+st._flow = None
+st._ms_arch_used = "BASE_STREAMING"
+st._whisper_size = "base.en"
+
+ok(len(_dvs.DoseVoice.SELF_TEST) >= 8,
+   "it asks for %d phrases" % len(_dvs.DoseVoice.SELF_TEST))
+kinds = {w for _p, w, _y in _dvs.DoseVoice.SELF_TEST}
+for want in ("time", "nav:storage", "count", "small_talk"):
+    ok(want in kinds, "covering %s" % want)
+
+def score(asked, want, heard, **kw):
+    g = {"heard": heard, "fast": 0.3, "total": 1.0, "snr": 10,
+         "clip_pct": 0, "secs": 1.2, "peak": 9000}
+    g.update(kw)
+    return st._score_selftest(asked, want, "why", g)
+
+r = score("what time is it", "time", "what time is it")
+ok(r["ok"] and r["words"] == 100, "a clean turn scores 100%")
+r = score("open storage", "nav:storage", "opun storidge")
+ok(r["ok"], "a misheard phrase that still ACTED right counts as ok")
+ok("recovered" in r["fault"],
+   "and is flagged as recovered, so a weak recogniser is still "
+   "visible: %r" % r["fault"])
+r = score("how am i doing", "adherence", "", clip_pct=40, secs=8)
+ok(not r["ok"] and r["fault"] == "HEARD NOTHING",
+   "silence is reported as heard nothing")
+r = score("what is next", "next_dose", "what is text")
+ok(not r["ok"] and "did not act" in r["fault"],
+   "heard-but-wrong-action is distinguished from misheard: %r"
+   % r["fault"])
+r = score("what do i take today", "remaining_today", "zzz qqq")
+ok(r["fault"] == "MISHEARD", "and a real mishear is called that")
+
+# the verdict must name the DOMINANT fault
+st._st = {"results": [score("a", "time", "", clip_pct=40)
+                      for _ in range(6)]}
+ok("AUDIO PATH" in st.selftest_report(),
+   "mostly silence -> blames the audio path")
+st._st = {"results": [score("what time is it", "time",
+                            "what time is it", clip_pct=30)
+                      for _ in range(6)]}
+ok("TOO HOT" in st.selftest_report(),
+   "heavy clipping -> blames the input level")
+st._st = {"results": [score("what is next", "next_dose", "what is text")
+                      for _ in range(6)]}
+rep = st.selftest_report()
+ok("VOCABULARY" in rep or "RECOGNITION" in rep,
+   "heard-but-not-acted -> blames the rules or the model")
+st._st = {"results": [score("what time is it", "time",
+                            "what time is it") for _ in range(6)]}
+ok("Nothing." in st.selftest_report(),
+   "and when it all works it says so")
+
+rep = st.selftest_report()
+for want in ("SELF-TEST RESULT", "WHAT TO FIX",
+             "HARDWARE DURING THE TEST", "EVERY PHRASE",
+             "word accuracy", "speech threads", "fast model"):
+    ok(want in rep, "the report includes %s" % want)
+
+VSD = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
+run = VSD.split("def _st_capture")[1].split("\n    def ")[0]
+ok("_listen_command" not in run and "_st_want" in run,
+   "the test asks the REAL capture loop for a turn rather than "
+   "using a private shortcut")
+loop = VSD.split("_st_want", 1)[1]
+ok("_listen_command(rec" in loop,
+   "and that loop uses the same listener as a real conversation")
+
+APPS = open(os.path.join(ROOT, "dose_app.py"), errors="ignore").read()
+ok("Run Full Audit Test" in APPS, "it has a row in Settings")
+ok("_settings_scroll" in APPS,
+   "and Settings scrolls, so rows past the fifth actually exist")
+ok("_post_selftest" in APPS, "the result can be sent to GitHub")
+
 print("== 8. the turn report is real, not decorative ==")
 import dose_voice as dv                                    # noqa: E402
 VSRC = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
