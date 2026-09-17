@@ -2731,6 +2731,10 @@ class DoseVoice:
             "Suicide and Crisis Lifeline, any time, to talk with "
             "someone right now. If you are in danger, please call 9 1 1.",
             "Nothing further is scheduled today, Ryan. Rest easy.",
+            "Okay, Ryan.", "Understood.", "Got it.", "Right you are.",
+            "Okay.", "No problem, Ryan.", "Hello, Ryan.",
+            "Hi Ryan — what do you need?", "Morning, Ryan.",
+            "Goodbye, Ryan.", "No need to apologise, Ryan.", "Go on.",
             "Instruction unclear. Standing by.",
             "Home screen, Ryan.",
             "Opening storage.",
@@ -4976,6 +4980,64 @@ class DoseVoice:
                         target, "Done."), False
         return "Instruction unclear. Standing by.", False
 
+    # ── SMALL TALK ───────────────────────────────────────────────────
+    # Bare acknowledgements, matched WHOLE.
+    #
+    # The conversation stays open for several seconds after every
+    # answer, so people fill that space the way they do with a person:
+    # "yeah", "ok", "sure", "got it", "no", "bye". Sixteen of twenty
+    # such words were coming back as "instruction unclear" and being
+    # counted as failures — which is most of the "1 of 8 understood"
+    # the device reported. They are not failures. They are someone
+    # being polite to a machine that had nothing to say back.
+    SMALL_TALK = {
+        "affirm": ("yeah", "yea", "yep", "yup", "yes", "ok", "okay",
+                   "okey", "alright", "all right", "sure", "got it",
+                   "understood", "gotcha", "cool", "nice", "great",
+                   "good", "perfect", "fine", "right", "correct",
+                   "makes sense", "sounds good", "will do"),
+        "decline": ("no", "nope", "nah", "naw", "not now", "no thanks",
+                    "im good", "i'm good", "its fine", "it's fine"),
+        "greet": ("hi", "hey", "yo", "hiya", "howdy", "morning",
+                  "good morning", "afternoon", "good afternoon",
+                  "evening", "good evening"),
+        "farewell": ("bye", "goodbye", "good bye", "see you", "see ya",
+                     "later", "good night", "goodnight", "night"),
+        "sorry": ("sorry", "my bad", "oops", "whoops", "excuse me",
+                  "pardon me"),
+        "filler": ("um", "uh", "erm", "hmm", "hm", "er", "well",
+                   "so", "anyway"),
+    }
+
+    def _match_small_talk(self, t):
+        """Whole-phrase only — 'no thanks' ends a conversation, 'no I
+        meant the blue one' does not."""
+        phrase = " ".join((t or "").lower().replace("'", "").split())
+        if not phrase or len(phrase.split()) > 3:
+            return None
+        for kind, words in self.SMALL_TALK.items():
+            if phrase in {w.replace("'", "") for w in words}:
+                return kind
+        return None
+
+    def _small_talk_reply(self, kind):
+        import random as _r
+        if kind == "affirm":
+            return _r.choice(["Okay, Ryan.", "Understood.",
+                              "Got it.", "Right you are."]), True
+        if kind == "decline":
+            return _r.choice(["Okay.", "No problem, Ryan.",
+                              "Understood."]), True
+        if kind == "greet":
+            return _r.choice(["Hello, Ryan.", "Hi Ryan — what do you "
+                              "need?", "Morning, Ryan."]), True
+        if kind == "farewell":
+            return "Goodbye, Ryan.", False
+        if kind == "sorry":
+            return "No need to apologise, Ryan.", True
+        # filler — they are still thinking; say as little as possible
+        return "Go on.", True
+
     def _match_builtin(self, t):
         """Match functional intents only. Returns (intent_id, arg)."""
         def has(*phrases):
@@ -5544,6 +5606,18 @@ class DoseVoice:
             self._last_exchange = {"text": t, "intent": intent_id,
                                    "arg": arg}
             return self._dispatch(intent_id, arg)
+
+        # ── SMALL TALK, before giving up ────────────────────────────
+        # Checked here, after every real command has had its chance,
+        # so "no" inside a confirmation still means no and "yes" still
+        # confirms. Only a bare acknowledgement with nothing else in
+        # it reaches this point.
+        kind = self._match_small_talk(t)
+        if kind:
+            reply, keep = self._small_talk_reply(kind)
+            self._last_exchange = {"text": t, "intent": "small_talk",
+                                   "arg": kind}
+            return reply, keep
 
         # fallback — BT never pretends to understand
         self._last_exchange = {"text": t, "intent": "fallback",

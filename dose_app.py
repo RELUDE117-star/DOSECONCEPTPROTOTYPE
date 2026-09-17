@@ -5299,6 +5299,11 @@ class DoseApp:
                 pass
         except Exception:
             pass
+        # and is this device even running current code?
+        try:
+            self._audit_build_check()
+        except Exception:
+            pass
         # Don't record "audit" as the screen to go back to — opening it
         # twice would trap CLOSE on this page.
         if self.mode != "audit":
@@ -5317,10 +5322,53 @@ class DoseApp:
         self._draw_frame()
         self.root.after(1000, self._audit_tick)
 
+    def _audit_build_check(self):
+        """Is this device running what is on GitHub?
+
+        The whole loop was going round twice because the audit was
+        being read from a device that had never taken the update — the
+        numbers described code I had already fixed. This says so, on
+        the page, at the top."""
+        if getattr(self, "_build_check_running", False):
+            return
+        self._build_check_running = True
+
+        def work():
+            try:
+                data = self._fetch_repo_file("dose_app.py", timeout=15)
+                import hashlib
+                self._remote_build = hashlib.md5(data).hexdigest()[:7]
+            except Exception:
+                self._remote_build = None
+            finally:
+                self._build_check_running = False
+
+        threading.Thread(target=work, daemon=True,
+                         name="audit-build").start()
+
     def _audit_sections(self):
         """(heading, [(label, value, ok)]) for everything worth seeing."""
         v = self.voice
         out = []
+
+        # 0. IS THIS DEVICE UP TO DATE? Everything below describes the
+        #    code that is actually running, which is worthless if that
+        #    is not the code being fixed.
+        local = getattr(self, "_build_id", "?")
+        remote = getattr(self, "_remote_build", None)
+        if remote is None:
+            out.append(("VERSION", [("build", local, True),
+                                    ("github", "checking…", True)]))
+        elif remote == local:
+            out.append(("VERSION", [("build", local, True),
+                                    ("github", "up to date", True)]))
+        else:
+            out.append(("*** OUT OF DATE ***", [
+                ("this device", local, False),
+                ("github has", remote, False),
+                ("ACTION", "press UPDATE in Settings", False),
+                ("", "numbers below are from OLD code", False),
+            ]))
 
         # 1. the last turn, measured
         try:
@@ -5358,6 +5406,28 @@ class DoseApp:
         else:
             out.append(("LAST TURNS",
                         [("no turns logged yet", "say something", True)]))
+
+        # 1c. WHAT WAS ACTUALLY SAID. Counts tell me how often it is
+        #     failing; only the words tell me why. "1 of 8 understood"
+        #     could be a microphone problem, a recogniser problem or a
+        #     vocabulary problem, and these three lines separate them
+        #     in a photograph.
+        try:
+            recent = (v.turn_log(4) if v else [])[-4:]
+        except Exception:
+            recent = []
+        if recent:
+            rows = []
+            for r in reversed(recent):
+                heard = (r.get("heard") or "").strip()
+                if not heard:
+                    rows.append(("(heard nothing)",
+                                 "%ss" % r.get("secs", "?"), False))
+                    continue
+                rows.append(('"%s"' % heard[:22],
+                             r.get("intent", "?")[:12],
+                             bool(r.get("understood"))))
+            out.append(("WHAT YOU SAID (newest first)", rows))
 
         # 2. what the microphone is getting
         mic = []

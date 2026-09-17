@@ -621,6 +621,48 @@ ok(mb.index('"medical_question", "crisis", "emergency", "unwell"')
    "turn — guessing is fine when the worst case is the wrong screen, "
    "and not fine here")
 
+print("== 18. it answers small talk instead of failing ==")
+# From the device: "1 of 8 understood". The conversation stays open
+# for several seconds after every answer, so people fill that space
+# the way they do with a person — and sixteen of twenty such words
+# were coming back as "instruction unclear" and counted as failures.
+# They are not failures.
+BAD = ("unclear", "did not copy", "didn't catch", "insufficient")
+SMALL = ["yeah", "yes", "ok", "okay", "thanks", "thank you", "hello",
+         "hi", "no", "nope", "cool", "alright", "got it", "sure",
+         "nice", "good", "bye", "never mind", "sorry", "um"]
+for phrase in SMALL:
+    _v._flow = None
+    reply, _ = says(phrase)
+    ok(not any(b in reply.lower() for b in BAD),
+       "%-12r -> %s" % (phrase, reply[:34]))
+
+# "bye" ends the conversation; "yeah" keeps it open
+_v._flow = None
+_, keep = _v.respond("bye")
+ok(keep is False, "saying goodbye ends the conversation")
+_v._flow = None
+_, keep = _v.respond("yeah")
+ok(keep is True, "an acknowledgement keeps it open")
+
+# WHOLE phrases only — small talk must never swallow a real sentence
+for phrase in ("no i meant the blue one",
+               "yes i took my sertraline this morning",
+               "ok what do i take today",
+               "good how many pills do i have left"):
+    ok(_v._match_small_talk(phrase) is None,
+       "%-38r is NOT small talk" % phrase)
+
+# and it must not outrank a confirmation inside a flow
+VS3 = open(os.path.join(ROOT, "dose_voice.py"), errors="ignore").read()
+resp = VS3.split("def respond")[1]
+ok(resp.index("_match_small_talk")
+   > resp.index("self._dispatch(intent_id, arg)"),
+   "small talk is checked AFTER every real command has had its "
+   "chance, so 'no' in a confirmation still means no")
+ok("_match_small_talk" in VS3 and "SMALL_TALK" in VS3,
+   "matched from a fixed vocabulary, not guessed")
+
 print()
 print("accuracy suite: %d passed, %d failed" % (PASSED, FAILED))
 if FAILED:
