@@ -8198,12 +8198,25 @@ class DoseVoice:
         # respawn instead of the application. If anything about it does
         # not work, we are straight back to the in-process path below,
         # which is what this station does today.
+        # TIMED, ONE LEVEL DOWN. render_to_cache said the whole cost is
+        # in here (its cache lookup and write are microseconds), and
+        # this method does three separable things: try an out-of-process
+        # worker, resolve the voice, and synthesize. Five explanations
+        # for this number have now been wrong, so it gets measured
+        # rather than reasoned about.
+        _s0 = time.time()
+        _p = {}
         try:
             if self._synth_via_worker(text, wav):
+                _p["worker"] = round(time.time() - _s0, 3)
+                _p["by"] = "worker"
+                if _recording():
+                    self._t_synth = _p
                 return
         except Exception as e:
             self._note_tts("worker path raised, using in-process: %r"
                            % (e,))
+        _p["worker"] = round(time.time() - _s0, 3)
         # THE PARENT'S MODEL IS LOADED HERE AND NOWHERE ELSE.
         #
         # Every caller used to do `voice = self._load_piper()` and hand
@@ -8223,15 +8236,23 @@ class DoseVoice:
         # So the voice is resolved lazily, at the one point it is
         # actually needed: after the worker has declined. A station
         # whose worker is healthy never builds this session at all.
+        _l0 = time.time()
         if voice is None:
             voice = self._load_piper()
+        _p["load"] = round(time.time() - _l0, 3)
         # Newer piper-tts: SynthesisConfig(length_scale, noise_scale,...)
+        _y0 = time.time()
         try:
             from piper import SynthesisConfig
             cfg = SynthesisConfig(length_scale=1.0,    # natural, quick
                                   noise_scale=0.62,     # smooth, warm
                                   noise_w_scale=0.75)
             voice.synthesize_wav(text, wav, syn_config=cfg)
+            _p["synth"] = round(time.time() - _y0, 3)
+            _p["chars"] = len(text or "")
+            _p["by"] = "in-process"
+            if _recording():
+                self._t_synth = _p
             return
         except Exception:
             pass
@@ -8440,7 +8461,8 @@ class DoseVoice:
             parts["cache"] = time.time() - t0
             if os.path.exists(path):
                 parts["hit"] = 1
-                self._t_tts = parts
+                if _recording():
+                    self._t_tts = parts
                 return path
             parts["hit"] = 0
             t1 = time.time()
@@ -8452,12 +8474,22 @@ class DoseVoice:
             os.replace(tmp, path)
             parts["write"] = time.time() - t2
             parts["total"] = time.time() - t0
-            self._t_tts = parts
+            # THE BACKGROUND RENDER OVERWRITES THIS TOO.
+            #
+            # One turn reported speak=0.67 next to synth=3.02, which
+            # cannot both describe the same render. render_to_cache is
+            # called once on the critical path and again, on a worker
+            # thread, for every later chunk — and the worker wrote its
+            # own numbers over the first chunk's. Exactly the bug
+            # _last_engine had, in the diagnostic added to chase it.
+            if _recording():
+                self._t_tts = parts
             return path
         except Exception as e:
             parts["failed"] = str(e)[:60]
             parts["total"] = time.time() - t0
-            self._t_tts = parts
+            if _recording():
+                self._t_tts = parts
             return None
 
     @staticmethod
@@ -8608,6 +8640,14 @@ class DoseVoice:
             done = [threading.Event() for _ in chunks]
 
             def render_rest():
+                # NOT THE PASS THE TURN REPORTS. render_to_cache records
+                # its own timings, and this thread calls it once per
+                # remaining chunk — so without this the worker's numbers
+                # land on the first chunk's row. One turn reported
+                # speak=0.67 beside synth=3.02, which cannot both
+                # describe the same render. Same shape as _last_engine:
+                # two threads, one attribute, last writer wins.
+                _TL.speculative = True
                 try:
                     os.nice(5)      # never at the camera's expense
                 except Exception:
@@ -9278,6 +9318,9 @@ class DoseVoice:
                 # that existed to read it. The paragraph above is about
                 # exactly this and I read it while writing the bug.
                 "tts": getattr(self, "_t_tts", None),
+                # One level down again: the worker attempt, resolving
+                # the voice, and the synthesis itself, separately.
+                "synth": getattr(self, "_t_synth", None),
                 "stt_note": getattr(self, "_stt_note", ""),
                 "spec_hit": getattr(self, "_spec_hits", 0),
                 "spec_miss": getattr(self, "_spec_misses", 0),
