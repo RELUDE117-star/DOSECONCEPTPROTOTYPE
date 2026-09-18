@@ -538,6 +538,18 @@ CAPTURE_OPEN_BUDGET = float(      # the entire route walk in open_capture
 # never RMS - in the same recordings, RMS was 0 for BOTH.
 ROUTE_LIVE_PEAK = int(os.environ.get("DOSE_ROUTE_LIVE_PEAK", "3"))
 
+# How often the stereo downmix re-decides which channel carries the
+# microphone. Once a second is far more often than a soldered capsule
+# changes sides, and doing it every block cost three quarters of the
+# reader thread's budget — see the downmix in the capture reader.
+CHANNEL_RECHECK = int(os.environ.get("DOSE_CHANNEL_RECHECK", "47"))
+
+# How much audio ALSA holds for us before it gives up, in microseconds.
+# The default is about half a second, and a decode on this board takes
+# four — so half a second of a busy machine costs the microphone. See
+# the arecord command in open_arecord for the measurement.
+CAPTURE_BUFFER_US = int(os.environ.get("DOSE_CAPTURE_BUFFER_US", "5000000"))
+
 # How long a card's mixer state is trusted before it is forced again.
 #
 # Unmuting a capture card is a fixed-up-front operation: it spawns one
@@ -5777,17 +5789,49 @@ class DoseVoice:
                             # running maxima decay slowly so the choice
                             # is made once from accumulated evidence
                             # rather than re-litigated every 21 ms.
+                            # ONE PASS PER BLOCK, NOT FOUR.
+                            #
+                            # This split every block into two channels
+                            # and measured both, every time: four walks
+                            # over the samples on the one thread that
+                            # must drain arecord's pipe on schedule. The
+                            # device showed what that costs —
+                            #
+                            #     blocks/sec: 13.0   (nominal 46.9)
+                            #     overrun!!! (at least 4201.874 ms long)
+                            #
+                            # and arecord exits on an overrun, so the
+                            # microphone was being destroyed about thirty
+                            # times a minute. A controlled test settles
+                            # the mechanism: the same command piped into
+                            # a prompt reader survives, and piped into a
+                            # deliberately slow one overruns.
+                            #
+                            # The choice of channel does not change from
+                            # one 21 ms block to the next. It is made
+                            # once every CHANNEL_RECHECK blocks, and in
+                            # between there is a single tomono with the
+                            # winning weights — one pass, the same
+                            # answer.
                             try:
-                                left = audioop.tomono(data, 2, 1, 0)
-                                right = audioop.tomono(data, 2, 0, 1)
-                                lp, _lr = _peak_rms(left)
-                                rp, _rr = _peak_rms(right)
-                                self._ch_l = max(
-                                    lp, getattr(self, "_ch_l", 0) * 0.999)
-                                self._ch_r = max(
-                                    rp, getattr(self, "_ch_r", 0) * 0.999)
-                                data = (left if self._ch_l >= self._ch_r
-                                        else right)
+                                n_seen = getattr(self, "_ch_n", 0) + 1
+                                self._ch_n = n_seen
+                                if (n_seen % CHANNEL_RECHECK) == 1:
+                                    left = audioop.tomono(data, 2, 1, 0)
+                                    right = audioop.tomono(data, 2, 0, 1)
+                                    lp, _lr = _peak_rms(left)
+                                    rp, _rr = _peak_rms(right)
+                                    self._ch_l = max(
+                                        lp, getattr(self, "_ch_l", 0) * 0.9)
+                                    self._ch_r = max(
+                                        rp, getattr(self, "_ch_r", 0) * 0.9)
+                                    data = (left if self._ch_l >= self._ch_r
+                                            else right)
+                                elif getattr(self, "_ch_l", 0) >= getattr(
+                                        self, "_ch_r", 0):
+                                    data = audioop.tomono(data, 2, 1, 0)
+                                else:
+                                    data = audioop.tomono(data, 2, 0, 1)
                             except Exception:
                                 pass
                         ingest(data)
@@ -5890,9 +5934,36 @@ class DoseVoice:
                 # fine and the answer is in the text we were throwing
                 # away. The stderr drain already keeps the last forty
                 # lines and cannot fill a pipe.
+                # A BUFFER BIG ENOUGH TO SURVIVE A TRANSCRIPTION.
+                #
+                # The recorder's own words, from the device:
+                #
+                #     overrun!!! (at least 4201.874 ms long)
+                #
+                # and arecord exits on an overrun, so the microphone was
+                # being destroyed about thirty times a minute. A
+                # controlled test settles the mechanism exactly: the
+                # same command piped into a prompt reader survives 25
+                # seconds; piped into a deliberately slow one it
+                # overruns in under one.
+                #
+                # It is not the downmix — measured in the app's own
+                # interpreter, with the real C audioop, four passes over
+                # a block cost 0.023 ms against a 21.3 ms budget. The
+                # reader stalls because the whole machine is busy: a
+                # decode takes about four seconds and this is a Pi.
+                #
+                # ALSA's default capture buffer here is about half a
+                # second, so half a second of inattention loses the
+                # microphone. Five seconds of buffer absorbs a decode
+                # whole. It costs 960 KB of kernel memory and adds no
+                # latency while anything is draining it — a buffer only
+                # delays you if you stop reading, which is exactly the
+                # case it exists to survive.
                 cap = open_pipe_cmd(
                     ["arecord", "-D", dev, "-f", "S16_LE",
                      "-r", str(rate), "-c", str(ch),
+                     "--buffer-time", str(CAPTURE_BUFFER_US),
                      "-t", "raw", "-"],
                     "mic arecord %s @%d %dch" % (dev, rate, ch),
                     native_rate=rate, channels=ch)

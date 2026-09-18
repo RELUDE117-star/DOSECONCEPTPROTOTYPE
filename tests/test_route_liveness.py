@@ -510,6 +510,31 @@ _combos = 2 * 3 * 2          # bases x rates x channels
 check("one real subdevice means %d attempts, not %d"
       % (_combos, _combos * 4), _combos * 1 == 12)
 
+print("\nThe capture buffer survives a decode")
+# The recorder said it: "overrun!!! (at least 4201.874 ms long)", and
+# arecord exits on an overrun — the microphone was being destroyed
+# about thirty times a minute. A controlled test on the device settles
+# the mechanism: the same command piped into a prompt reader survives
+# 25 s; piped into a deliberately slow one it overruns in under one.
+#
+# It is not the downmix. Measured in the app's own interpreter with the
+# real C audioop, four passes over a block cost 0.023 ms against a
+# 21.3 ms budget. The reader stalls because a decode takes four seconds
+# on a Pi and the whole machine is busy.
+check("arecord is given an explicit buffer",
+      "--buffer-time" in _code)
+check("it is a named constant, not a number in a list",
+      "str(CAPTURE_BUFFER_US)" in _code)
+check("it is an environment override",
+      "DOSE_CAPTURE_BUFFER_US" in _src)
+check("it is longer than a decode on this board (>= 4s)",
+      dose_voice.CAPTURE_BUFFER_US >= 4_000_000,
+      dose_voice.CAPTURE_BUFFER_US)
+check("...and not absurd (<= 20s)",
+      dose_voice.CAPTURE_BUFFER_US <= 20_000_000)
+check("-q is gone, so the recorder can still say why it stopped",
+      '"-q"' not in _code.split("def open_arecord")[1][:1500])
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:
