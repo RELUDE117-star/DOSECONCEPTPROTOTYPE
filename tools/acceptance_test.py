@@ -45,6 +45,7 @@ It needs the capture device to itself, so stop the app first.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -196,7 +197,84 @@ def synth(text, path, voice_obj):
     return time.time() - t0
 
 
-def play_and_record(wav_in, wav_out, card, channels, pad=0.7):
+def playback_card():
+    """The card that is actually wired to a SPEAKER.
+
+    This harness played through `pw-play`, `paplay`, `aplay` in that
+    order, with no device argument — so every one of them went to
+    whatever PipeWire calls the default sink. On this board that is not
+    the speaker, and `aplay` with no -D fails outright:
+
+        aplay: main:850: audio open error: Host is down
+
+    A route that returns rc=0 into an HDMI port with nothing plugged
+    into it looks exactly like success. Three runs today concluded the
+    recogniser was broken, on evidence that was four seconds of an
+    empty room each time:
+
+        'what time is it'             -> "Please don't like me."
+        'did i take my aspirin today' -> 'No, no, no, no, no, no.'
+
+    Measured on the device, same tone, same microphone:
+
+        baseline, nothing playing     rms    400
+        tone through plughw:3,0       rms 10,654
+
+    The speaker works. It just was not being asked. So: find a USB
+    playback card and address it directly, preferring it over anything
+    that routes through a sound server.
+    """
+    try:
+        out = subprocess.run(["aplay", "-l"], capture_output=True,
+                             text=True, timeout=6).stdout or ""
+    except Exception:
+        return None
+    best = None
+    for line in out.splitlines():
+        m = re.match(r"card (\d+): (\S+)", line)
+        if not m:
+            continue
+        num, name = int(m.group(1)), m.group(2).lower()
+        low = line.lower()
+        if "hdmi" in low or "vc4" in low:
+            continue          # a port with nothing plugged into it
+        if "usb" in low:
+            return num        # the USB speaker: what this cabinet has
+        if best is None and "headphone" in low:
+            best = num
+    return best
+
+
+def heard_anything(path, baseline_rms, margin=3.0):
+    """Did the room actually receive the phrase?
+
+    An instrument that cannot tell 'the microphone did not hear it'
+    from 'nothing was ever played' will blame the microphone, and did.
+    """
+    m = peak_rms(path)
+    if "error" in m:
+        return False, m
+    if baseline_rms is None:
+        return True, m
+    return (m["rms"] >= max(30, baseline_rms * margin)), m
+
+
+def room_baseline(card, channels, seconds=3):
+    """Record the room with nothing playing, once, at the start."""
+    out = "/tmp/dose_acc/baseline.wav"
+    try:
+        subprocess.run(
+            ["arecord", "-D", "plughw:%s" % card, "-f", "S16_LE",
+             "-r", "48000", "-c", str(channels), "-d", str(seconds),
+             out], capture_output=True, timeout=seconds + 8)
+    except Exception:
+        return None
+    m = peak_rms(out)
+    return None if "error" in m else m
+
+
+def play_and_record(wav_in, wav_out, card, channels, pad=0.7,
+                    play_dev=None):
     """Start the recorder, play the phrase, stop the recorder.
 
     The recorder starts FIRST and stops LAST, so nothing is clipped by
@@ -221,7 +299,16 @@ def play_and_record(wav_in, wav_out, card, channels, pad=0.7):
     time.sleep(pad)
     t0 = time.time()
     played = False
-    for cmd in (["pw-play", wav_in], ["paplay", wav_in], ["aplay", "-q", wav_in]):
+    routes = []
+    if play_dev is not None:
+        # The speaker, addressed directly, FIRST. Everything below it
+        # goes through a sound server whose default sink is not this
+        # cabinet's speaker.
+        routes.append(["aplay", "-q", "-D", "plughw:%d,0" % play_dev,
+                       wav_in])
+    routes += [["pw-play", wav_in], ["paplay", wav_in],
+               ["aplay", "-q", wav_in]]
+    for cmd in routes:
         try:
             p = subprocess.run(cmd, capture_output=True,
                                timeout=dur + 12)
@@ -374,6 +461,14 @@ def main():
     ap.add_argument("--card", default=os.environ.get("DOSE_MIC_CARD", "5,0"))
     ap.add_argument("--channels", type=int, default=0,
                     help="0 = ask the card (the right answer)")
+    ap.add_argument("--play-device", type=int, default=-1,
+                    help="ALSA playback CARD number for the speaker. "
+                         "-1 = find the USB one. Every route this "
+                         "harness used before went to the sound "
+                         "server's default sink, which on this board "
+                         "is not the speaker — and a route that "
+                         "returns success into an unplugged HDMI port "
+                         "looks exactly like a working one.")
     ap.add_argument("--phrases", type=int, default=len(PHRASES))
     ap.add_argument("--min-understood", type=float, default=100.0)
     ap.add_argument("--max-wer", type=float, default=15.0)
@@ -462,6 +557,27 @@ def main():
 
     tmp = "/tmp/dose_acc"
     os.makedirs(tmp, exist_ok=True)
+
+    # WHAT DOES THIS ROOM SOUND LIKE WITH NOTHING PLAYING?
+    # Every phrase below is judged against it, so "we recorded the room
+    # and the recogniser guessed" can never again be reported as a
+    # recognition failure. On the device this read rms 400 while a tone
+    # through the speaker read rms 10,654 — the two are not close, and
+    # telling them apart costs three seconds.
+    play_dev = args.play_device if args.play_device >= 0 \
+        else playback_card()
+    say("  playback device: %s"
+        % ("plughw:%d,0" % play_dev if play_dev is not None
+           else "none found — falling back to the sound server"))
+    base = None if args.live_only else room_baseline(card, ch)
+    base_rms = base.get("rms") if base else None
+    if base:
+        say("  room baseline:  peak %d  rms %d  (nothing playing)"
+            % (base["peak"], base["rms"]))
+        if base["rms"] > 300:
+            say("  NOTE: this room is loud. Speech has to clear it, and"
+                " a loopback through a speaker is the hardest case.")
+
     rows = []
     for i, (phrase, want_intent) in enumerate(PHRASES[:args.phrases]):
         if args.live_only:
@@ -476,7 +592,8 @@ def main():
         got = os.path.join(tmp, "heard_%d.wav" % i)
         tts = synth(phrase, src, voice)
         say("    tts render      %.2fs" % tts)
-        played, psecs = play_and_record(src, got, card, ch)
+        played, psecs = play_and_record(src, got, card, ch,
+                                        play_dev=play_dev)
         if not played:
             say("    PLAYBACK FAILED — no output route worked")
         m = peak_rms(got)
@@ -487,6 +604,23 @@ def main():
         say("    captured        peak %d  rms %d  non-zero %d/%d  %.1fs"
             % (m["peak"], m["rms"], m["nonzero"], m["samples"],
                m["seconds"]))
+        # DID THE PHRASE REACH THE ROOM AT ALL?
+        # Asked before the recogniser is, because the recogniser will
+        # answer either way and its answer is worthless if the only
+        # thing on the recording is the room. This is the check whose
+        # absence produced "Please don't like me." and a day of looking
+        # at the microphone.
+        reached, _m2 = heard_anything(got, base_rms)
+        if not reached:
+            say("    NOT HEARD       rms %d vs room baseline %s — the "
+                "phrase never reached the microphone."
+                % (m["rms"], base_rms))
+            say("                    Not a recognition failure. Check "
+                "the speaker and the playback route before reading "
+                "anything below.")
+            rows.append({"phrase": phrase, "tts": round(tts, 2),
+                         "capture": m, "not_heard": True})
+            continue
         # THE SAME SETTINGS THE APP USES, or this measures a
         # different program. The station biases Whisper with an
         # initial_prompt naming its own medications and commands, runs
