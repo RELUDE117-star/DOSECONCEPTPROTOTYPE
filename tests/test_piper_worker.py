@@ -518,6 +518,33 @@ check("the worker caps ONNX threads too (or it would starve the mic)",
       "intra_op_num_threads" in wsrc)
 check("the worker gets its own session, so a group signal cannot kill it",
       "start_new_session=True" in src)
+# THE INTERFACE BETWEEN PARENT AND CHILD, ASSERTED ON BOTH SIDES.
+#
+# The worker path was dead for its entire life because these two
+# disagreed about one argument, and each was then "fixed" to match the
+# wrong neighbour:
+#
+#   child:  passed a PATH to piper, which wants an open wave
+#           -> AttributeError: 'str' has no attribute 'setframerate'
+#   parent: passed an OPEN WAVE to the worker, which sends a filename
+#           -> TypeError: expected str... not Wave_write
+#
+# Both were caught by a broad `except` and turned into a silent
+# fall-back to in-process synthesis, so the station always sounded
+# right and the feature never ran once.
+check("the parent hands _synth a PATH, not an open wave",
+      "self._synth(None, to_speech(text), tmp)" in src
+      and "with wave.open(tmp, \"wb\") as w:\n                self._synth" not in src,
+      "the worker has to send a filename to another process")
+check("...and _synth opens the wave itself for the in-process branch",
+      '_w = wave.open(wav, "wb")' in src)
+check("the child opens the wave it was given the path to",
+      'with wave.open(wav, "wb") as w:' in wsrc)
+check("neither side passes the other's type",
+      "voice.synthesize_wav(text, wav" not in wsrc
+      and "voice.synthesize_wav(text, wav" not in src,
+      "a path to piper or a wave to the worker is the whole bug")
+
 check("the worker never touches the network",
       not any(k in wsrc for k in ("urllib", "requests", "socket",
                                   "http")))

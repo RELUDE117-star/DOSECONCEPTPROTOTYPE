@@ -3866,11 +3866,10 @@ class DoseVoice:
         try:
             fd, path = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
-            with wave.open(path, "wb") as w:
-                self._synth(
-                    None,
-                    "Speaker test. If you can hear me, Ryan, this "
-                    "speaker is working.", w)
+            self._synth(
+                None,
+                "Speaker test. If you can hear me, Ryan, this "
+                "speaker is working.", path)
             method = self._play_wav(path)
             os.unlink(path)
             return method
@@ -5208,8 +5207,7 @@ class DoseVoice:
                                           dir=TMP_AUDIO_DIR)
                 os.close(fd)
                 try:
-                    with wave.open(wp, "wb") as w:
-                        self._synth(None, "ready", w)
+                    self._synth(None, "ready", wp)
                 finally:
                     try:
                         os.unlink(wp)
@@ -8260,7 +8258,32 @@ class DoseVoice:
         return False
 
     def _synth(self, voice, text, wav):
-        """Synthesize with an EXTREMELY COMFORTING delivery — a soft
+        """Synthesize to a PATH. `wav` is a filename, not an open wave.
+
+        IT USED TO BE AN OPEN WAVE, AND THAT IS WHY THE WORKER WAS
+        NEVER USED ONCE IN ITS LIFE.
+
+        Every caller opened a wave.Wave_write and passed the object,
+        because the in-process branch below hands it straight to piper,
+        which wants exactly that. But the worker branch has to send a
+        FILENAME down a pipe to another process, so it called
+        os.path.abspath() on it and got:
+
+            TypeError('expected str, bytes or os.PathLike object,
+                       not Wave_write')
+
+        caught by the `except Exception` two lines later and turned
+        into a silent fall-back to in-process synthesis. Every reply,
+        for the life of the feature.
+
+        The two halves were each fixed to match the wrong neighbour:
+        the child was opening nothing and being handed a path; the
+        parent was opening a wave and handing the worker an object.
+        Now the path is the interface — the worker sends it on, and the
+        in-process branch opens it here, once, where the difference
+        belongs.
+
+        Synthesize with an EXTREMELY COMFORTING delivery — a soft
         female guardian: calm and unhurried, smooth and even, gentle
         and reassuring, with a little extra space between phrases so it
         feels soothing rather than rushed. This is an ORIGINAL voice
@@ -8337,12 +8360,14 @@ class DoseVoice:
         _p["load"] = round(time.time() - _l0, 3)
         # Newer piper-tts: SynthesisConfig(length_scale, noise_scale,...)
         _y0 = time.time()
+        _w = wave.open(wav, "wb")
         try:
             from piper import SynthesisConfig
             cfg = SynthesisConfig(length_scale=1.0,    # natural, quick
                                   noise_scale=0.62,     # smooth, warm
                                   noise_w_scale=0.75)
-            voice.synthesize_wav(text, wav, syn_config=cfg)
+            voice.synthesize_wav(text, _w, syn_config=cfg)
+            _w.close()
             _p["synth"] = round(time.time() - _y0, 3)
             _p["chars"] = len(text or "")
             _p["by"] = "in-process"
@@ -8351,14 +8376,22 @@ class DoseVoice:
             return
         except Exception:
             pass
-        # Older piper-tts: keyword args
+        # Older piper-tts: keyword args. Same open wave — reopening it
+        # here would truncate whatever the attempt above wrote.
         try:
-            voice.synthesize_wav(text, wav, length_scale=1.0,
+            voice.synthesize_wav(text, _w, length_scale=1.0,
                                  noise_scale=0.62, noise_w=0.75)
+            _w.close()
             return
         except Exception:
             pass
-        voice.synthesize_wav(text, wav)   # plain fallback
+        try:
+            voice.synthesize_wav(text, _w)   # plain fallback
+        finally:
+            try:
+                _w.close()
+            except Exception:
+                pass
 
     @staticmethod
     def _audio_env():
@@ -8562,8 +8595,7 @@ class DoseVoice:
             parts["hit"] = 0
             t1 = time.time()
             tmp = path + ".tmp"
-            with wave.open(tmp, "wb") as w:
-                self._synth(None, to_speech(text), w)
+            self._synth(None, to_speech(text), tmp)
             parts["synth"] = time.time() - t1
             t2 = time.time()
             os.replace(tmp, path)
@@ -8831,8 +8863,7 @@ class DoseVoice:
             fd, tmp = tempfile.mkstemp(suffix=".wav",
                                        dir=TMP_AUDIO_DIR)
             os.close(fd)
-            with wave.open(tmp, "wb") as w:
-                self._synth(None, to_speech(text), w)
+            self._synth(None, to_speech(text), tmp)
             self._play_wav(tmp)
         except Exception:
             pass
