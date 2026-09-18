@@ -355,9 +355,17 @@ def live_turns(items, app_dir, pad=0.6):
         # the rows were arriving late and being matched to the wrong
         # question. A reply takes as long as it takes, so ask the
         # heartbeat rather than sleeping a guessed two seconds.
-        if not wait_state(app_dir, "idle", 30.0):
-            say("        (engine still busy after 30s)")
-        time.sleep(1.5)
+        # The station must be FINISHED — not merely between two
+        # sentences — before the next phrase is played at it. Run 163
+        # hit "(engine still busy after 30s)" on every turn and then
+        # spoke anyway, so the station heard the next question over its
+        # own reply: one turn recorded 0.84 s of audio and heard
+        # "t sit". Every timing in that run is contaminated.
+        if not wait_state(app_dir, "idle", 90.0):
+            say("        STILL BUSY after 90s — abandoning this run "
+                "rather than talking over it")
+            break
+        time.sleep(3.0)
     return rows
 
 
