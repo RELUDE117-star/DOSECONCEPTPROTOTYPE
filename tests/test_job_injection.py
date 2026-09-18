@@ -9,8 +9,8 @@ exactly that.
 
 A detector is only worth having if BOTH halves are true — it catches the
 real thing, and it stays quiet on everything else. The second half is
-not a nicety. The grep this replaced produced three separate rounds of
-false positives:
+not a nicety. The grep this replaced produced FOUR separate rounds of
+false positives, each one found only because somebody read the output:
 
   1. `OUT=$(ssh host hostname)` — capture and compare, which is what
      every job here does. Four findings on the first run.
@@ -18,6 +18,10 @@ false positives:
      patterns it is explaining.
   3. The commit message that shipped the fix for 1 and 2, sitting in a
      quoted heredoc — literal data for `git commit -F -`, not code.
+  4. The PREVIOUS detector's own regex, passed to grep as a
+     single-quoted argument. `|sh <(` inside those quotes read as
+     "piped into a shell". Single quotes are absolutely literal in
+     shell; double quotes are not, and are deliberately left alone.
 
 An audit that fails on a clean tree teaches its owner to ignore the
 summary line, and then the day it finds something real, he ignores that
@@ -83,6 +87,12 @@ DANGEROUS = {
         '`ssh dose-pi echo whoami`\n',
     "eval after a semicolon":
         'X=1; eval "$UNTRUSTED"\n',
+    "sh -c on a command substitution":
+        'sh -c "$(ssh dose-pi cat /tmp/p)"\n',
+    "bash -c on a backtick substitution":
+        'bash -c `ssh dose-pi cat /tmp/p`\n',
+    "eval hiding after a single-quoted argument on the same line":
+        "grep -E 'nothing|here' f.txt; eval \"$X\"\n",
 }
 
 print("\n1. Real injection must be caught")
@@ -115,6 +125,18 @@ SAFE = {
         'echo hi   # not an eval, just a word\n',
     "the word eval inside a string":
         'echo "the evaluation finished"\n',
+    # Round four: an older job passed the PREVIOUS detector's own regex
+    # to grep as a single-quoted argument. The text `|sh <(` inside those
+    # quotes read as "piped into a shell". Single quotes are absolutely
+    # literal in shell, so their contents are an argument to another
+    # program and never code this shell runs.
+    "a regex containing the patterns, as a single-quoted argument":
+        "grep -lE 'eval|$(ssh|`ssh|bash <(|sh <(|source .*out/' "
+        '"$AG/queue" 2>/dev/null | head\n',
+    "a single-quoted string mentioning | bash":
+        "echo 'never pipe it | bash'\n",
+    "a single-quoted awk program with a pipe":
+        "awk '{print $1 | \"sort\"}' f.txt\n",
 }
 
 print("\n2. Safe, ordinary jobs must stay quiet")

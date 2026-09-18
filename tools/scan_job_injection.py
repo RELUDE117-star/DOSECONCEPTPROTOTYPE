@@ -27,11 +27,24 @@ each wrong answer cost a real investigation:
      heredoc is literal data handed to another program; it is not shell
      code and cannot execute anything.
 
-Three rounds of false positives from one tool. That matters more than it
+  4. A SINGLE-QUOTED ARGUMENT matches. An older job passed the previous
+     detector's own regex to grep:
+
+         grep -lE 'eval|$(ssh|`ssh|bash <(|sh <(|source .*out/' …
+
+     The text `|sh <(` inside those quotes read as "piped into a shell".
+     Single quotes in shell are absolutely literal — no expansion, no
+     substitution, no execution — so their contents are an argument to
+     some other program and never code this shell runs.
+
+     DOUBLE quotes are different and are deliberately NOT stripped:
+     `$( )` and backticks still execute inside them.
+
+Four rounds of false positives from one tool. That matters more than it
 sounds: an audit that fails on a clean tree teaches its owner to skip
 the summary line, and the day it finds something real he skips that too.
-So this strips comments and quoted-heredoc bodies first, and tests only
-what the shell would actually run.
+So this strips comments, quoted-heredoc bodies and single-quoted spans
+first, and tests only what the shell would actually run.
 
 Usage:  scan_job_injection.py DIR [DIR ...]
 Prints one `path:line: text` per finding. Exit 1 if any, 0 if none.
@@ -47,7 +60,27 @@ PATTERNS = [
     (re.compile(r'\|\s*(bash|sh)(\s|$|;)'),          "piped into a shell"),
     (re.compile(r'(^|;|&&|\|\||\(|\bthen\b|\bdo\b)\s*[`$]\(?\s*ssh\b'),
      "ssh output in command position"),
+    # `sh -c "$(…)"` / `bash -c `…`` runs a substitution directly. The
+    # single-quote stripping below cannot hide this one, because a
+    # substitution inside single quotes would not expand either.
+    (re.compile(r'\b(bash|sh)\s+-c\s*["]?\s*(\$\(|`)'),
+     "shell -c on a command substitution"),
 ]
+
+# A single-quoted span is literal: no expansion, no substitution, no
+# execution. Its contents are an argument to some other program. Double
+# quotes are NOT included here on purpose — $( ) and backticks still run
+# inside them.
+_SQ = re.compile(r"'[^']*'")
+
+
+def _blank_single_quoted(line):
+    """Replace single-quoted spans with same-length blanks.
+
+    Same length so reported columns and the quoted text stay sane, and
+    so a quoted span can never join two halves of a pattern together.
+    """
+    return _SQ.sub(lambda m: " " * (m.end() - m.start()), line)
 
 
 def strip_shell_noise(text):
@@ -112,8 +145,12 @@ def scan_file(path):
         return []
     hits = []
     for lineno, code in strip_shell_noise(text):
+        testable = _blank_single_quoted(code)
         for pat, why in PATTERNS:
-            if pat.search(code):
+            if pat.search(testable):
+                # Report the ORIGINAL line, so a finding is readable;
+                # match against the blanked one, so quoted data cannot
+                # masquerade as code.
                 hits.append((lineno, why, code.strip()[:120]))
                 break
     return hits
