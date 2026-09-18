@@ -1399,6 +1399,17 @@ class DoseVoice:
                 proc.terminate()
         except Exception:
             pass
+        # Deliberately NOT waiting here. Barge-in must return instantly —
+        # this runs the moment someone starts talking over her, and a
+        # blocking wait would put that latency straight into the
+        # interruption. The speaking thread is already sitting in
+        # proc.wait(), and that is what reaps it; a poll() here is enough
+        # to collect the child in the case where that thread has already
+        # moved on.
+        try:
+            proc.poll()
+        except Exception:
+            pass
 
     def _probe_moonshine(self):
         """Moonshine for speed, Whisper for when speed was not enough.
@@ -5064,10 +5075,25 @@ class DoseVoice:
                 try:
                     rc = proc.wait(timeout=120)
                 except Exception:
+                    # SAME BUG AS THE CAPTURE TEARDOWN, OTHER END OF THE
+                    # PIPELINE. kill() without a following wait() leaves
+                    # the player as a zombie forever — the device grew a
+                    # "[aplay] <defunct>" within seconds of a restart.
+                    # TERM first so the player can release the audio
+                    # device cleanly, KILL only if it will not go, and
+                    # REAP either way.
                     try:
-                        proc.kill()
+                        proc.terminate()
+                        proc.wait(timeout=3)
                     except Exception:
-                        pass
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                        try:
+                            proc.wait(timeout=3)
+                        except Exception:
+                            pass
                     rc = -1
                 finally:
                     self._play_proc = None
