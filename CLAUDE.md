@@ -403,6 +403,32 @@ The owner reading his own device ("it's something you did", "the Wi-Fi
 is unstable", "maybe it's updating too often") was right more often than
 these measurements were. **Check the instrument before the code.**
 
+### Selection scoring zero was ALSO the duplicate — a correction
+
+When selection reported `chose: NOTHING` with every route at peak 0, I
+attributed it to `ingest()` dropping blocks while the engine is
+SPEAKING (startup plays the greeting, and speaking-state audio goes to
+barge-in detection and returns). I made measurement bypass mute and
+barge-in, which is correct and is now tested three ways.
+
+But the first clean run after the fix recorded:
+
+```
+engine state during the walk: idle   muted: False
+arecord FORCED card 5,0: opened, peak 9542 (rms 2304, 88 blocks)
+took: 2.0s (budget 45s)
+```
+
+**The engine was idle and unmuted.** So the speaking-state path was not
+what had been zeroing it — the *duplicate instance holding the device*
+was. One app, and the very first route delivers 88 blocks at peak 9542.
+
+The bypass stays: it is a real hazard, selection genuinely does run
+while the station is talking, and it costs nothing. But it did not
+cause this, and the evidence field that proves it (`engine state during
+the walk`) only exists because the fix added it. Record what the
+program knew, then read it — do not reason backwards from a symptom.
+
 ### The auto-update had no brake
 
 `_do_update_check` runs 2 s after launch, `_apply_update` ends in
