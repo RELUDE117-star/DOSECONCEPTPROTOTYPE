@@ -238,6 +238,29 @@ def play_and_record(wav_in, wav_out, card, channels, pad=0.7):
     return played, play_secs
 
 
+def wait_state(app_dir, want, timeout=12.0):
+    """Wait until the app's heartbeat says it is in `want`.
+
+    Without this the phrase can play before the engine has finished
+    opening its turn, and the first live turn of every run was lost:
+    "NO TURN RECORDED in 45s". The station publishes its state once a
+    second; asking it is better than sleeping and hoping.
+    """
+    live = os.path.join(app_dir, "voice", "live.txt")
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            for line in open(live):
+                if line.startswith("state:"):
+                    if line.split(":", 1)[1].strip() == want:
+                        return True
+                    break
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return False
+
+
 def live_turns(items, app_dir, pad=0.6):
     """Drive real turns through the RUNNING app and read the per-stage
     timings it records for itself.
@@ -276,6 +299,12 @@ def live_turns(items, app_dir, pad=0.6):
             say("    cannot write the hook (%s) — is DOSE_TEST_HOOKS set "
                 "for the service?" % exc)
             return rows
+        # Wait for the engine to actually be listening before speaking
+        # at it, rather than sleeping and hoping.
+        if not wait_state(app_dir, "listening", 12.0):
+            say("    %-30s engine never entered 'listening'" % phrase)
+            rows.append({"phrase": phrase, "live": False})
+            continue
         time.sleep(pad)
         for cmd in (["pw-play", src], ["paplay", src], ["aplay", "-q", src]):
             try:
@@ -329,6 +358,10 @@ def main():
     ap.add_argument("--max-turn", type=float, default=8.0)
     ap.add_argument("--min-peak", type=int, default=300)
     ap.add_argument("--json", default="")
+    ap.add_argument("--live-only", action="store_true",
+                    help="skip the loopback entirely: render the "
+                         "phrases, free Piper, and measure only real "
+                         "turns through the running app")
     ap.add_argument("--live", action="store_true",
                     help="drive REAL turns through the running app and "
                          "read the per-stage timings out of turns.jsonl")
@@ -391,16 +424,28 @@ def main():
         PROMPT += " Medications: " + ", ".join(MEDS[:12])
     say("  vocabulary bias: %d medication name(s)" % len(MEDS))
 
-    t0 = time.time()
-    from faster_whisper import WhisperModel
-    size = os.environ.get("DOSE_FAST_WHISPER", "tiny.en")
-    model = WhisperModel(size, device="cpu", compute_type="int8")
-    say("  whisper %s loaded in %.1fs" % (size, time.time() - t0))
+    model = None
+    if not args.live_only:
+        t0 = time.time()
+        from faster_whisper import WhisperModel
+        size = os.environ.get("DOSE_FAST_WHISPER", "tiny.en")
+        model = WhisperModel(size, device="cpu", compute_type="int8")
+        say("  whisper %s loaded in %.1fs" % (size, time.time() - t0))
+    else:
+        say("  (live-only: no recogniser loaded here, so the station "
+            "is not measured while competing with a second copy)")
 
     tmp = "/tmp/dose_acc"
     os.makedirs(tmp, exist_ok=True)
     rows = []
     for i, (phrase, want_intent) in enumerate(PHRASES[:args.phrases]):
+        if args.live_only:
+            src = os.path.join(tmp, "say_%d.wav" % i)
+            tts = synth(phrase, src, voice)
+            say("[%d] %r rendered in %.2fs" % (i + 1, phrase, tts))
+            rows.append({"phrase": phrase, "tts": round(tts, 2),
+                         "loopback": False})
+            continue
         say("\n[%d] %r" % (i + 1, phrase))
         src = os.path.join(tmp, "say_%d.wav" % i)
         got = os.path.join(tmp, "heard_%d.wav" % i)
@@ -453,7 +498,33 @@ def main():
                      **e})
 
     live_rows = []
-    if args.live:
+    if args.live or args.live_only:
+        # RELEASE OUR OWN MODELS FIRST.
+        #
+        # The first live run measured 10-12 s for a fast pass that the
+        # loopback had just measured at 2.2 s on the same audio. The
+        # difference was this process: it was still holding Piper and
+        # faster-whisper, and the station was transcribing while a
+        # second copy of both sat in memory next to it. Free memory fell
+        # from 2607 MB to 1711 MB and load ran at 5.5.
+        #
+        # Measuring an application while competing with it for the
+        # machine measures the competition. That is the duplicate-
+        # instance bug again, wearing a lab coat.
+        try:
+            del voice
+        except Exception:
+            pass
+        try:
+            del model
+        except Exception:
+            pass
+        import gc
+        gc.collect()
+        time.sleep(3.0)
+        _hw = hardware()
+        say("\n  released our models: %s MB free, load %s"
+            % (_hw["mem_avail_mb"], _hw["load1"]))
         say("\n── REAL TURNS, through the running app ─────────────────")
         say("  (the loopback above cannot see endpointing, the language")
         say("   layer or time-to-first-sound; only a real turn can)")
@@ -465,7 +536,7 @@ def main():
             APP_DIR)
 
     hw1 = hardware()
-    ok = [r for r in rows if "error" not in r]
+    ok = [r for r in rows if "error" not in r and r.get("loopback") is not False]
     res = {
         "rows": rows, "hw_before": hw0, "hw_after": hw1,
         "card": card, "channels": ch,
@@ -507,13 +578,27 @@ def main():
     # activity detector, insertions mean a hot capture, substitutions
     # mean the model), but a cabinet that answers the right question
     # has not failed because it heard "Good" for "Did".
-    grade("understood", res["understood_pct"], args.min_understood,
-          False, "%")
-    say("  %-22s %-8s %s%%   (informational)"
-        % ("word error (worst)", "-", res["wer_worst"]))
-    grade("stt latency (worst)", res["stt_worst"], args.max_stt, True, "s")
-    grade("tts latency (worst)", res["tts_worst"], args.max_tts, True, "s")
-    grade("capture level (min)", res["peak_min"], args.min_peak, False)
+    if ok:
+        grade("understood", res["understood_pct"], args.min_understood,
+              False, "%")
+        say("  %-22s %-8s %s%%   (informational)"
+            % ("word error (worst)", "-", res["wer_worst"]))
+    if ok:
+        grade("stt latency (worst)", res["stt_worst"], args.max_stt,
+              True, "s")
+        grade("tts latency (worst)", res["tts_worst"], args.max_tts,
+              True, "s")
+        grade("capture level (min)", res["peak_min"], args.min_peak,
+              False)
+    if live_rows:
+        _lu = [r for r in live_rows if r.get("live")]
+        _uok = sum(1 for r in _lu if r.get("understood"))
+        grade("understood (real turns)",
+              round(100.0 * _uok / len(_lu), 1) if _lu else None,
+              args.min_understood, False, "%")
+        _fast = max((r.get("fast", 0) for r in _lu), default=None)
+        say("  %-22s %-8s %ss   (informational)"
+            % ("fast pass (worst)", "-", _fast))
     if live_rows:
         grade("turn total (worst)", res["live_total_worst"],
               args.max_turn, True, "s")
