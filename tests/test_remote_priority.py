@@ -203,6 +203,42 @@ check("the speculative pass never calls the Mac",
       "allow_cloud=False" in DVC,
       "one turn, one remote request")
 
+print("\n── and the LOG says who actually answered ──────────────────")
+# The Mac answered three turns in a row and the turn log credited it
+# with one:
+#
+#   Mac log:  stt 0.98s of audio in 0.78s -> 'What time is it?'
+#   turn row: engine=whisper-tiny.en   fast=5.66
+#
+# _better_transcribe records what answered onto `self`, and the
+# speculative pass runs on ANOTHER THREAD at the same time. Whichever
+# finished last wrote the record. Being unable to tell where the work
+# happened is the exact thing Ryan asked to be able to check, so a log
+# that quietly misattributes it is worse than no log.
+check("which pass is running is thread-local, not an attribute",
+      "_TL = threading.local()" in DVC,
+      "both passes are the same object and overlap in time")
+check("there is one predicate for it", "def _recording():" in DVC)
+check("the speculative worker declares itself",
+      "_TL.speculative = True" in DVC)
+check("...and clears the flag even if it raises",
+      "finally:" in DVC and "_TL.speculative = False" in DVC)
+check("every turn-log field is written behind that guard",
+      DVC.count("if _recording():") >= 10,
+      DVC.count("if _recording():"))
+for field in ("_last_engine", "_t_fast", "_t_slow", "_stt_note"):
+    # No write to these inside _better_transcribe may be unguarded.
+    seg = DVC[DVC.index("def _better_transcribe"):]
+    seg = seg[:seg.index("\n    def ", 10)]
+    guarded = True
+    lines = seg.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.strip().startswith("self.%s =" % field):
+            if i == 0 or "if _recording():" not in lines[i - 1]:
+                guarded = False
+    check("every %s write is guarded" % field, guarded,
+          "an unguarded one lets the speculation rename the turn")
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:

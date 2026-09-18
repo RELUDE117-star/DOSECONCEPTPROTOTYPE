@@ -571,6 +571,29 @@ CHANNEL_RECHECK = int(os.environ.get("DOSE_CHANNEL_RECHECK", "47"))
 # orders of magnitude above it.
 CHANNEL_DECIDED = float(os.environ.get("DOSE_CHANNEL_DECIDED", "1.0"))
 
+# WHICH PASS AM I?
+#
+# The speculative transcription runs on its own thread, at the same
+# time as the real one, and both are methods on the same object. So a
+# flag on `self` would be read by whichever pass asked last; a
+# thread-local is read by the pass that set it.
+#
+# This exists because the device reported the Mac answering one turn
+# in three while the Mac's own log showed it answering all three:
+#
+#   Mac:      stt 0.98s of audio in 0.78s -> 'What time is it?'
+#   turn row: engine=whisper-tiny.en   fast=5.66
+#
+# _better_transcribe records what answered and how long it took onto
+# `self`. The speculation finished AFTER the real pass and stamped its
+# own name over somebody else's work.
+_TL = threading.local()
+
+
+def _recording():
+    """True only for the pass whose answer the turn will actually use."""
+    return not getattr(_TL, "speculative", False)
+
 # How much audio ALSA holds for us before it gives up, in microseconds.
 # The default is about half a second, and a decode on this board takes
 # four — so half a second of a busy machine costs the microphone. See
@@ -2513,7 +2536,8 @@ class DoseVoice:
         # the log is the only account of what happened out there. A cap
         # applied on the way IN is carried over, because it happened to
         # this turn and is the first thing worth knowing about it.
-        self._stt_note = getattr(self, "_cap_note", "") or ""
+        if _recording():
+            self._stt_note = getattr(self, "_cap_note", "") or ""
         self._cap_note = ""
 
         # 0a) THE MAC, if the Mac is in the house.
@@ -2531,11 +2555,16 @@ class DoseVoice:
                     rtext = _remote_stt.transcribe(
                         self._wav_bytes(audio_bytes))
                     if rtext and self._usable(rtext):
-                        self._t_fast = time.time() - t_start
-                        self._t_slow = 0.0
-                        self._last_engine = "mac"
-                        self._stt_note = "answered by the Mac in %.2fs" % (
-                            time.time() - t_r)
+                        if _recording():
+                            self._t_fast = time.time() - t_start
+                        if _recording():
+                            self._t_slow = 0.0
+                        if _recording():
+                            self._last_engine = "mac"
+                        if _recording():
+                            self._stt_note = (
+                                "answered by the Mac in %.2fs"
+                                % (time.time() - t_r))
                         return rtext
             except Exception:
                 pass
@@ -2546,9 +2575,12 @@ class DoseVoice:
             ctext, ceng, csecs = self._cloud_transcribe(audio_bytes)
             self._raw_cloud = ctext or ""
             if ctext and self._usable(ctext):
-                self._t_fast = time.time() - t_start
-                self._t_slow = 0.0
-                self._last_engine = ceng
+                if _recording():
+                    self._t_fast = time.time() - t_start
+                if _recording():
+                    self._t_slow = 0.0
+                if _recording():
+                    self._last_engine = ceng
                 return ctext
             # cloud unusable/failed — fall through to the local models
 
@@ -2556,7 +2588,8 @@ class DoseVoice:
         fast, feng = self._fast_transcribe(audio_bytes)
         fast_conf = getattr(self, "_fw_conf", 0.0)
         self._raw_fast = fast or ""
-        self._t_fast = time.time() - t_start
+        if _recording():
+            self._t_fast = time.time() - t_start
         # Accept the fast answer only if it parses AND the model was
         # reasonably sure of it. A confident score with a shaky reading
         # (low avg_logprob) is exactly how a fast model hands back a
@@ -2565,8 +2598,10 @@ class DoseVoice:
         # (moonshine) — trusted, since it has no signal to distrust.
         confident = fast_conf == 0.0 or fast_conf >= self.FAST_CONF_FLOOR
         if fast and confident and self._usable(fast):
-            self._t_slow = 0.0
-            self._last_engine = feng
+            if _recording():
+                self._t_slow = 0.0
+            if _recording():
+                self._last_engine = feng
             return fast
 
         # 2) Nothing we can act on — the stronger base.en model gets a
@@ -2606,12 +2641,16 @@ class DoseVoice:
         if left < est:
             self._escalations_skipped = getattr(
                 self, "_escalations_skipped", 0) + 1
-            self._stt_note = ("escalation skipped: %.1fs used of %.1fs, "
-                              "base.en needs about %.1fs"
-                              % (elapsed, STT_TURN_BUDGET, est))
+            if _recording():
+                self._stt_note = (
+                    "escalation skipped: %.1fs used of %.1fs, "
+                    "base.en needs about %.1fs"
+                    % (elapsed, STT_TURN_BUDGET, est))
             self._raw_slow = ""
-            self._t_slow = 0.0
-            self._last_engine = feng
+            if _recording():
+                self._t_slow = 0.0
+            if _recording():
+                self._last_engine = feng
             # The fast answer, if there is one at all, beats silence and
             # beats making the person wait for an answer they will not
             # be there to hear.
@@ -2621,8 +2660,10 @@ class DoseVoice:
         t_wh = time.time()
         wh = self._whisper_transcribe(audio_bytes)
         self._raw_slow = wh or ""
-        self._t_slow = time.time() - t_wh
-        self._last_engine = "whisper" if wh else feng
+        if _recording():
+            self._t_slow = time.time() - t_wh
+        if _recording():
+            self._last_engine = "whisper" if wh else feng
         if wh and self._usable(wh):
             self._whisper_saves = getattr(self, "_whisper_saves", 0) + 1
             return wh
@@ -2635,7 +2676,8 @@ class DoseVoice:
                                and _nlu_mod.looks_hallucinated(c))]
         if cands:
             best = max(cands, key=lambda c: (len(c.split()), len(c)))
-            self._last_engine = feng if best == fast else "whisper"
+            if _recording():
+                self._last_engine = feng if best == fast else "whisper"
             return best
         return vosk_text
 
@@ -7532,6 +7574,12 @@ class DoseVoice:
                 # turn. Nothing is being protected by this any more.
                 pass
                 try:
+                    # THIS PASS DOES NOT GET TO WRITE THE TURN LOG.
+                    # See _recording(): it runs concurrently with the
+                    # real pass, and whichever finishes last was
+                    # stamping its name on the turn. The Mac answered
+                    # three turns; the log credited it with one.
+                    _TL.speculative = True
                     # speculative pass stays LOCAL — it may be discarded
                     # if more speech arrives, and spending free cloud
                     # quota on a throwaway is wasteful. The real pass in
@@ -7540,6 +7588,8 @@ class DoseVoice:
                         snapshot, hint, allow_cloud=False)
                 except Exception:
                     box["text"] = ""
+                finally:
+                    _TL.speculative = False
                 ev.set()
             threading.Thread(target=work, daemon=True,
                              name="stt-speculate").start()
