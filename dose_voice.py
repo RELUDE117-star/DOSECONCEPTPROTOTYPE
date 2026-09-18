@@ -5768,7 +5768,29 @@ class DoseVoice:
                 # it — Silero calls those not-speech — but you cannot.
                 nf = self._nfloor
                 prev_gate = max(40.0, nf * NOISE_GATE_RATIO)
-                is_voice = rms > prev_gate and self.is_speech(data, True)
+                # SILERO IS A NEURAL NET, AND IT RUNS PER BLOCK.
+                #
+                # is_speech() is an ONNX inference. Above the gate it
+                # runs on every 21 ms block — about 26 times a second
+                # in this room, where 55% of blocks now clear the gate
+                # — on the same cores Piper renders the reply on.
+                #
+                # It is gated for SPEAKING further up (that path goes
+                # to barge-in and returns) but not for THINKING, which
+                # is precisely the window where the first chunk is
+                # being synthesized and the person is waiting.
+                #
+                # The numbers fit: a render measured 0.67 s in a run
+                # where 4.5% of blocks carried signal, and 2.2-3.4 s in
+                # runs at 54-55%, while every other explanation was
+                # ruled out with a measurement. The noise floor still
+                # learns from these blocks — that is arithmetic, not a
+                # model — so only the inference is skipped.
+                if self.state == "thinking":
+                    is_voice = False
+                else:
+                    is_voice = (rms > prev_gate
+                                and self.is_speech(data, True))
                 if rms < nf:
                     nf = nf * 0.95 + rms * 0.05      # room went quiet
                 elif not is_voice:

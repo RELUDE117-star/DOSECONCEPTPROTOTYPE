@@ -262,6 +262,19 @@ check("...and that guard sits before the decode, not after",
       < SRC.index("got_final = rec.AcceptWaveform(data)"))
 check("the idle guard is still there too",
       'if self.state == "idle" and not WAKE_WORD:' in SRC)
+check("the voice detector does not run while the station is thinking",
+      'if self.state == "thinking":' in SRC
+      and "is_voice = False" in SRC,
+      "Silero is an ONNX inference per block, on Piper's cores, in "
+      "exactly the window the person is waiting in")
+check("...and the noise floor still learns from those blocks",
+      SRC.index('if self.state == "thinking":')
+      < SRC.index("self._nfloor = max(1.0, min(nf, NOISE_FLOOR_MAX))"),
+      "that part is arithmetic, not a model — only the inference "
+      "is worth skipping")
+check("speaking is still handled earlier, by barge-in",
+      SRC.index('if self.state == "speaking" and not measuring:')
+      < SRC.index('if self.state == "thinking":'))
 check("barge-in does not depend on that queue, so nothing is lost",
       "_detect_barge_in(data)" in SRC
       and SRC.index("_detect_barge_in(data)")
