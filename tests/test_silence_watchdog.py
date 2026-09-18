@@ -80,9 +80,11 @@ LIVE = dose_voice.ROUTE_LIVE_PEAK
 
 print("\n── the fault itself ─────────────────────────────────────────")
 
-e = engine()
-check("blocks arriving + peak 0 for 300s IS a fault",
+e = engine(last_live=NOW - dose_voice.SILENT_CAPTURE_AFTER - 60)
+check("blocks arriving + peak 0 past the window IS a fault",
       e._silence_due(NOW) == 0, repr(e._silence_due(NOW)))
+check("five minutes of quiet is NOT",
+      engine(last_live=NOW - 300)._silence_due(NOW) is None)
 
 e = engine(last_live=NOW - dose_voice.SILENT_CAPTURE_AFTER + 5)
 check("just under the threshold is left alone", e._silence_due(NOW) is None)
@@ -161,7 +163,8 @@ print("\n── the gap between rungs ──────────────
 e = engine(step_ts=NOW - dose_voice.SILENCE_STEP_GAP + 1)
 check("a rung climbed a moment ago is given time to prove itself",
       e._silence_due(NOW) is None)
-e = engine(step_ts=NOW - dose_voice.SILENCE_STEP_GAP - 1)
+e = engine(step_ts=NOW - dose_voice.SILENCE_STEP_GAP - 1,
+           last_live=NOW - dose_voice.SILENT_CAPTURE_AFTER - 60)
 check("past the gap it climbs again", e._silence_due(NOW) == 0)
 
 print("\n── the ladder, cheapest first ───────────────────────────────")
@@ -442,15 +445,21 @@ check("the step gap is an environment override too",
 check("the threshold leaves room for a quiet room (>= 30s)",
       dose_voice.SILENT_CAPTURE_AFTER >= 30,
       dose_voice.SILENT_CAPTURE_AFTER)
-check("...and still heals inside a few minutes (<= 300s)",
-      dose_voice.SILENT_CAPTURE_AFTER <= 300)
+check("...and still heals without anyone present (<= 900s)",
+      dose_voice.SILENT_CAPTURE_AFTER <= 900)
+check("the window is long enough that a quiet evening cannot trip it "
+      "(>= 300s) — watched live, the station sat at peak 0 for 27s at "
+      "a stretch with a capture measured at peak 20,347",
+      dose_voice.SILENT_CAPTURE_AFTER >= 300,
+      dose_voice.SILENT_CAPTURE_AFTER)
+check("the heartbeat shows how many blocks carried anything at all, "
+      "so 'quiet' and 'dead' can be told apart by reading one file",
+      "blocks with signal:" in SRC)
 check("liveness here is peak strictly above zero", "if peak > 0:" in CODE)
 check("...and the heartbeat says the same thing, so the file and the "
       "behaviour cannot disagree",
       'getattr(self, "_hb_peak", 0) > 0' in SRC)
-check("the window is long enough that no quiet room reaches it",
-      dose_voice.SILENT_CAPTURE_AFTER >= 90,
-      dose_voice.SILENT_CAPTURE_AFTER)
+
 
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:

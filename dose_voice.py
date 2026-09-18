@@ -440,8 +440,25 @@ CAPTURE_REOPEN_MAX_GAP = float(
 # peaks at 29-107 (see ROUTE_LIVE_PEAK); only a dead endpoint reads 0.
 # Sixty seconds is long enough that no ordinary quiet can trip it and
 # short enough that the station heals itself well inside a conversation.
+# TEN MINUTES, and the device is why.
+#
+# The first guess was sixty seconds, on the reasoning that a real
+# microphone in a silent room still shows an analog noise floor. It
+# does — three seconds of this capsule read peak 29 and 858 non-zero
+# samples — but that is not what a HEARTBEAT sees. The engine measures
+# one 21 ms block at a time, on one channel, and in a genuinely empty
+# room most of those blocks are exactly zero. Watched live, the station
+# sat at peak 0 for twenty-seven seconds at a stretch with a capture
+# that the acceptance run then measured at peak 20,347.
+#
+# So quiet and dead look identical over a short window, and no
+# threshold cleverness fixes that. What separates them is TIME: a room
+# somebody lives in produces something inside ten minutes — a door, a
+# chair, a fridge, a footstep — and the fault this watchdog exists for
+# is permanent and total. Waiting ten minutes to heal by itself is
+# unarguably better than never, and it cannot fire on a quiet evening.
 SILENT_CAPTURE_AFTER = float(
-    os.environ.get("DOSE_SILENT_CAPTURE_AFTER", "120"))
+    os.environ.get("DOSE_SILENT_CAPTURE_AFTER", "600"))
 # Minimum gap between rungs of the recovery ladder. Each rung costs a
 # device reopen at most; giving the previous one time to prove itself
 # matters more than climbing fast, and a mic that has just been reopened
@@ -3449,6 +3466,9 @@ class DoseVoice:
                         now - (getattr(self, "_last_live_peak_ts", 0)
                                or now),
                         SILENT_CAPTURE_AFTER)),
+                "blocks with signal: %d of %d" % (
+                    getattr(self, "_hb_live_blocks", 0),
+                    getattr(self, "_blocks_in", 0)),
                 "silence recoveries: %d   next rung: %d" % (
                     getattr(self, "_silence_recoveries", 0),
                     getattr(self, "_silence_step", 0)),
@@ -4980,6 +5000,9 @@ class DoseVoice:
                 self._hb_peak = max(pk, int(getattr(self, "_hb_peak", 0)
                                             * 0.95))
                 self._hb_bytes = len(data)
+                if pk > 0:
+                    self._hb_live_blocks = getattr(
+                        self, "_hb_live_blocks", 0) + 1
                 self._hb_nz = sum(1 for b in data[:64] if b)
             except Exception:
                 pass
