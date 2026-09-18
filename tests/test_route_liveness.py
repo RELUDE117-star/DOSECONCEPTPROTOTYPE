@@ -284,6 +284,97 @@ check("every reopen trigger records a reason",
 check("the reader reports the recorder's exit code when capture is lost",
       "capture lost" in src and "rc=%s" in src)
 
+print("\n9. Measurement must beat mute and barge-in")
+# route_floor() decides a device is real by reading _audio_q for 1.6 s.
+# Every block can be dropped before reaching that queue: while muted,
+# and while the engine is SPEAKING, when audio goes to barge-in
+# detection and returns.
+#
+# Selection runs at startup — exactly when the station plays its
+# greeting and prewarms replies. So the walk measured an empty queue and
+# scored EVERY route digitally silent, including the pinned AIRHUG that
+# measures peak 29-107 standalone. From the device, 2026-09-17 22:05:
+#
+#   arecord FORCED card 5,0: opened, peak 0 — rejected
+#   ... every other route:   peak 0 — rejected
+#   took: 63.6s (budget 45s)   chose: NOTHING
+#
+# The microphone was fine. The ruler was being held while the engine
+# talked over it.
+import queue as _q                                            # noqa: E402
+import threading as _th                                       # noqa: E402
+import time as _time                                          # noqa: E402
+
+
+def _blk(peak=29, n=512):
+    return b"".join(struct.pack("<h", peak if i == 0 else 0)
+                    for i in range(n))
+
+
+def _measure_while(state, muted):
+    """Replicate ingest's gate and route_floor's read, together."""
+    eng = object.__new__(dose_voice.DoseVoice)
+    eng._audio_q = _q.Queue(maxsize=200)
+    eng.state = state
+    eng._muted = muted
+    eng._measuring_route = False
+    eng._native_rate = dose_voice.SAMPLE_RATE
+    eng._detect_barge_in = lambda d: None
+    stop = _th.Event()
+
+    def feed():
+        while not stop.is_set():
+            eng._last_block_ts = _time.time()
+            measuring = getattr(eng, "_measuring_route", False)
+            if eng._muted and not measuring:
+                _time.sleep(0.01)
+                continue
+            if eng.state == "speaking" and not measuring:
+                eng._detect_barge_in(_blk())
+                _time.sleep(0.01)
+                continue
+            try:
+                eng._audio_q.put_nowait(_blk())
+            except _q.Full:
+                pass
+            _time.sleep(0.01)
+
+    t = _th.Thread(target=feed, daemon=True)
+    t.start()
+    eng._measuring_route = True
+    _time.sleep(0.05)
+    peak = 0
+    end = _time.time() + 0.5
+    while _time.time() < end:
+        try:
+            d = eng._audio_q.get(timeout=0.2)
+        except _q.Empty:
+            continue
+        p, _r = dose_voice._peak_rms(d)
+        peak = max(peak, p)
+    eng._measuring_route = False
+    stop.set()
+    return peak
+
+
+for _state, _muted, _label in (("idle", False, "idle and unmuted"),
+                               ("speaking", False,
+                                "while SPEAKING (what startup does)"),
+                               ("idle", True, "while MUTED")):
+    _pk = _measure_while(_state, _muted)
+    check("a real mic measures LIVE %s" % _label,
+          _pk >= LIVE, "peak=%d threshold=%d" % (_pk, LIVE))
+
+check("ingest lets a measurement through mute and speaking",
+      "_measuring_route" in src)
+check("route_floor raises and ALWAYS lowers the flag (finally)",
+      src.count("self._measuring_route = False") >= 2)
+check("the trail records how many blocks a route delivered, so "
+      "'silent' can be told from 'nothing arrived'",
+      "_last_route_blocks" in src)
+check("the selection dump records the engine state during the walk",
+      "engine state during the walk" in src)
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:

@@ -318,6 +318,108 @@ and updates from a PUBLIC repository. Treat every change as a privacy change.
   monitored branch → the Pi self-updates and restarts. Never leave important
   changes only on the device. Never commit secrets, recordings, models, venvs.
 
+## TWO COPIES OF THE APP WERE RUNNING. Read this before anything else.
+
+**Root-caused 2026-09-17 22:00.** The station needed physical power
+cycles twice in one evening. The cause was not the voice engine, not the
+Piper worker, not Wi-Fi, and not the power supply.
+
+```
+pid 2543  ppid 1440  1126 MB  cgroup session-1.scope         <- desktop autostart
+pid 2549  ppid 2001  1387 MB  cgroup dose-home-station.svc   <- systemd
+```
+
+**Two complete instances of `dose_app.py`.** 2.5 GB of a 3.8 GB board,
+two copies of faster-whisper, Vosk, Silero and Piper, and two processes
+contending for one USB microphone — which is where the pages of
+
+```
+paInvalidSampleRate ... AlsaOpen failed ... PaAlsaStream_Configure failed
+```
+
+in the log come from. Not a driver mystery. The other instance was
+holding the device.
+
+**`DOSE.sh` re-armed the duplicate on every launch.** It rewrote
+`~/.config/autostart/dose.desktop` unconditionally. Once the systemd
+unit became the start path that is a loop with a one-boot period:
+systemd runs DOSE.sh → DOSE.sh writes the autostart entry → the next
+graphical login starts a second DOSE.sh.
+
+The entry had been disabled **by hand, twice** — the
+`.disabled-by-claude.*` files sit right next to it — and the launcher
+put it back both times. This file has said "systemd is the ONLY start
+path" since that work, and the launcher contradicted it every boot.
+**A fix the program undoes at startup is not a fix, and writing it down
+did not make it true.**
+
+Fixed: when systemd is managing us (`INVOCATION_ID` set, or the unit is
+enabled) the autostart entry is **retired**, not merely skipped. With no
+unit present it is still installed, because then it is the start path.
+
+**Verified after the fix, 10-minute soak:**
+
+| | before | after |
+|---|---|---|
+| app instances | 2 | **1** |
+| available memory | 997 MB | **2088 MB** |
+| app RSS | 1126 + 1387 MB | **1387 MB, flat** |
+| temperature | 48–63 °C | **42.8–44.3 °C** |
+| recorder | cycling | **one, 10+ min continuous** |
+| service restarts | — | **0** |
+
+**How to check this in one line**, because `pgrep` lies (see below):
+
+```
+for d in /proc/[0-9]*; do C=$(tr '\0' ' ' < $d/cmdline 2>/dev/null); \
+  case "$C" in *dose_app.py*) echo "${d#/proc/} $C";; esac; done
+```
+
+There must be exactly one, and its cgroup must contain
+`dose-home-station.service`.
+
+### Five measurement errors that cost hours — read before trusting a number
+
+Every one of these produced a confident wrong diagnosis on the device:
+
+- **`pgrep -fc <pattern>` counts the shell running the pgrep.** It
+  reported two Piper workers when there was one, and nearly justified a
+  fix for a CPU regression that did not exist. Read
+  `/proc/<pid>/cmdline` and skip the current pid instead.
+- **`ps pcpu` is an average over process LIFETIME, not current load.**
+  267% twenty seconds after a restart is startup work. Take instantaneous
+  CPU from `/proc/<pid>/stat` jiffy deltas over a window.
+- **`python3 -u` was added to `DOSE.sh` for unbuffered logging**, and
+  every "is the app running" check still grepped for the command line
+  without `-u`. Every "APP IS GONE" for an hour was false.
+- **A cleanup loop matched its own command line and TERMed its own SSH
+  session.** Skip by pid.
+- **`ping raspberrypi.local` failed for hours while `ssh dose-pi`
+  worked.** mDNS on the Mac is unreliable; SSH is the only reachability
+  test that counts. `~/Documents/dose-agent/pi_host.sh` now resolves the
+  Pi by cache → alias → known IP → subnet sweep.
+
+The owner reading his own device ("it's something you did", "the Wi-Fi
+is unstable", "maybe it's updating too often") was right more often than
+these measurements were. **Check the instrument before the code.**
+
+### The auto-update had no brake
+
+`_do_update_check` runs 2 s after launch, `_apply_update` ends in
+`os.execv`, and the relaunched app checks again 2 s later. Nothing
+counted, nothing waited. Six pushes in an evening meant six
+update-and-restart cycles, each reloading four speech models off an SD
+card; a non-converging update would spin forever.
+
+- **`DOSE_FREEZE=1` — set this before a demo.** The station pulls
+  nothing. Checked before everything else, read from the environment so
+  no restart can clear it.
+- A persisted cooldown (15 min) and a 3-try limit per remote hash, in
+  `update_state.json` — on disk, because the whole failure mode is that
+  the process restarts. After three tries on one hash the station stops
+  and says so on screen. A stuck station that RUNS beats one that
+  reboots.
+
 ## THE MICROPHONE FAULT — SOLVED 2026-09-18. Read this first.
 
 Three sessions looked for this. It was never the model, the USB stack, the

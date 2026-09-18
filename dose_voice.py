@@ -3242,6 +3242,11 @@ class DoseVoice:
                     "NO route showed signal; fell back to the first that "
                     "merely opened"),
                 "threshold: peak >= %d" % ROUTE_LIVE_PEAK,
+                "engine state during the walk: %s   muted: %s"
+                % (getattr(self, "state", "?"),
+                   getattr(self, "_muted", "?")),
+                "audio blocks delivered since start: %d"
+                % getattr(self, "_blocks_in", 0),
                 "",
                 "every route tried, in order:",
             ]
@@ -4405,9 +4410,36 @@ class DoseVoice:
             # tearing down a perfectly healthy capture every ten
             # seconds of quiet. See the watchdog in the main loop.
             self._last_block_ts = time.time()
-            if self._muted:
+            self._blocks_in = getattr(self, "_blocks_in", 0) + 1
+            # MEASUREMENT BEATS MUTE AND BARGE-IN.
+            #
+            # route_floor() decides whether a capture device is real by
+            # reading _audio_q for 1.6 s. But every block below can be
+            # dropped before it reaches that queue: while muted, and
+            # while the engine is SPEAKING, when audio goes to barge-in
+            # detection and returns.
+            #
+            # Device selection runs at startup, which is exactly when
+            # the station is playing its greeting and prewarming
+            # replies. So the walk measured an empty queue and scored
+            # EVERY route digitally silent — including the pinned
+            # AIRHUG, which measures peak 29-107 when tested standalone.
+            # From the device, 2026-09-17 22:05:
+            #
+            #   arecord FORCED card 5,0: opened, peak 0 — rejected
+            #   ... every other route: peak 0 — rejected
+            #   took: 63.6s (budget 45s)   chose: NOTHING
+            #
+            # The microphone was working the whole time; the ruler was
+            # being held while the engine talked over it.
+            #
+            # While a measurement is in progress the block goes to the
+            # queue first, unconditionally. Barge-in still runs — it is
+            # the reason speaking-state audio is examined at all.
+            measuring = getattr(self, "_measuring_route", False)
+            if self._muted and not measuring:
                 return
-            if self.state == "speaking":
+            if self.state == "speaking" and not measuring:
                 # BARGE-IN. Her own voice is coming out of a speaker
                 # inches away, so "is anything loud" is useless here —
                 # but "is this a HUMAN VOICE that is not the clip we
@@ -4866,14 +4898,18 @@ class DoseVoice:
             end = time.time() + seconds
             peak = 0
             rms = 0
-            while time.time() < end:
-                try:
-                    data = self._audio_q.get(timeout=0.3)
-                except queue.Empty:
-                    continue
-                p, r = _peak_rms(data)
-                peak = max(peak, p)
-                rms = max(rms, r)
+            self._measuring_route = True
+            try:
+                while time.time() < end:
+                    try:
+                        data = self._audio_q.get(timeout=0.3)
+                    except queue.Empty:
+                        continue
+                    p, r = _peak_rms(data)
+                    peak = max(peak, p)
+                    rms = max(rms, r)
+            finally:
+                self._measuring_route = False
             self.mic_rms = rms
             return peak >= ROUTE_LIVE_PEAK
 
@@ -5021,15 +5057,22 @@ class DoseVoice:
             end = time.time() + seconds
             peak = 0
             rms = 0
-            while time.time() < end:
-                try:
-                    data = self._audio_q.get(timeout=0.4)
-                except queue.Empty:
-                    continue
-                p, r = _peak_rms(data)
-                peak = max(peak, p)
-                rms = max(rms, r)
+            seen = 0
+            self._measuring_route = True
+            try:
+                while time.time() < end:
+                    try:
+                        data = self._audio_q.get(timeout=0.4)
+                    except queue.Empty:
+                        continue
+                    seen += 1
+                    p, r = _peak_rms(data)
+                    peak = max(peak, p)
+                    rms = max(rms, r)
+            finally:
+                self._measuring_route = False
             self._last_route_rms = rms
+            self._last_route_blocks = seen
             return peak
 
         def open_capture():
@@ -5166,9 +5209,10 @@ class DoseVoice:
                     continue
                 floor = route_floor()
                 self.mic_trail.append(
-                    "%s: opened, peak %d (rms %d)%s%s" % (
+                    "%s: opened, peak %d (rms %d, %d blocks)%s%s" % (
                         label, floor,
                         getattr(self, "_last_route_rms", 0),
+                        getattr(self, "_last_route_blocks", 0),
                         "" if floor >= ROUTE_LIVE_PEAK
                         else " — DIGITALLY SILENT, rejected",
                         " (output device?)" if speakerish else ""))
