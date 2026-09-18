@@ -350,6 +350,12 @@ STT_TURN_BUDGET = float(os.environ.get("DOSE_STT_BUDGET", "7.0"))
 # Twelve seconds is far longer than anything anyone says to a medicine
 # cabinet, and the LAST twelve are the ones kept.
 STT_MAX_AUDIO_S = float(os.environ.get("DOSE_STT_MAX_AUDIO", "12.0"))
+
+# Turn measurement without a person standing in front of the cabinet.
+# See the hook in the supervising loop. Default OFF; a station in
+# somebody's kitchen never has this set.
+TEST_HOOKS = os.environ.get("DOSE_TEST_HOOKS", "").strip().lower() in (
+    "1", "true", "yes", "on")
 # The longest FIRST spoken fragment. Only this chunk is rendered before
 # any sound comes out, so this number IS the station's time-to-first-
 # sound on an uncached reply. Around forty characters is roughly two
@@ -6245,6 +6251,34 @@ class DoseVoice:
                 self._set_ui_state("idle")
                 continue
 
+            # ── A TEST HOOK, OFF BY DEFAULT ──────────────────────
+            #
+            # Everything about a turn's timing — endpointing, the fast
+            # pass, the escalation, time to first sound — is only
+            # measurable on a REAL turn, and a real turn starts when
+            # somebody holds the logo. Ryan's standing instruction is
+            # that nothing may type or tap on the Pi's touchscreen, so
+            # until now the only way to measure a turn was to ask him
+            # to stand in front of it.
+            #
+            # With DOSE_TEST_HOOKS=1, touching voice/ptt_request starts
+            # a turn exactly as a held logo does — same code path, same
+            # measurements, no special case anywhere below this line.
+            #
+            # It is OFF unless that variable is set, and the flag lives
+            # inside APP_DIR, which is under a home directory with mode
+            # 0700: only the kiosk user and root can create it. It adds
+            # no listener, no port and no network path. On a station in
+            # somebody's kitchen the variable is absent and this is
+            # four lines that never run.
+            if TEST_HOOKS and self.state == "idle":
+                try:
+                    hook = os.path.join(VOICE_DIR, "ptt_request")
+                    if os.path.exists(hook):
+                        os.remove(hook)
+                        self._ptt_requested = True
+                except Exception:
+                    pass
             if self._ptt_requested and self.state == "idle":
                 self._ptt_requested = False
                 self._drain(rec)

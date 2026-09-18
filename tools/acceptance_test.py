@@ -238,6 +238,83 @@ def play_and_record(wav_in, wav_out, card, channels, pad=0.7):
     return played, play_secs
 
 
+def live_turns(items, app_dir, pad=0.6):
+    """Drive real turns through the RUNNING app and read the per-stage
+    timings it records for itself.
+
+    The loopback above measures the acoustic path and the recogniser.
+    It cannot measure endpointing, the escalation decision, the
+    language layer or time-to-first-sound, because those only happen
+    inside a real turn — and a real turn starts when somebody holds the
+    logo, which nobody may do on this device.
+
+    So: touch the test hook (DOSE_TEST_HOOKS=1 must be set for the
+    service), play the phrase, and wait for a new line in turns.jsonl.
+    The app measures itself; this only starts the clock and reads the
+    answer.
+    """
+    import wave as _w
+    turns = os.path.join(app_dir, "voice", "turns.jsonl")
+    hook = os.path.join(app_dir, "voice", "ptt_request")
+    rows = []
+
+    def count():
+        try:
+            with open(turns) as f:
+                return sum(1 for _ in f)
+        except Exception:
+            return 0
+
+    for phrase, src in items:
+        before = count()
+        if not os.path.exists(src):
+            say("    %-30s no rendered phrase at %s" % (phrase, src))
+            continue
+        try:
+            open(hook, "w").close()
+        except Exception as exc:
+            say("    cannot write the hook (%s) — is DOSE_TEST_HOOKS set "
+                "for the service?" % exc)
+            return rows
+        time.sleep(pad)
+        for cmd in (["pw-play", src], ["paplay", src], ["aplay", "-q", src]):
+            try:
+                if subprocess.run(cmd, capture_output=True,
+                                  timeout=30).returncode == 0:
+                    break
+            except Exception:
+                continue
+        t0 = time.time()
+        row = None
+        while time.time() - t0 < 45:
+            if count() > before:
+                try:
+                    with open(turns) as f:
+                        row = json.loads(f.readlines()[-1])
+                except Exception:
+                    row = None
+                break
+            time.sleep(0.5)
+        if row is None:
+            say("    %-30s NO TURN RECORDED in 45s" % phrase)
+            rows.append({"phrase": phrase, "live": False})
+            continue
+        say("    %-30s heard %r" % (phrase, str(row.get("heard"))[:34]))
+        say("        endpoint %.2fs  fast %.2fs  slow %.2fs  think %.2fs "
+            " speak %.2fs  TOTAL %.2fs  understood %s"
+            % (row.get("endpoint", 0), row.get("fast", 0),
+               row.get("slow", 0), row.get("think", 0),
+               row.get("speak", 0), row.get("total", 0),
+               row.get("understood")))
+        if row.get("stt_note"):
+            say("        note: %s" % row["stt_note"])
+        row["phrase"] = phrase
+        row["live"] = True
+        rows.append(row)
+        time.sleep(2.0)
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--card", default=os.environ.get("DOSE_MIC_CARD", "5,0"))
@@ -249,8 +326,12 @@ def main():
     ap.add_argument("--max-stt", type=float, default=6.0)
     ap.add_argument("--max-tts", type=float, default=2.0)
     ap.add_argument("--max-temp", type=float, default=75.0)
+    ap.add_argument("--max-turn", type=float, default=8.0)
     ap.add_argument("--min-peak", type=int, default=300)
     ap.add_argument("--json", default="")
+    ap.add_argument("--live", action="store_true",
+                    help="drive REAL turns through the running app and "
+                         "read the per-stage timings out of turns.jsonl")
     args = ap.parse_args()
 
     card = args.card.replace(":", ",")
@@ -371,6 +452,18 @@ def main():
                      "want_intent": want_intent, "understood": ok_intent,
                      **e})
 
+    live_rows = []
+    if args.live:
+        say("\n── REAL TURNS, through the running app ─────────────────")
+        say("  (the loopback above cannot see endpointing, the language")
+        say("   layer or time-to-first-sound; only a real turn can)")
+        # Reuse the phrases the loopback already rendered, so the
+        # audio is identical and only the path through the app differs.
+        live_rows = live_turns(
+            [(p, os.path.join(tmp, "say_%d.wav" % i))
+             for i, (p, _w) in enumerate(PHRASES[:args.phrases])],
+            APP_DIR)
+
     hw1 = hardware()
     ok = [r for r in rows if "error" not in r]
     res = {
@@ -382,6 +475,13 @@ def main():
         "stt_worst": max((r["stt"] for r in ok), default=None),
         "tts_worst": max((r["tts"] for r in ok), default=None),
         "peak_min": min((r["peak"] for r in ok), default=None),
+        "live": live_rows,
+        "live_total_worst": max((r.get("total", 0) for r in live_rows
+                                 if r.get("live")), default=None),
+        "live_speak_worst": max((r.get("speak", 0) for r in live_rows
+                                 if r.get("live")), default=None),
+        "live_endpoint_worst": max((r.get("endpoint", 0) for r in live_rows
+                                    if r.get("live")), default=None),
         "understood_pct": (round(100.0 * sum(1 for r in ok
                                              if r.get("understood")) / len(ok), 1)
                            if ok else None),
@@ -414,6 +514,13 @@ def main():
     grade("stt latency (worst)", res["stt_worst"], args.max_stt, True, "s")
     grade("tts latency (worst)", res["tts_worst"], args.max_tts, True, "s")
     grade("capture level (min)", res["peak_min"], args.min_peak, False)
+    if live_rows:
+        grade("turn total (worst)", res["live_total_worst"],
+              args.max_turn, True, "s")
+        grade("time to first sound", res["live_speak_worst"],
+              args.max_tts * 4, True, "s")
+        say("  %-22s %-8s %ss   (informational)"
+            % ("endpointing (worst)", "-", res["live_endpoint_worst"]))
     grade("temperature", hw1["temp_c"], args.max_temp, True, "'C")
     if hw1["throttled"] not in (None,):
         good = hw1["throttled"] in ("0x0", "0")

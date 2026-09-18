@@ -131,6 +131,41 @@ got = subprocess.run(["bash", "-c", script], capture_output=True,
 check("with no switch at all the station still self-updates",
       got == "LIVE", got)
 
+print("\n── the turn test hook is OFF unless asked for ──────────────")
+# Turn timing — endpointing, the escalation decision, the language
+# layer, time to first sound — is only measurable on a REAL turn, and a
+# real turn starts when somebody holds the logo. Nothing may tap this
+# device's screen, so there is a file hook. A hook that ships enabled
+# would be a way to make a medicine cabinet start listening, so it is
+# default-off and lives inside a directory only the kiosk user can
+# write.
+sys.path.insert(0, ROOT)
+import dose_voice                                            # noqa: E402
+
+VOICE = open(os.path.join(ROOT, "dose_voice.py"), encoding="utf-8").read()
+VCODE = "\n".join(ln for ln in VOICE.splitlines()
+                   if not ln.lstrip().startswith("#"))
+
+check("the hook exists", "ptt_request" in VCODE)
+check("it is gated on an explicit variable",
+      "TEST_HOOKS = os.environ.get(\"DOSE_TEST_HOOKS\"" in VCODE)
+check("and it is OFF with nothing set",
+      dose_voice.TEST_HOOKS is False)
+check("the loop checks the gate BEFORE looking for the file",
+      VCODE.index("if TEST_HOOKS and self.state ==")
+      < VCODE.index('hook = os.path.join(VOICE_DIR, "ptt_request")'))
+check("the flag is consumed, so one touch is one turn",
+      "os.remove(hook)" in VCODE)
+check("it opens no port and adds no listener",
+      "socket(" not in VCODE.split("ptt_request")[1][:1200])
+check("it joins the SAME path a held logo uses, with no special case",
+      "self._ptt_requested = True" in VCODE)
+for val, want in (("1", True), ("true", True), ("on", True),
+                  ("yes", True), ("0", False), ("", False),
+                  ("no", False)):
+    got = val.strip().lower() in ("1", "true", "yes", "on")
+    check("DOSE_TEST_HOOKS=%-5r -> %s" % (val, want), got == want)
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:
