@@ -428,11 +428,64 @@ def write_ssh_shortcut():
     os.chmod(p, 0o700)
 
 
+def already_running():
+    """Is a panel already listening on our port?
+
+    Clicking an app that is already open should SHOW it, not fail. This
+    bound the port unconditionally, so a second launch raised
+    "Address already in use" and exited — and because the bundle is
+    LSUIElement, with no window and no terminal, that exit was
+    completely invisible. Ryan clicked the icon, nothing happened, he
+    moved it to the Desktop, clicked again, nothing happened again, and
+    asked whether he had broken something.
+
+    Nothing about that was his mistake. An app whose only failure mode
+    is silence has no way to be used correctly.
+    """
+    try:
+        import urllib.request
+        with urllib.request.urlopen(
+                "http://127.0.0.1:%d/" % PANEL_PORT, timeout=1.5) as r:
+            r.read(256)
+        return True
+    except Exception:
+        return False
+
+
 def main():
     write_ssh_shortcut()
+    if already_running():
+        # Show the one that is already there rather than dying next to
+        # it. The session key belongs to that process, so the browser
+        # goes to the bare URL and it redirects.
+        print("DOSE panel already running: http://127.0.0.1:%d/"
+              % PANEL_PORT, flush=True)
+        try:
+            webbrowser.open("http://127.0.0.1:%d/" % PANEL_PORT)
+        except Exception:
+            pass
+        return 0
     # 127.0.0.1 ONLY. Not the LAN address, not 0.0.0.0. The Pi cannot
     # reach this, and neither can anything else on the network.
-    httpd = ThreadingHTTPServer(("127.0.0.1", PANEL_PORT), Panel)
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", PANEL_PORT), Panel)
+    except OSError as e:
+        # The port is taken by something that is NOT our panel. Say so
+        # in a way that survives having no terminal.
+        msg = ("Port %d on this Mac is already in use by another "
+               "program, so the DOSE panel cannot start.\n\n%s"
+               % (PANEL_PORT, str(e)[:120]))
+        print(msg, flush=True)
+        try:
+            subprocess.run(
+                ["osascript", "-e",
+                 'display dialog "%s" with title "DOSE PI CONNECTOR" '
+                 'buttons {"OK"} default button 1 with icon caution'
+                 % msg.replace('"', "'").replace("\n", " ")],
+                capture_output=True, timeout=30)
+        except Exception:
+            pass
+        return 1
     httpd.daemon_threads = True
     url = "http://127.0.0.1:%d/?k=%s" % (PANEL_PORT, SESSION)
     print("DOSE panel: %s" % url, flush=True)
