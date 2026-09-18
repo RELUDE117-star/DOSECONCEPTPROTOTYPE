@@ -281,8 +281,18 @@ check("the recorder is spawned in its own session, so a group signal "
       "start_new_session=True" in src)
 check("every reopen trigger records a reason",
       src.count("self._note_reopen(") >= 4)
+# The reader's message changed: it now reports the exit code AND how
+# many blocks it delivered AND why it ended, because "0 blocks" was
+# indistinguishable from a silent microphone and cost a whole evening.
 check("the reader reports the recorder's exit code when capture is lost",
-      "capture lost" in src and "rc=%s" in src)
+      "rc=%s" in src and "ended after %d blocks" in src)
+check("it says WHY the reader stopped, not just that it did",
+      "stop event was ALREADY SET at thread start" in src
+      and "recorder closed its pipe (EOF)" in src)
+check("start() clears the stop latch, so one stop() cannot deafen the "
+      "station for ever",
+      "self._stop.clear()" in src
+      and src.index("self._stop.clear()") < src.index("def stop(self)"))
 
 print("\n9. Measurement must beat mute and barge-in")
 # route_floor() decides a device is real by reading _audio_q for 1.6 s.

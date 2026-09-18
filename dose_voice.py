@@ -3487,6 +3487,32 @@ class DoseVoice:
     def start(self):
         if not self.available:
             return
+        # CLEAR THE LATCH FIRST.
+        #
+        # _stop is a threading.Event created once and, until now, never
+        # cleared. The capture reader's loop is
+        #
+        #     while proc.poll() is None and not self._stop.is_set():
+        #
+        # so ONE call to stop() or release_audio() makes every recorder
+        # started afterwards exit before its first read. The station
+        # then runs normally in every visible respect — arecord alive,
+        # card5 RUNNING, hw_ptr advancing — and delivers zero audio to
+        # the engine, for ever, until the process is restarted.
+        #
+        # That is exactly what the device reported:
+        #
+        #     audio blocks delivered since start: 0
+        #     arecord FORCED card 5,0: opened, peak 0 (rms 0, 0 blocks)
+        #
+        # while the identical arecord command, run standalone on the
+        # same hardware seconds later, delivered 200 blocks in 4
+        # seconds with a peak of 7388. The audio stack was never the
+        # problem.
+        #
+        # A latch that outlives the thing it was meant to stop is not a
+        # stop signal, it is a fuse.
+        self._stop.clear()
         threading.Thread(target=self._run, daemon=True).start()
 
     def stop(self):
@@ -4743,17 +4769,26 @@ class DoseVoice:
                 loop can see so the capture is REOPENED rather than
                 silently lost."""
                 import audioop
+                delivered = 0
+                why = "unknown"
                 try:
+                    if self._stop.is_set():
+                        # Caught before the first read. This used to be
+                        # indistinguishable from a silent microphone.
+                        why = "stop event was ALREADY SET at thread start"
                     while (proc.poll() is None
                            and not self._stop.is_set()):
                         try:
                             n = BLOCK_SIZE * 2 * (2 if channels == 2
                                                   else 1)
                             data = proc.stdout.read(n)
-                        except Exception:
+                        except Exception as e:
+                            why = "read raised: %r" % (e,)
                             break
                         if not data:
+                            why = "recorder closed its pipe (EOF)"
                             break
+                        delivered += 1
                         if channels == 2:
                             try:
                                 left = audioop.tomono(data, 2, 1, 0)
@@ -4809,9 +4844,11 @@ class DoseVoice:
                             rc = proc.poll()
                         except Exception:
                             rc = None
+                        if proc.poll() is None and self._stop.is_set():
+                            why = "stop event set while running"
                         self._note_reopen(
-                            "recorder %r exited (rc=%s) — capture lost"
-                            % (str(label)[:40], rc))
+                            "recorder %r ended after %d blocks (rc=%s): %s"
+                            % (str(label)[:40], delivered, rc, why))
             threading.Thread(target=reader, daemon=True).start()
             self.mic_name = name
             return ("pipe", p)
