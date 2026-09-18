@@ -550,10 +550,14 @@ signal:             SILENT for 41s (acts at 60s)
 silence recoveries: 2   next rung: 2
 ```
 
-**STILL NOT DIAGNOSED.** This is the recovery, not the cause. The raw
-tap (`touch voice/dump_raw` → `voice/raw_from_engine.wav`) is pushed
-and has never been deployed; the Pi dropped off the network four times,
-twice mid-install. Deploy it before theorising further.
+**STILL NOT DIAGNOSED.** This is the recovery, not the cause. But the
+evidence now collects itself: the first time the watchdog ever fires it
+arms the raw tap (`voice/dump_raw` → `voice/raw_from_engine.wav`) on
+its own, once per process, because the tap previously needed somebody
+present to touch a file and this fault has only ever appeared when
+nobody was. Zeros throughout means the bytes really are silent and the
+fault is upstream of the engine; zeros turning into signal means rung 0
+fixed it and names the cause. Read that file before theorising.
 
 ## Nothing in a turn may start without asking what time it is
 

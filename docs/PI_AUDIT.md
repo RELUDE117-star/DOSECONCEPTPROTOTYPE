@@ -986,6 +986,26 @@ signal:             SILENT for 41s (acts at 60s)
 silence recoveries: 2   next rung: 2
 ```
 
+### The evidence now collects itself
+
+The raw tap (`voice/dump_raw` → `voice/raw_from_engine.wav`) only ever
+fired when somebody was there to touch a file — and this fault has so
+far only appeared when nobody was. Four attempts to deploy the tap
+failed because the Pi dropped off the network, twice mid-install.
+
+The watchdog knows the exact moment the condition is true, which is the
+moment the evidence is worth having, so **the first time it ever fires
+it arms the tap itself** — once per process, by writing the flag file
+the engine already knows how to consume. Whatever the dump contains
+answers the question:
+
+- zeros throughout → the bytes really are silent and the fault is
+  upstream of the engine;
+- zeros turning into signal → rung 0 fixed it, and the mixer was the
+  cause.
+
+An unwritable `voice/` cannot block the recovery; arming is best-effort.
+
 ## 2. The 25-second turn had no clock in it
 
 From the device's own `turns.jsonl`:

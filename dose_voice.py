@@ -4222,6 +4222,34 @@ class DoseVoice:
         self._silence_step = (step + 1) % 4
         self._silence_recoveries = getattr(
             self, "_silence_recoveries", 0) + 1
+        # ARM THE RAW TAP, ONCE, THE FIRST TIME THIS EVER FIRES.
+        #
+        # The tap exists because the heartbeat said peak 0 while a
+        # standalone arecord on the same card, at the same moment, read
+        # peak 8917 — and guessing which of those was wrong has already
+        # cost hours. But it only ever fired when somebody was there to
+        # touch voice/dump_raw, and the fault has so far only appeared
+        # when nobody was: four attempts to deploy it failed because the
+        # Pi dropped off the network, twice mid-install.
+        #
+        # The watchdog now knows the exact moment the condition is true.
+        # That is the moment the evidence is worth having, so it collects
+        # itself. Whatever the dump contains answers the question: zeros
+        # throughout means the bytes really are silent and the fault is
+        # upstream of the engine; a transition from zeros to signal means
+        # the rung below fixed it and names the cause.
+        #
+        # Once per process, and only ever a flag file the engine already
+        # knows how to consume — nothing here touches the audio path.
+        if not getattr(self, "_silence_tapped", False):
+            self._silence_tapped = True
+            try:
+                os.makedirs(VOICE_DIR, exist_ok=True)
+                with open(os.path.join(VOICE_DIR, "dump_raw"), "w") as f:
+                    f.write("armed by the silence watchdog %s\n"
+                            % time.strftime("%H:%M:%S"))
+            except Exception:
+                pass
         did = "?"
         try:
             if step == 0:

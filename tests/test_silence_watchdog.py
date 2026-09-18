@@ -230,6 +230,59 @@ check("rung 3 drops the pin entirely", e._forced_card is None)
 check("rung 3 asks for a full re-selection", e._force_reopen is True)
 check("rung 3 says so", "pin" in did.lower(), did)
 
+print("\n── the evidence collects itself ─────────────────────────────")
+# The raw tap exists because the heartbeat said peak 0 while a
+# standalone arecord on the same card read peak 8917. It only ever
+# fired when somebody was there to touch voice/dump_raw — and the
+# fault has so far only appeared when nobody was.
+
+import shutil                                                # noqa: E402
+import tempfile                                              # noqa: E402
+
+_tmp = tempfile.mkdtemp(prefix="dose-sil-")
+_orig_voice_dir = dose_voice.VOICE_DIR
+dose_voice.VOICE_DIR = _tmp
+try:
+    r = Recorder()
+    e = r.bind(engine())
+    flag = os.path.join(_tmp, "dump_raw")
+    check("no tap is armed before the fault", not os.path.exists(flag))
+    e._silence_recover(0, NOW)
+    check("the first recovery arms the raw tap by itself",
+          os.path.exists(flag))
+    body = open(flag, encoding="utf-8").read()
+    check("...and says who armed it", "silence watchdog" in body, body)
+    os.remove(flag)
+    e._silence_recover(1, NOW + 100)
+    check("it arms ONCE per process, not on every rung",
+          not os.path.exists(flag))
+
+    # The engine consumes the flag by EXISTENCE, so the text inside it
+    # must not matter. That contract is what makes this safe.
+    src_i = SRC_FOR_TAP = open(os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), "dose_voice.py"),
+        encoding="utf-8").read()
+    check("the tap consumer tests only that the flag EXISTS",
+          "if os.path.exists(flag):" in src_i)
+    check("...and removes it once the dump is written",
+          "os.remove(flag)" in src_i)
+
+    e2 = Recorder().bind(engine())
+    e2._silence_tapped = True
+    e2._silence_recover(0, NOW)
+    check("a station that has already tapped does not re-arm",
+          not os.path.exists(flag))
+
+    # An unwritable voice directory must not stop a recovery.
+    e3 = Recorder().bind(engine())
+    dose_voice.VOICE_DIR = "/proc/nonexistent/dose"
+    did3 = e3._silence_recover(0, NOW)
+    check("an unwritable directory cannot block the recovery",
+          "mixer" in did3.lower(), did3)
+finally:
+    dose_voice.VOICE_DIR = _orig_voice_dir
+    shutil.rmtree(_tmp, ignore_errors=True)
+
 print("\n── the ladder is bounded and wraps ──────────────────────────")
 
 r = Recorder()
