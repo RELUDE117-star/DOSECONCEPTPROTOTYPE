@@ -147,8 +147,13 @@ Durable facts for future sessions. **No secrets in this file, ever.**
   onnxruntime wheel is NOT built with OpenMP and the only lever is
   `SessionOptions.intra_op_num_threads`, which piper leaves at 0.
   `_cap_onnx_threads()` fills it in. **392% → 111% of one core.**
-- **QR scanning is the steady-state CPU cost:** `pyzbar.decode` in
-  `_camera_loop` holds ~84% of a core continuously, competing with audio.
+- **QR scanning WAS the steady-state CPU cost:** `pyzbar.decode` in
+  `_camera_loop` held ~84% of a core continuously, competing with audio.
+  It is now duty-cycled (`QR_SCAN_INTERVAL`, 300 s, bursting
+  `QR_BURST_FRAMES` at a time) and idles with no capture, no decode and
+  no colour convert in between. The camera view, `request_qr_scan()`
+  and the first pass after launch all still scan immediately. **Do not
+  cite the 84% figure as current** — it describes the old loop.
 - **The AIRHUG has exactly one native mode: 48 kHz, S16_LE, 2 channels.**
   (`/proc/asound/card5/stream0`.) Mono and 16 kHz only exist via `plughw`
   conversion, so `open_arecord()`'s rate/channel probe can only truly succeed
@@ -497,6 +502,115 @@ keeping only stderr, and in practice producing no file at all. Both streams
 now append through `tee`, rotated at 8 MB. The unit's `StandardOutput` is
 `journal` so the two views don't duplicate.
 
+## HEARING: YES is about the DEVICE. It is not about the SIGNAL.
+
+**2026-09-18.** The heartbeat on the device read `HEARING: YES`,
+`blocks/sec: 46.4` — exactly 48000/1024, a flawless capture — and
+`live level: peak 0 rms 0`. At that same moment `hw_ptr` advanced
+144,385 frames in three seconds, arecord's `wchar` climbed at
+96,000 B/s, the app's `rchar` climbed in step, and a standalone
+`arecord -D plughw:5,0` read peak 8917.
+
+**Every byte reaching the engine was zero, and every liveness check in
+the program said YES.**
+
+`CAPTURE_DEAD_AFTER` cannot see this. It asks whether the device
+stopped delivering blocks, and it had not. The station stayed deaf
+until a person noticed and said so — which, for a medication cabinet
+somebody relies on, is not a recovery story.
+
+So blocks arriving AND the level pinned at `ROUTE_LIVE_PEAK` for
+`SILENT_CAPTURE_AFTER` (60 s) while idle is now a fault in its own
+right, with a ladder that escalates cheapest-first:
+
+| rung | action | hypothesis |
+|---|---|---|
+| 0 | force mixer unmute + capture level | ALSA persists a bad level across reboots |
+| 1 | forget the arecord combination, re-select | the cached combination is wrong now |
+| 2 | **switch to the other recordable card** | the pin names the wrong hardware |
+| 3 | drop the pin, full auto-selection | nothing else worked |
+
+**Rung 2 is the leading candidate for the fault itself.** This board has
+reported card 5 as both `A28 [AIRHUG 28]` (mixer range 0–8191) and
+`Device_1 [USB PnP Sound Device]` (range 0–16). If USB re-enumeration
+swaps 4 and 5, `DOSE_MIC_CARD=5,0` points at the dead composite device
+— and that device measures exactly peak 0.
+
+The decision (`_silence_due`) is split from the action
+(`_silence_recover`) because the half that can be silently wrong for
+hours must be testable without a microphone.
+`tests/test_silence_watchdog.py` (66 checks) covers the ladder and
+every reason NOT to act: a false positive tears down a working mic.
+
+The heartbeat now reports the two separately:
+
+```
+HEARING:            YES          <- the device is delivering
+signal:             SILENT for 41s (acts at 60s)
+silence recoveries: 2   next rung: 2
+```
+
+**STILL NOT DIAGNOSED.** This is the recovery, not the cause. The raw
+tap (`touch voice/dump_raw` → `voice/raw_from_engine.wav`) is pushed
+and has never been deployed; the Pi dropped off the network four times,
+twice mid-install. Deploy it before theorising further.
+
+## Nothing in a turn may start without asking what time it is
+
+From the device's own `turns.jsonl`:
+
+```
+worst   "fast": 17.26   "speak": 1.41   "total": 25.19
+best    "fast":  0.12   "speak": 1.90   "total":  2.52
+```
+
+Endpointing is 0.49–0.57 s of that. All the variance is transcription,
+and the worst turn is the fast model taking seventeen seconds and then
+the base.en escalation being started **on top of it**.
+
+- **`STT_TURN_BUDGET` (6 s) is a ceiling, enforced.** Chosen against
+  what the person does: past about five seconds someone assumes the
+  machine did not hear them and repeats themselves, which starts a new
+  turn and makes everything worse.
+- **The escalation's cost is estimated from this device's own
+  measurement** — `self._t_fast * ESCALATION_COST_RATIO`, the fast
+  model's time on exactly this audio under exactly this load. A
+  throttled Pi and a cool one get different answers with nobody tuning
+  a constant. 0.12 s escalates; 17.26 s does not.
+- A skip is **counted and explained in the turn log**. A station whose
+  accuracy quietly fell is worse than one that is visibly slow.
+- **`finish()` used to wait six seconds for the in-flight speculation
+  and then transcribe the whole buffer AGAIN.** Six seconds of waiting
+  followed by the full cost, for audio a worker was already most of the
+  way through. It runs on the same audio — once started, nothing is
+  faster than letting it finish. Hits *and misses* are now counted: a
+  station whose speculation never lands is doing every turn twice.
+
+`tests/test_stt_budget.py` (30 checks).
+
+## Time-to-first-sound was a whole sentence
+
+`_speak()` renders the first chunk, plays it, and renders the rest on a
+worker while that audio is in the air. Piper runs ~3x real time here,
+so later chunks are always ready in time. That design was right; what
+counted as a chunk was not. `_sentences()` splits only on sentence
+ENDS, so "You have two doses left today, Ryan, and the next one is at
+six." is ONE chunk — four seconds of speech with nothing audible until
+all of it has rendered.
+
+Only the first chunk is on the critical path, so only it has a length
+limit (`TTS_FIRST_CHUNK_MAX`, 42). `_split_first()` breaks at the
+**strongest** boundary in the window, not the latest: a full stop beats
+a comma, a comma beats a conjunction. Taking the latest split "I didn't
+catch that, Ryan. Tap the logo and try again." across the word "and",
+straight over a full stop that was sitting right there. Piper pauses at
+a comma anyway, so the seam is inaudible. A sentence whose only break
+is past the window overshoots to it rather than giving up; a phrase
+with no boundary at all is left alone rather than chopped mid-clause.
+
+`tests/test_tts_first_sound.py` (33 checks), including a corpus check
+that no word is ever lost, reordered or invented.
+
 ## Known limitations / TODO
 - `arecord -D default` fails with `Host is down` — the PipeWire ALSA plugin is
   not serving this user. Not blocking (the pinned `plughw:5,0` route works),
@@ -521,8 +635,9 @@ now append through `tee`, rotated at 8 MB. The unit's `StandardOutput` is
   (`dose_cloud_stt.py`, already written, dormant without a credential) is the
   path to both speed and accuracy. Needs a free Groq key placed on the device
   by a human — never hardcode one, the repo is public.
-- Streaming TTS (synthesize + play in chunks) would cut perceived response
-  time far more than optimising Piper itself.
+- ~~Streaming TTS (synthesize + play in chunks)~~ — **done**, see
+  § Time-to-first-sound above. Not yet measured on the device: compare
+  `speak` in `turns.jsonl` before and after.
 - **The Piper subprocess worker is DEFAULT-OFF** (`DOSE_PIPER_WORKER=1` to
   enable). It contains the ONNX abort, but it shipped on and the station
   needed two physical restarts that evening, so it stays off until a soak

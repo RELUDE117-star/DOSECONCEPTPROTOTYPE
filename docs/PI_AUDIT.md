@@ -900,3 +900,212 @@ the instrument before the code.
   measures its RSS against a board running one application.
 - `arecord -D default` still fails with `Host is down`; every `default`
   route in the walk is dead weight.
+
+---
+
+# SESSION 5 — the station said HEARING: YES and heard nothing
+## (2026-09-18, offline: the Pi was unplugged overnight)
+
+Ryan's instruction for this session, in his words: *"let's just stick
+with all the work we have been doing and just focus on optimization."*
+No rebuild, no single model, no deletion. Three things came out of it,
+all written and tested against the container because the device was
+unplugged; none of them has run on the Pi yet.
+
+## The fault the last session ended on
+
+The heartbeat built in SESSION 4b was reading, on the device:
+
+```
+HEARING:        YES
+blocks/sec:     46.4
+blocks total:   12871
+live level:     peak 0  rms 0
+```
+
+46.4 blocks/sec is exactly 48000/1024 — a flawless capture. At the same
+moment:
+
+| measurement | value | meaning |
+|---|---|---|
+| `hw_ptr` delta over 3 s | 144,385 frames | the card is producing |
+| arecord `wchar` | +96,000 B/s | the recorder is writing |
+| app `rchar` | climbing in step | the app is reading |
+| standalone `arecord -D plughw:5,0` | peak 8917 | the mic works |
+| what the engine received | **every sample zero** | |
+
+**The existing capture watchdog cannot see this.** `CAPTURE_DEAD_AFTER`
+asks "did the device stop delivering blocks", and the answer was no:
+they arrived, on time, for ever. Every liveness check in the program
+said YES. The station stayed deaf until a person noticed and told me.
+
+For a medication cabinet somebody relies on, "deaf until a human
+complains" is not a recovery story. That is the gap this session closed.
+
+## 1. A silence watchdog, with a recovery ladder
+
+Blocks arriving **and** the level pinned at the dead-endpoint floor
+(`ROUTE_LIVE_PEAK`) for `SILENT_CAPTURE_AFTER` (60 s) while idle is now
+itself a fault. A real microphone in a silent room peaks at 29–107; only
+a dead endpoint reads exactly 0. The room being quiet cannot trip it.
+
+It escalates cheapest-first, and each rung is a different hypothesis:
+
+| rung | action | hypothesis | cost |
+|---|---|---|---|
+| 0 | force mixer unmute + capture level | ALSA persists a bad level across reboots | no teardown at all |
+| 1 | forget the remembered arecord combination, re-select | the cached combination is wrong for what is on that card now | one reopen |
+| 2 | **switch to the other recordable card** | the pin names the wrong hardware | one reopen |
+| 3 | drop the pin entirely, full auto-selection | nothing else worked | one reopen |
+
+Past the end it wraps to 0. A station that keeps trying beats one that
+stops, and `SILENCE_STEP_GAP` (25 s) plus `_capture_restart_allowed()`
+bound how hard it can try.
+
+**Rung 2 exists because of a specific, still-untested suspicion.** This
+board has reported card 5 as both `A28 [AIRHUG 28]` (mixer range 0–8191)
+and `Device_1 [USB PnP Sound Device]` (range 0–16). If USB
+re-enumeration swaps cards 4 and 5, then `DOSE_MIC_CARD=5,0` points at
+the dead composite device — **and that device measures exactly the peak
+0 we are looking at.** That is the leading candidate for the fault
+above, and rung 2 recovers from it without anyone being present.
+
+The decision is split from the action (`_silence_due()` /
+`_silence_recover()`) so the half that can be silently wrong for hours
+is testable without a microphone. `tests/test_silence_watchdog.py`
+(66 checks) covers the ladder and, more importantly, **every reason not
+to act** — mid-turn, muted, paused, mid-measurement, blocks stopped,
+too few blocks seen. A false positive tears down a working microphone.
+
+The heartbeat now separates the DEVICE from the SIGNAL, which is the
+distinction that was missing when it said YES:
+
+```
+HEARING:            YES          <- the device is delivering
+signal:             SILENT for 41s (acts at 60s)
+silence recoveries: 2   next rung: 2
+```
+
+## 2. The 25-second turn had no clock in it
+
+From the device's own `turns.jsonl`:
+
+```
+worst   "fast": 17.26   "speak": 1.41   "total": 25.19
+best    "fast":  0.12   "speak": 1.90   "total":  2.52
+```
+
+Endpointing is 0.49–0.57 s. All the variance is transcription — and the
+worst turn is the fast model taking seventeen seconds and then the
+base.en escalation being started **on top of it**, because no stage in
+the chain asked what time it was before beginning.
+
+`STT_TURN_BUDGET` (6 s) is now a ceiling the station enforces rather
+than hopes for. Six seconds is chosen against what the person does, not
+what the models want: past about five seconds of silence someone
+assumes the machine did not hear them and says it again, which starts a
+new turn and makes everything worse.
+
+**The escalation's cost is estimated from this device's own
+measurement**, `self._t_fast * ESCALATION_COST_RATIO` — the fast model's
+time on exactly this audio, on exactly this board, under exactly this
+load. A throttled Pi and a cool one get different answers with nobody
+tuning a constant. A hardcoded "escalation takes 4 s" is wrong on both.
+
+| fast pass | escalates? | why |
+|---|---|---|
+| 0.12 s (the best logged turn) | yes | 0.12 + ~0.4 fits easily |
+| 1.0 s | yes | 1.0 + ~3.0 fits |
+| 2.0 s | no | 2.0 + ~6.0 does not |
+| 17.26 s (the worst logged turn) | **no** | this is the 25-second turn |
+
+When it does not fit, the best near-miss still goes to the phonetic
+matcher, and the skip is **counted and explained in the turn log** —
+a station whose accuracy quietly fell is worse than one that is
+visibly slow.
+
+`finish()` had the same shape of bug and it was arguably worse: it
+waited **six seconds** for the in-flight speculation and then, if that
+had not landed, transcribed the whole buffer **again**. Six seconds of
+waiting followed by the full cost, for audio a worker was already most
+of the way through — the worst of both paths. The speculation runs on
+the same audio, so once it has started nothing is faster than letting
+it finish; the only real question is how long the turn may take at all,
+and that is now one number. Hits *and misses* are both counted: a
+station whose speculation never lands is doing every turn twice, and
+that was invisible.
+
+`tests/test_stt_budget.py` (30 checks).
+
+## 3. Time-to-first-sound was a whole sentence
+
+Ryan: *"I want the visual overlay to be fast and quick especially tts."*
+
+`_speak()` already renders the first chunk, plays it, and renders the
+rest on a worker while that audio is in the air. Piper runs about three
+times real time here, so every later chunk is ready long before the
+previous one ends. **That design was right.** What counted as a chunk
+was not.
+
+`_sentences()` splits only on sentence ENDS. So
+
+> "You have two doses left today, Ryan, and the next one is at six."
+
+is one chunk: sixty-four characters, roughly four seconds of speech, and
+nothing at all is audible until the whole of it has been synthesized.
+The person is watching a screen that says nothing is happening.
+
+Only the first chunk is on the critical path, so only the first chunk
+now has a length limit (`TTS_FIRST_CHUNK_MAX`, 42). It breaks at the
+**strongest** boundary in the window, not the latest:
+
+| reply | opening fragment |
+|---|---|
+| "You have two doses left today, Ryan, and the next one is at six." | `You have two doses left today, Ryan,` |
+| "I didn't catch that, Ryan. Tap the logo and try again." | `I didn't catch that, Ryan.` |
+| "Good morning, Ryan. You have three medications scheduled today: …" | `Good morning, Ryan.` |
+| "Your next dose is metformin at six in the evening, and you have taken two of three today." | `Your next dose is metformin at six in the evening,` |
+
+Taking the *latest* boundary instead split the second one across the
+word "and" — straight over a full stop that was sitting right there.
+A full stop beats a comma; a comma beats a conjunction. Piper pauses at
+a comma anyway, so the seam is inaudible.
+
+A sentence whose only break falls past the window overshoots to it
+rather than giving up — that case is one long clause, and a 50-character
+opening beats a 90-character one. A phrase with no boundary at all is
+left alone rather than chopped mid-clause.
+
+Side benefit: the opening fragment is far more likely to be a cache hit
+next time, which makes the second occurrence instant rather than fast.
+
+`tests/test_tts_first_sound.py` (33 checks), including a corpus check
+that **no word is ever lost, reordered or invented** by the split.
+
+## What is NOT claimed here
+
+None of this has run on the Pi. The device was unplugged overnight at
+Ryan's request and every measurement above is either from the previous
+session's device logs or from the container. In particular:
+
+- the raw tap (commit `5cf0128`) is **pushed but never deployed** — the
+  Pi dropped off the network four times, twice mid-install. The sequence
+  when it returns is still short: deploy, `touch voice/dump_raw`, read
+  `voice/raw_from_engine.wav`, and the digital-silence question is
+  settled by comparing two files rather than by reasoning.
+- the silence watchdog is the *recovery* for that fault, not the
+  *diagnosis* of it. Both are still wanted.
+- the TTS and STT numbers above are arithmetic on logged measurements,
+  not new measurements.
+
+## Still open (carried forward, plus this session)
+
+- **Deploy and read `voice/raw_from_engine.wav`.** Everything else about
+  the digital-silence fault is inference.
+- Soak the silence watchdog on the device: confirm it does not fire in a
+  genuinely quiet room over an hour.
+- Measure time-to-first-sound on the device before and after the first-
+  chunk split, from `turns.jsonl` `speak`.
+- Confirm the escalation skip rate on real turns. If it skips often, the
+  fast path is too slow and the budget is treating a symptom.
+- Everything in SESSION 4 § Still open remains true.
