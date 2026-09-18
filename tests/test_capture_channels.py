@@ -155,15 +155,26 @@ check("the channel choice is made on peak",
 check("the old RMS comparison is gone",
       "audioop.rms(left, 2)" not in CODE)
 check("the choice accumulates rather than flapping per block",
-      "_ch_l" in CODE and "_ch_r" in CODE and "0.999" in CODE)
+      "_ch_l" in CODE and "_ch_r" in CODE and "0.9)" in CODE)
+# The re-check is throttled, because doing it every block walked the
+# samples four times on the one thread that must drain arecord's pipe.
+# The decay is per RE-CHECK now, not per block, so it is faster on
+# purpose: 0.9 once a second, not 0.999 forty-seven times a second.
+check("the channel is re-decided on a schedule, not every block",
+      "% CHANNEL_RECHECK) == 1" in CODE)
+check("...about once a second", 20 <= dose_voice.CHANNEL_RECHECK <= 100,
+      dose_voice.CHANNEL_RECHECK)
+check("in between it is a single tomono with the winning weights",
+      CODE.count("audioop.tomono(data, 2, 1, 0)") == 2
+      and CODE.count("audioop.tomono(data, 2, 0, 1)") == 2)
 
 
 def downmix(frames, state):
-    """The production rule, isolated: returns 'L' or 'R'."""
+    """The production rule at a re-check, isolated: 'L' or 'R'."""
     lp = max([abs(v) for v, _ in frames] or [0])
     rp = max([abs(v) for _, v in frames] or [0])
-    state["l"] = max(lp, state.get("l", 0) * 0.999)
-    state["r"] = max(rp, state.get("r", 0) * 0.999)
+    state["l"] = max(lp, state.get("l", 0) * 0.9)
+    state["r"] = max(rp, state.get("r", 0) * 0.9)
     return "L" if state["l"] >= state["r"] else "R"
 
 
