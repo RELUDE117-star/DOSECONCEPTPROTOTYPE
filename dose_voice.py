@@ -8287,9 +8287,31 @@ class DoseVoice:
                     self._t_synth = _p
                 return
         except Exception as e:
+            # AND PUT IT WHERE IT WILL BE READ.
+            #
+            # _note_tts writes somewhere that did not reach live.txt in
+            # the run that needed it — the worker section came back
+            # empty while every render still reported by=in-process
+            # with the attempt taking 0.0 s. A path that fails
+            # instantly and reports nowhere is the same shape as `-q`
+            # on arecord and DEVNULL on this worker's stderr, twice
+            # already fixed in this project.
+            _p["raised"] = repr(e)[:90]
             self._note_tts("worker path raised, using in-process: %r"
                            % (e,))
         _p["worker"] = round(time.time() - _s0, 3)
+        # Why the worker was not used, when it was not used. "0.0 s and
+        # in-process" says the attempt returned immediately; it does
+        # not say whether the child was missing, throttled, disabled,
+        # or the call blew up before it started.
+        try:
+            _p["wstate"] = "%s/%s/%s" % (
+                "on" if self._worker_enabled() else "off",
+                "proc" if getattr(self, "_pw_proc", None) is not None
+                else "none",
+                getattr(self, "_pw_deaths", 0))
+        except Exception:
+            pass
         # THE PARENT'S MODEL IS LOADED HERE AND NOWHERE ELSE.
         #
         # Every caller used to do `voice = self._load_piper()` and hand
