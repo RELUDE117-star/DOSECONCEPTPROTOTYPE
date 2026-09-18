@@ -46,13 +46,28 @@ say "state:    $STATE (mode 700)"
 # and deleting the directory undoes all of it.
 if [ ! -x "$VENV/bin/python3" ]; then
     say "creating a virtual environment (once)"
-    "$PY" -m venv "$VENV" || { echo "  venv failed"; exit 1; }
+    "$PY" -m venv "$VENV" 2>&1 | tail -3 | sed 's/^/    /'
 fi
-say "installing faster-whisper (once; this is the only download)"
-"$VENV/bin/python3" -m pip install --quiet --upgrade pip >/dev/null 2>&1
-"$VENV/bin/python3" -m pip install --quiet faster-whisper || {
-    echo "  pip failed — the app will still install, but the speech"
-    echo "  server will not start until this works."; }
+if [ ! -x "$VENV/bin/python3" ]; then
+    # NOT fatal any more, and this matters. The first version did
+    # `exit 1` here, so a Mac without the venv got no app at all —
+    # and the launcher it would have written exec'd that very venv,
+    # so even a partial install produced a double-click that did
+    # nothing whatsoever. The panel needs no venv. Install it.
+    say "venv:     COULD NOT BE CREATED"
+    say "          The control panel will still work — it is standard"
+    say "          library only. The speech server will not, until"
+    say "          this is fixed. Re-run this script to retry."
+else
+    say "installing faster-whisper (once; this is the only download)"
+    "$VENV/bin/python3" -m pip install --quiet --upgrade pip >/dev/null 2>&1
+    if "$VENV/bin/python3" -m pip install --quiet faster-whisper; then
+        say "models:   faster-whisper ready"
+    else
+        say "models:   pip FAILED — the panel will work and will say"
+        say "          the speech server is unavailable."
+    fi
+fi
 
 # ── 3. the bundle ────────────────────────────────────────────────────
 rm -rf "$APP"
@@ -80,17 +95,108 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 
-# The launcher. Starts the panel, which opens in the browser; the panel
-# starts and stops the speech server on request. Closing the panel
-# (Ctrl-C in its window, or quitting) takes the server with it.
-cat > "$APP/Contents/MacOS/DOSE" <<LAUNCH
+# The launcher.
+#
+# IT MUST NEVER FAIL SILENTLY. The first version was one line —
+#
+#     exec "$VENV/bin/python3" "$SRC/tools/dose_panel.py"
+#
+# — and this app is LSUIElement, so it has no dock icon, no window and
+# no terminal. When that venv did not exist, a double-click did
+# absolutely nothing: no bounce, no error, no log. Ryan double-clicked
+# it, then dragged it to the Desktop and tried again, and reasonably
+# asked whether he had broken something. He had not; the app had no way
+# to tell him anything.
+#
+# Three changes, all of them about being honest:
+#   • the panel is pure standard library, so it falls back to the
+#     system python when the venv is missing. The venv is only needed
+#     by the SPEECH SERVER, which the panel starts on request — so a
+#     half-finished install now gives a working control panel that
+#     says the speech half is not ready, instead of nothing at all.
+#   • the panel and server are copied INTO the bundle, so moving or
+#     deleting the source checkout cannot break the app.
+#   • anything that goes wrong is written to a log AND put on screen
+#     with osascript, because an app with no window cannot report an
+#     error any other way.
+cat > "$APP/Contents/MacOS/DOSE" <<'LAUNCH'
 #!/bin/bash
-export DOSE_PI_HOST="\${DOSE_PI_HOST:-dose-pi}"
-export DOSE_PI_ADDR="\${DOSE_PI_ADDR:-192.168.4.154}"
-export PATH="/usr/bin:/bin:/usr/sbin:/sbin:\$PATH"
-exec "$VENV/bin/python3" "$SRC/tools/dose_panel.py"
+export DOSE_PI_HOST="${DOSE_PI_HOST:-dose-pi}"
+export DOSE_PI_ADDR="${DOSE_PI_ADDR:-192.168.4.154}"
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+HERE="$(cd "$(dirname "$0")/.." && pwd)"          # …/Contents
+RES="$HERE/Resources"
+STATE="$HOME/.dose-server"
+LOG="$STATE/launch.log"
+mkdir -p "$STATE" 2>/dev/null
+chmod 700 "$STATE" 2>/dev/null
+
+note() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG"; }
+
+fail() {
+    note "FAILED: $*"
+    /usr/bin/osascript -e "display dialog \"DOSE PI CONNECTOR could not start.
+
+$1
+
+Details were written to:
+~/.dose-server/launch.log\" with title \"DOSE PI CONNECTOR\" buttons {\"OK\"} default button 1 with icon caution" >/dev/null 2>&1
+    exit 1
+}
+
+note "launch: bundle at $HERE"
+
+# The panel, from the bundle first, then the source checkout.
+PANEL=""
+for c in "$RES/dose_panel.py" "__SRC__/tools/dose_panel.py"; do
+    [ -f "$c" ] && { PANEL="$c"; break; }
+done
+[ -n "$PANEL" ] || fail "The control panel is missing from the app bundle.
+Re-run the installer:  bash tools/mac_app/install_dose_app.sh"
+note "panel: $PANEL"
+
+# The interpreter. The venv is PREFERRED because the speech server
+# needs it, but the panel itself is standard library only, so a missing
+# venv must not stop the panel opening.
+PY=""
+for c in "$HOME/.dose-server/venv/bin/python3" /usr/bin/python3 \
+         /opt/homebrew/bin/python3 /usr/local/bin/python3; do
+    [ -x "$c" ] && { PY="$c"; break; }
+done
+[ -n "$PY" ] || fail "No Python 3 could be found on this Mac."
+note "python: $PY"
+case "$PY" in
+    *"/.dose-server/venv/"*) ;;
+    *) note "NOTE: running on the system python; the speech server \
+needs the venv (re-run the installer to create it)."
+       export DOSE_SPEECH_UNAVAILABLE=1 ;;
+esac
+
+note "starting panel"
+"$PY" "$PANEL" >>"$LOG" 2>&1
+RC=$?
+note "panel exited rc=$RC"
+[ "$RC" -eq 0 ] || fail "The control panel stopped unexpectedly (exit $RC).
+The last lines of the log will say why."
 LAUNCH
+# The source path is substituted in rather than expanded by the
+# heredoc, so the rest of the script above stays literal.
+python3 - "$APP/Contents/MacOS/DOSE" "$SRC" <<'PYSUB' 2>/dev/null || \
+  sed -i '' "s|__SRC__|$SRC|g" "$APP/Contents/MacOS/DOSE"
+import sys
+p, src = sys.argv[1], sys.argv[2]
+t = open(p).read().replace("__SRC__", src)
+open(p, "w").write(t)
+PYSUB
 chmod 755 "$APP/Contents/MacOS/DOSE"
+
+# The panel and the server, copied IN, so the app does not depend on a
+# checkout that can move, be renamed, or be deleted.
+for f in dose_panel.py dose_server.py; do
+    [ -f "$SRC/tools/$f" ] && cp "$SRC/tools/$f" "$APP/Contents/Resources/$f"
+done
+say "bundled:  dose_panel.py, dose_server.py"
 
 # ── 4. the icon ──────────────────────────────────────────────────────
 ICON_SRC="$SRC/tools/mac_app/dose_icon_1024.png"
