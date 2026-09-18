@@ -68,6 +68,11 @@ ALLOWED_HOSTS = {
     "docs.claude.com":           "documentation links",
     "1.1.1.1":                   "TCP connectivity probe (no DNS, no HTTP)",
     "8.8.8.8":                   "TCP connectivity probe (no DNS, no HTTP)",
+    # The DOSE control panel. This one is the opposite of egress: it is
+    # bound to loopback SO THAT nothing can reach it — not the Pi, not
+    # the router, not a phone on the Wi-Fi. It holds a GitHub token and
+    # can open an SSH session, so it must never be on the network.
+    "127.0.0.1":                 "DOSE control panel, loopback ONLY",
 }
 
 print("== 1. every outbound host is on the allowlist ==")

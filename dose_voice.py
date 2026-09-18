@@ -34,6 +34,15 @@ try:                       # strong deterministic NLU (phonetic drug matcher)
 except Exception:
     _nlu_mod = None
 
+# The Mac in the same room, if it is in the same room. Optional by
+# construction: a missing module, a missing config or a closed laptop
+# all mean "use the local models", which is what this device did before
+# any of this existed. See dose_remote_stt.
+try:
+    import dose_remote_stt as _remote_stt
+except Exception:
+    _remote_stt = None
+
 # ── audioop shim ──────────────────────────────────────────────────────
 # Python 3.13 REMOVED the stdlib 'audioop' module. Every audio
 # measurement here (rms/max/mul/tomono/ratecv) depends on it — without
@@ -1980,6 +1989,20 @@ class DoseVoice:
                 "go to user, next dose.")
         return (base + " Medications: " + meds) if meds else base
 
+    def _wav_bytes(self, audio_bytes):
+        """The same WAV _write_wav makes, in memory.
+
+        The Mac is handed bytes, not a path, so nothing about this
+        device's filesystem is involved in talking to it."""
+        import io as _io
+        buf = _io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SAMPLE_RATE)
+            w.writeframes(bytes(audio_bytes))
+        return buf.getvalue()
+
     def _write_wav(self, audio_bytes):
         # RAM, not the SD card: on a Pi this saves tens of ms per
         # utterance and stops us wearing the card out.
@@ -2336,6 +2359,30 @@ class DoseVoice:
         # this turn and is the first thing worth knowing about it.
         self._stt_note = getattr(self, "_cap_note", "") or ""
         self._cap_note = ""
+
+        # 0a) THE MAC, if the Mac is in the house.
+        #
+        # Not "cloud" — a machine on this LAN, addressed by a private
+        # IP, checked before a socket is opened. See dose_remote_stt.
+        # It is tried before the local models because when it answers
+        # it answers in a fraction of the time, and it is skipped
+        # instantly when it is not there: a laptop leaving the house
+        # must not make a medicine cabinet slower, let alone deaf.
+        if allow_cloud and _remote_stt is not None:
+            try:
+                if _remote_stt.available():
+                    t_r = time.time()
+                    rtext = _remote_stt.transcribe(
+                        self._wav_bytes(audio_bytes))
+                    if rtext and self._usable(rtext):
+                        self._t_fast = time.time() - t_start
+                        self._t_slow = 0.0
+                        self._last_engine = "mac"
+                        self._stt_note = "answered by the Mac in %.2fs" % (
+                            time.time() - t_r)
+                        return rtext
+            except Exception:
+                pass
 
         # 0) CLOUD FIRST when it is available and this is the real
         #    (non-speculative) pass.
