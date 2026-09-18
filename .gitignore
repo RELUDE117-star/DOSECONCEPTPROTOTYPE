@@ -65,3 +65,7 @@ diagnostics/
 id_*
 !*.pub
 !tools/claude_dev_authorized_keys
+
+# Device-local marker: when the dependency pass last ran. Per-device
+# state, not source.
+.deps_checked

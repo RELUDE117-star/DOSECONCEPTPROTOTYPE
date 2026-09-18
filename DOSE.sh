@@ -65,6 +65,41 @@ command -v arecord >/dev/null 2>&1 || APT_PKGS="$APT_PKGS alsa-utils"
 command -v pactl >/dev/null 2>&1 || APT_PKGS="$APT_PKGS pulseaudio-utils pipewire-pulse"
 command -v pw-record >/dev/null 2>&1 || APT_PKGS="$APT_PKGS pipewire"
 
+# ── DO NOT RUN apt ON EVERY LAUNCH ───────────────────────────────────
+# This block is gated on "is anything missing", which sounds
+# self-limiting and is not: one probe that can never be satisfied makes
+# it true for ever. On the device that is exactly what happened — a full
+# `apt update` plus an install pass on EVERY start, measured at about
+# EIGHTY SECONDS before the app appeared.
+#
+# That is bad on its own and disqualifying for restart-on-crash: a
+# supervisor that restarts the app would leave the station blank for
+# over a minute each time. A medication cabinet must come back in
+# seconds.
+#
+# So the expensive pass is rate-limited by a stamp file. Still
+# self-healing — it retries on the next launch after the window — but a
+# restart minutes later is instant. DOSE_FORCE_DEPS=1 forces it.
+DEPS_STAMP="$APP_DIR/.deps_checked"
+DEPS_MAX_AGE_HOURS="${DOSE_DEPS_MAX_AGE_HOURS:-12}"
+deps_check_is_fresh() {
+    [ "${DOSE_FORCE_DEPS:-0}" = "1" ] && return 1
+    [ -f "$DEPS_STAMP" ] || return 1
+    local now stamp age
+    now=$(date +%s)
+    stamp=$(cat "$DEPS_STAMP" 2>/dev/null || echo 0)
+    case "$stamp" in ''|*[!0-9]*) return 1 ;; esac
+    age=$(( (now - stamp) / 3600 ))
+    [ "$age" -lt "$DEPS_MAX_AGE_HOURS" ]
+}
+
+if [ -n "$APT_PKGS$PIP_PKGS" ] && deps_check_is_fresh; then
+    echo "  Components checked less than ${DEPS_MAX_AGE_HOURS}h ago — skipping"
+    echo "  the install pass so this start is fast."
+    echo "  (force with DOSE_FORCE_DEPS=1)"
+    APT_PKGS=""; PIP_PKGS=""
+fi
+
 if [ -n "$APT_PKGS$PIP_PKGS" ]; then
     echo "  Installing missing components:$APT_PKGS$PIP_PKGS"
     echo "  (you may be asked for your password)"
@@ -81,6 +116,11 @@ if [ -n "$APT_PKGS$PIP_PKGS" ]; then
             || SETUPTOOLS_USE_DISTUTILS=stdlib python3 -m pip install --break-system-packages $PIP_PKGS \
             || true
     fi
+    # Stamp it even if some package could not be installed. The point is
+    # "we tried recently", not "everything succeeded" — otherwise one
+    # permanently unavailable package means the slow pass runs for ever,
+    # which is the bug this replaced.
+    date +%s > "$DEPS_STAMP" 2>/dev/null || true
 fi
 
 # Status table — the truth of what the station has right now
