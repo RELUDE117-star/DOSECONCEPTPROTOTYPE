@@ -101,14 +101,29 @@ class _Voice:
             os.abort()
         if os.environ.get("FAKE_RAISE") == "1":
             raise RuntimeError("synthesis blew up in python")
+        # THE DOUBLE MUST BE AS STRICT AS THE REAL THING.
+        #
+        # This accepted a PATH, because that is what the worker was
+        # passing it. The real piper wants an open wave.Wave_write and
+        # answers a string with
+        #
+        #   AttributeError: 'str' object has no attribute
+        #                   'setframerate'
+        #
+        # So the worker had never synthesized a single sentence on the
+        # device, and this suite passed all 42 of its checks the whole
+        # time. A test double more permissive than the thing it stands
+        # in for tests the double.
+        if not hasattr(wav, "setframerate"):
+            raise AttributeError(
+                "'%s' object has no attribute 'setframerate' — piper "
+                "wants an open wave, not a path"
+                % type(wav).__name__)
         if os.environ.get("FAKE_NO_AUDIO") == "1":
-            open(wav, "w").close()
             return
-        w = wave.open(wav, "wb")
-        w.setnchannels(1); w.setsampwidth(2); w.setframerate(22050)
-        w.writeframes(b"".join(struct.pack("<h", (i % 800) - 400)
-                               for i in range(2205)))
-        w.close()
+        wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(22050)
+        wav.writeframes(b"".join(struct.pack("<h", (i % 800) - 400)
+                                 for i in range(2205)))
 
 
 class PiperVoice:
@@ -358,12 +373,18 @@ print("\n5b. Concurrency: one worker, one load, no crossed replies")
 #
 # So: count real interpreters, not string matches, and prove the
 # request/response pairing survives sixteen threads at once.
-CONC_FAKE = FAKE_PIPER.replace(
-    'w.writeframes(b"".join(struct.pack("<h", (i % 800) - 400)\n'
-    '                               for i in range(2205)))',
-    '# encode WHICH sentence this is, so a crossed reply is detectable\n'
-    '        n = int(text.split()[-1])\n'
-    '        w.writeframes(struct.pack("<h", n) * 200)')
+_CONC_FROM = ('wav.writeframes(b"".join(struct.pack("<h", (i % 800) - 400)\n'
+              '                                 for i in range(2205)))')
+_CONC_TO = ('# encode WHICH sentence this is, so a crossed reply is detectable\n'
+            '        n = int(text.split()[-1])\n'
+            '        wav.writeframes(struct.pack("<h", n) * 200)')
+CONC_FAKE = FAKE_PIPER.replace(_CONC_FROM, _CONC_TO)
+# A REPLACE THAT MATCHES NOTHING IS A TEST THAT PROVES NOTHING.
+# This edits the fake by text, so the moment the fake is reformatted
+# the marker silently stops being written and the crossed-reply check
+# passes on a waveform that never encoded which sentence it was.
+assert CONC_FAKE != FAKE_PIPER, (
+    "the concurrency fake's marker patch no longer matches FAKE_PIPER")
 
 with tempfile.TemporaryDirectory() as tmp:
     d = os.path.join(tmp, "fakelib")
@@ -485,9 +506,14 @@ wsrc = open(WORKER, encoding="utf-8").read()
 for val in ("0.62", "0.75"):
     check("noise parameter %s is identical in both paths" % val,
           val in src and val in wsrc)
+# The final fallback call now takes the open wave `w`, not the path.
 check("both try SynthesisConfig first, then kwargs, then plain",
       wsrc.index("SynthesisConfig") < wsrc.index("noise_w=noise_w")
-      < wsrc.index("voice.synthesize_wav(text, wav)\n"))
+      < wsrc.index("voice.synthesize_wav(text, w)\n"))
+check("the worker opens the wave itself and hands piper the OBJECT",
+      "with wave.open(wav, \"wb\") as w:" in wsrc
+      and "voice.synthesize_wav(text, wav" not in wsrc,
+      "passing the path is why it never synthesized anything")
 check("the worker caps ONNX threads too (or it would starve the mic)",
       "intra_op_num_threads" in wsrc)
 check("the worker gets its own session, so a group signal cannot kill it",

@@ -50,6 +50,7 @@ its surface the better it does that job.
 import json
 import os
 import sys
+import wave
 
 
 def _log(msg):
@@ -104,23 +105,47 @@ def _synth(voice, text, wav, length_scale, noise_scale, noise_w):
     worker produced different-sounding speech, the station's voice would
     change depending on whether a crash had happened recently, which is
     worse than either voice on its own.
+
+    `wav` IS A PATH HERE AND AN OPEN WAVE OBJECT IN THE PARENT.
+
+    That difference is the whole reason this worker has never once
+    synthesized anything. piper's synthesize_wav() wants an open
+    wave.Wave_write; the parent opens one and passes it, this passed
+    the string, and every request came back:
+
+        {"ok": false, "error":
+         "AttributeError(\\"'str' object has no attribute
+          'setframerate'\\")"}
+
+    The parent's fallback is total — any failure goes back to
+    in-process synthesis — so the station never sounded wrong and
+    nobody noticed. It spawned a 138 MB child, asked it for every
+    reply, got an error every time, and did the work itself. The
+    'evening of memory trouble' that got this switched off was a
+    process doing nothing but existing.
+
+    And tests/test_piper_worker.py passes its 42 checks because the
+    fake Piper it drives accepts whatever it is given. A test double
+    more permissive than the real thing tests the double.
     """
-    try:
-        from piper import SynthesisConfig
-        cfg = SynthesisConfig(length_scale=length_scale,
-                              noise_scale=noise_scale,
-                              noise_w_scale=noise_w)
-        voice.synthesize_wav(text, wav, syn_config=cfg)
-        return
-    except Exception:
-        pass
-    try:
-        voice.synthesize_wav(text, wav, length_scale=length_scale,
-                             noise_scale=noise_scale, noise_w=noise_w)
-        return
-    except Exception:
-        pass
-    voice.synthesize_wav(text, wav)
+    with wave.open(wav, "wb") as w:
+        try:
+            from piper import SynthesisConfig
+            cfg = SynthesisConfig(length_scale=length_scale,
+                                  noise_scale=noise_scale,
+                                  noise_w_scale=noise_w)
+            voice.synthesize_wav(text, w, syn_config=cfg)
+            return
+        except Exception:
+            pass
+        try:
+            voice.synthesize_wav(text, w, length_scale=length_scale,
+                                 noise_scale=noise_scale,
+                                 noise_w=noise_w)
+            return
+        except Exception:
+            pass
+        voice.synthesize_wav(text, w)
 
 
 def main(argv):
