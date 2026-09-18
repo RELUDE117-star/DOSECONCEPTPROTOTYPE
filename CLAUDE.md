@@ -1093,11 +1093,30 @@ standalone in the same interpreter on the same board.
 | the background chunk renderer | reordered; no change |
 | Vosk decoding during the reply | gated; no change, and the room was 4.5% signal that run against 54% the run before |
 
-That is six explanations, all mine, all wrong. What is left is the
-difference between the app's process and a fresh one — the app's Piper
-session is built by `_load_piper()` and capped by
-`_cap_onnx_threads()`; the bench built its own. **Compare those two
-sessions' options directly before guessing a seventh time.**
+That is six explanations, all mine, all wrong. Then two more:
+
+| | |
+|---|---|
+| the Silero VAD running per block | gated while thinking; the room that run was **0.1% signal** (17 blocks of 14,658) and synth was still 2.19–3.95 s |
+| the ONNX session's construction | a fresh session and one with `_cap_onnx_threads` applied report **identical** options (`intra=0`, sequential, ORT_ENABLE_ALL, CPU provider) and **both render in 0.77 s** — the cap is a no-op on a session built this way |
+
+**Eight. What has never differed is the PROCESS.** Every fast
+measurement (0.75–0.80 s) was taken in a fresh interpreter holding
+nothing but Piper. Every slow one (2.2–3.9 s) was inside the
+application, which also holds faster-whisper, Vosk, Silero, picamera2
+and Tkinter at ~1.55 GB on a 4 GB board. Same model, same options,
+same machine, same silent room, 3x apart.
+
+**The obvious test of that is `tools/piper_worker.py`, and it does not
+work.** Enabling `DOSE_PIPER_WORKER=1` spawns the child (138 MB against
+the app's 1,550 MB) but every render still logs
+`{'worker': 0.0, ..., 'by': 'in-process'}` — the attempt returns
+immediately and the parent falls back, exactly as designed. TWO worker
+processes were alive, which is the tell: one died and another spawned.
+So the process hypothesis is **untested, not disproved**, and the next
+step is to find out why the worker never answers — start with whether
+`_piper_worker()` is hitting `PIPER_WORKER_MIN_GAP` after a death, and
+read the child's stderr, which is currently `DEVNULL`.
 
 ### The reply cache: 32 clips on disk, and no hit ever observed
 
