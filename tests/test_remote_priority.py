@@ -126,7 +126,18 @@ src = open(os.path.join(ROOT, "dose_remote_stt.py"),
 check("there is a probe", "def probe(" in src)
 check("it is rate limited, so it cannot become traffic",
       "HEALTH_EVERY" in src and "_STATE[\"health_at\"]" in src)
-check("it is cheap", R.HEALTH_TIMEOUT <= 3.0, R.HEALTH_TIMEOUT)
+# "Cheap" was pinned at 3 s and the device then measured a 1269 ms
+# round trip with three health refusals in one run. A probe budget
+# barely above the measured round trip turns ordinary Wi-Fi jitter
+# into "the Mac is gone" — the too-easy fallback again, one layer
+# down. The probe is off the critical path, so what matters is that it
+# cannot become traffic (HEALTH_EVERY does that) and cannot outlast a
+# turn, not that it is fast.
+check("the probe cannot outlast a turn", R.HEALTH_TIMEOUT <= 8.0,
+      R.HEALTH_TIMEOUT)
+check("...and is comfortably longer than a measured round trip",
+      R.HEALTH_TIMEOUT >= 3.0,
+      "1269 ms was measured; 2 s produced three false refusals")
 check("it uses the health route, not the transcription route",
       "/health" in src)
 check("a failed probe uses the same three-strikes rule",

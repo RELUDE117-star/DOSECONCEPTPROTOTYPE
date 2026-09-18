@@ -9239,6 +9239,16 @@ class DoseVoice:
                 "fw": {k: round(getattr(self, "_t_fw_" + k, 0.0), 2)
                        for k in ("wav", "prompt", "call", "decode",
                                  "total", "audio")},
+                # AND THE SAME MISTAKE, IN THE SAME FILE, TO THE SAME
+                # DICTIONARY, BY THE SAME PERSON WHO WROTE THE COMMENT
+                # DIRECTLY ABOVE.
+                #
+                # render_to_cache's breakdown went into self._turn,
+                # which the on-screen report renders, and not here. The
+                # device duly logged `tts=None` on every row of the run
+                # that existed to read it. The paragraph above is about
+                # exactly this and I read it while writing the bug.
+                "tts": getattr(self, "_t_tts", None),
                 "stt_note": getattr(self, "_stt_note", ""),
                 "spec_hit": getattr(self, "_spec_hits", 0),
                 "spec_miss": getattr(self, "_spec_misses", 0),

@@ -80,7 +80,13 @@ FAILS_BEFORE_DOWN = int(os.environ.get("DOSE_REMOTE_FAILS", "3"))
 BACKOFF = [10.0, 30.0, 90.0, 180.0]
 # How stale a health answer may be before it is re-asked.
 HEALTH_EVERY = float(os.environ.get("DOSE_REMOTE_HEALTH_EVERY", "20"))
-HEALTH_TIMEOUT = float(os.environ.get("DOSE_REMOTE_HEALTH_TIMEOUT", "2.0"))
+# Two seconds was too tight. The device recorded a 1269 ms round trip
+# and three health refusals in one run — a probe budget barely above
+# the measured round trip turns ordinary Wi-Fi jitter into "the Mac is
+# gone". The probe is off the critical path, so being patient here
+# costs nothing and buys the Mac the benefit of the doubt, which is
+# the whole point of the policy.
+HEALTH_TIMEOUT = float(os.environ.get("DOSE_REMOTE_HEALTH_TIMEOUT", "5.0"))
 MAX_UPLOAD = 2 * 1024 * 1024
 
 _STATE = {"down_until": 0.0, "conf": None, "conf_at": 0.0,
