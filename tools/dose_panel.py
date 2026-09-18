@@ -52,6 +52,11 @@ PI_HOST = os.environ.get("DOSE_PI_HOST", "dose-pi")
 PI_ADDR = os.environ.get("DOSE_PI_ADDR", "192.168.4.154")
 PI_APP = "/home/rjarv1/dose-home-station"
 PANEL_PORT = int(os.environ.get("DOSE_PANEL_PORT", "8766"))
+# The speech server's port, named once. It was the literal 8765 in
+# four places, and the fifth use — a liveness check — referred to a
+# constant that did not exist, which would have thrown on every
+# status read.
+SERVER_PORT = int(os.environ.get("DOSE_SERVER_PORT", "8765"))
 
 SESSION = secrets.token_urlsafe(24)
 _SRV = {"proc": None}
@@ -87,14 +92,39 @@ def lan_address():
 
 
 def server_running():
+    """Is the speech server RUNNING — not 'did this panel start it'.
+
+    This asked `_SRV["proc"]`, the handle of a child THIS panel process
+    launched. So a server started by an earlier panel, or left running
+    from yesterday, read as "Running: no" while it was serving happily.
+
+    Ryan read that indicator and told me the server was off. It was
+    not: /health answered in 3 ms and lsof showed it bound to
+    192.168.4.21:8765 the whole time. He was reading the instrument
+    correctly; the instrument was measuring the wrong thing — which is
+    the single most expensive recurring mistake in this project, and
+    the first time it has been made in something HE reads rather than
+    something I read.
+
+    So: ask the port. A listener that answers is running, whoever
+    started it.
+    """
     p = _SRV.get("proc")
-    return bool(p and p.poll() is None)
+    if p and p.poll() is None:
+        return True
+    try:
+        with socket.create_connection(
+                (lan_address(), SERVER_PORT), timeout=0.8):
+            return True
+    except Exception:
+        return False
 
 
 def status():
     st = {
         "lan": lan_address(),
         "panel": "127.0.0.1:%d" % PANEL_PORT,
+        "server_port": SERVER_PORT,
         "server_running": server_running(),
         "server_token": os.path.exists(SRV_TOKEN),
         "gh_token": os.path.exists(GH_TOKEN),
@@ -207,7 +237,7 @@ async function refresh(){
  const s=await r.json();
  rows('pi',[['Address',esc(s.pi_addr)],['SSH alias','<code>'+esc(s.pi_host)+'</code>']]);
  rows('srv',[['Running',pill(s.server_running)],
-   ['Listening on',esc(s.lan)+':8765'],['Paired token',pill(s.server_token)]]);
+   ['Listening on',esc(s.lan)+':'+String(s.server_port)],['Paired token',pill(s.server_token)]]);
  rows('gh',[['Stored',pill(s.gh_token)],['Ends with',s.gh_tail?'&middot;&middot;&middot;'+esc(s.gh_tail):'&mdash;']]);
 }
 async function act(a){
@@ -341,7 +371,7 @@ def a_server_start():
         [sys.executable, SERVER_PY, "--serve"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1.0)
-    return ("started on %s:8765" % lan_address() if server_running()
+    return ("started on %s:%d" % (lan_address(), SERVER_PORT) if server_running()
             else "it did not stay up — see ~/.dose-server/server.log")
 
 
@@ -367,7 +397,7 @@ def a_server_pair():
     tok = tok.strip()
     if rc != 0 or not tok:
         return "could not read the server token"
-    payload = "%s:8765\n%s\n" % (lan_address(), tok)
+    payload = "%s:%d\n%s\n" % (lan_address(), SERVER_PORT, tok)
     rc, out = run(
         ["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", PI_HOST,
          "sudo -n -u rjarv1 tee %s/dose_server.conf >/dev/null "
