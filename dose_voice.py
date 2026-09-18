@@ -2250,7 +2250,20 @@ class DoseVoice:
         try:
             if _nlu_mod.looks_hallucinated(text):
                 return None
-            intent = _nlu_mod.parse(text, self._med_names())
+            # The medication list is read from disk by _med_names().
+            # This runs on the critical path of every turn, at the
+            # moment the person stops speaking, so it is cached for a
+            # few seconds — long enough to cost nothing within a
+            # conversation, short enough that adding a medication is
+            # noticed immediately afterwards. Without this the gate
+            # itself added ~60 ms to the endpoint, which a reliability
+            # test caught.
+            now = time.time()
+            meds, at = getattr(self, "_qa_meds", (None, 0.0))
+            if meds is None or now - at > 5.0:
+                meds = list(self._med_names() or ())
+                self._qa_meds = (meds, now)
+            intent = _nlu_mod.parse(text, meds)
             if intent.name not in self.QUICK_INTENTS:
                 return None
             if not intent.complete:

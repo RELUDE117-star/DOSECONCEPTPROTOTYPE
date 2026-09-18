@@ -213,8 +213,16 @@ def speak_then_pause_then_speak():
     threading.Thread(target=mic, daemon=True).start()
     while e._last_voice_ts == 0.0:
         time.sleep(0.005)
-    return e, e._listen_command(FakeRec(["what", "do", "i", "take",
-                                         "today", "please"]), timeout=8)
+    # DELIBERATELY NOT A COMMAND. This test is about one thing: a
+    # speculation fired during a pause must be thrown away when more
+    # speech arrives, and the final transcript must cover ALL the
+    # audio. It can only observe that if the turn actually reaches the
+    # recogniser — and a live transcript that already parses into a
+    # complete intent is now answered directly, without one (see
+    # _quick_answer). Feeding it "what do i take today please" made the
+    # quick path fire and the invariant went untested.
+    return e, e._listen_command(FakeRec(["the", "quick", "brown", "fox",
+                                         "jumped", "over"]), timeout=8)
 
 
 eng, text = speak_then_pause_then_speak()
@@ -225,6 +233,17 @@ ok(final_bytes == max(eng.calls),
    "breath (%d bytes of %d)" % (final_bytes, max(eng.calls)))
 ok(len(eng.calls) >= 2,
    "the mid-sentence speculation was thrown away and redone")
+
+# The other half of the same behaviour: when the live transcript DOES
+# already say enough, it is answered from directly — and it still has
+# to be the WHOLE sentence, not the part before the breath.
+_qe = ListenEngine(recog_time=0.25)
+_qe._med_names = lambda: ["Aspirin"]
+_quick = _qe._quick_answer("what do i take today please")
+ok(_quick == "what do i take today please",
+   "a complete live transcript is answered from directly, whole")
+ok(_qe._quick_answer("the quick brown fox jumped over") is None,
+   "...and one that means nothing still goes to the recogniser")
 
 print("== 5. speculation is used when the user really did finish ==")
 
@@ -244,6 +263,17 @@ def speak_then_stop():
     threading.Thread(target=mic, daemon=True).start()
     while e._last_voice_ts == 0.0:
         time.sleep(0.005)
+    # "whats next" parses to next_dose, so the live transcript would
+    # now be answered from directly and the speculation — the thing
+    # this test exists to check — would never be consulted. Swapping in
+    # a nonsense phrase instead was wrong: measured at HEAD~1, BEFORE
+    # the quick path existed, "mumble mumble" also takes 0.710s, so
+    # that change was quietly relaxing the assertion rather than
+    # testing it.
+    #
+    # Turn the quick path off for this one engine instead. The phrase,
+    # the timing and the invariant are all exactly as they were.
+    e._quick_answer = lambda _t: None
     txt = e._listen_command(FakeRec(["whats", "next"]), timeout=8)
     return e, txt, time.time() - e._last_voice_ts
 
@@ -255,6 +285,15 @@ ok(getattr(eng2, "_spec_hits", 0) >= 1,
 ok(stop_to_text < dv.ENDPOINT_SILENCE + 0.15,
    "and it cost almost nothing on top of the endpoint (%.3f s)"
    % stop_to_text)
+
+# And the path that is faster still: a live transcript that already
+# parses is answered from without consulting either recogniser.
+_ne = ListenEngine(recog_time=0.25)
+_ne._med_names = lambda: []
+ok(_ne._quick_answer("whats next") == "whats next",
+   "a two-word command in the live transcript needs no recogniser")
+ok(getattr(_ne, "calls", None) in (None, []) or not _ne.calls,
+   "...and it did not call one")
 
 print("== 5b. a speaker reaching for the next word is not clipped ==")
 # "how many sertraline do i ..." — the transcript ends on a hanging
