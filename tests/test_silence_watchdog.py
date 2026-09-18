@@ -337,6 +337,60 @@ e = object.__new__(dose_voice.DoseVoice)
 check("a bare engine with no attributes at all does not act",
       e._silence_due(NOW) is None)
 
+print("\n── the heartbeat still WRITES (it lives inside a bare except) ──")
+# _heartbeat() is wrapped in `except Exception: pass` so it can never
+# affect the audio path it reports on. The cost of that is that a
+# NameError in it produces NO FILE AT ALL, silently — and the heartbeat
+# is the one diagnostic on this station that has actually worked.
+# Adding lines to it without executing it once is how the last working
+# instrument gets destroyed by the change meant to improve it.
+
+_hb_tmp = tempfile.mkdtemp(prefix="dose-hb-")
+_orig_vd = dose_voice.VOICE_DIR
+dose_voice.VOICE_DIR = _hb_tmp
+try:
+    h = object.__new__(dose_voice.DoseVoice)
+    h.state = "idle"
+    h._muted = False
+    h.mic_name = "A28 [AIRHUG 28]"
+    h._blocks_in = 5000
+    h._last_block_ts = time.time()
+    h.mic_rms = 0
+    h._heartbeat()
+    hb = os.path.join(_hb_tmp, "live.txt")
+    check("the heartbeat file is written at all", os.path.exists(hb))
+    body = open(hb, encoding="utf-8").read() if os.path.exists(hb) else ""
+    check("it still reports the DEVICE", "HEARING:" in body)
+    check("it now reports the SIGNAL separately", "signal:" in body)
+    check("a silent capture is named as silent, with the deadline",
+          "SILENT for" in body and "acts at" in body, body[:200])
+    check("the ladder position is visible", "next rung:" in body)
+    check("and the file is timestamped, so nobody reads a stale one "
+          "as live again", "written:" in body)
+
+    h2 = object.__new__(dose_voice.DoseVoice)
+    h2.state = "idle"
+    h2._muted = False
+    h2.mic_name = "A28"
+    h2._blocks_in = 5000
+    h2._last_block_ts = time.time()
+    h2.mic_rms = 120
+    h2._hb_peak = 9542
+    h2._heartbeat()
+    body2 = open(hb, encoding="utf-8").read()
+    check("a live signal reads 'live', not a countdown",
+          "signal:         live" in body2, body2[:400])
+
+    # A bare engine — no attributes at all — must still produce a file.
+    h3 = object.__new__(dose_voice.DoseVoice)
+    os.remove(hb)
+    h3._heartbeat()
+    check("even an engine with nothing set writes a heartbeat",
+          os.path.exists(hb))
+finally:
+    dose_voice.VOICE_DIR = _orig_vd
+    shutil.rmtree(_hb_tmp, ignore_errors=True)
+
 print("\n── it is actually wired in ──────────────────────────────────")
 
 SRC = open(os.path.join(os.path.dirname(os.path.dirname(

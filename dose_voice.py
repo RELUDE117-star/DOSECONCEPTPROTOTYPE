@@ -3325,7 +3325,16 @@ class DoseVoice:
             lines = [
                 "state:          %s" % getattr(self, "state", "?"),
                 "muted:          %s" % getattr(self, "_muted", "?"),
-                "mic:            %s" % (self.mic_name or "?"),
+                # getattr, not self.mic_name. An engine that has not
+                # finished starting has no mic_name yet, and a bare
+                # AttributeError in here is swallowed by the except
+                # below — producing NO heartbeat file at all, silently,
+                # at precisely the moment somebody is asking why the
+                # station is not listening. Every other line in this
+                # list already reads defensively; this one did not, and
+                # it is the instrument, not the patient.
+                "mic:            %s" % (getattr(self, "mic_name", None)
+                                        or "?"),
                 "",
                 "HEARING:        %s" % (
                     "YES" if rate > 0.5 else "NO — no audio arriving"),
