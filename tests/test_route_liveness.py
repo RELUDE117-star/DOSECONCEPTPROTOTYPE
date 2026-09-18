@@ -255,6 +255,35 @@ with tempfile.TemporaryDirectory() as td:
               "peak=%d" % audioop.max(got, 2))
 
 
+print("\n8. A live route must not be closed and reopened")
+# The walk used to: open a route, measure it, CLOSE it, then call the
+# same opener again to get the stream it would actually use. Two opens
+# of the same USB device a fraction of a second apart is a race against
+# the kernel releasing the PCM, and the device lost it in a loop — 33
+# selections in three minutes, each one correctly choosing card 5,0 and
+# then throwing it away. Its own stderr recorded both halves:
+#
+#   arecord: pcm_read:2272: read error: Interrupted system call
+#       (our SIGTERM to the probe recorder; EINTR is fatal to arecord)
+#   arecord sysdefault card 4: audio open error: Device or resource busy
+#       (the reopen arriving before the kernel had let go)
+#
+# A live, non-speaker route now returns the stream it just measured.
+i = src.find("def open_capture")
+walk = src[i:i + 14000] if i > 0 else ""
+check("open_capture() exists", i > 0)
+check("a live non-speaker route returns its stream from the loop",
+      "return cap" in walk and "KEEP THE STREAM WE ALREADY HAVE" in walk)
+check("the old close-then-reopen pair is gone",
+      "floor = route_floor()\n                close_capture(cap)" not in src)
+check("the recorder is spawned in its own session, so a group signal "
+      "cannot kill it",
+      "start_new_session=True" in src)
+check("every reopen trigger records a reason",
+      src.count("self._note_reopen(") >= 4)
+check("the reader reports the recorder's exit code when capture is lost",
+      "capture lost" in src and "rc=%s" in src)
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:

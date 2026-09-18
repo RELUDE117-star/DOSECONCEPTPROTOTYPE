@@ -4488,8 +4488,24 @@ class DoseVoice:
             # without limit or block the recorder by filling a pipe
             # nobody drains.
             try:
+                # start_new_session: the recorder gets its OWN session
+                # and process group.
+                #
+                # arecord treats EINTR as a fatal read error and exits —
+                # "pcm_read:2272: read error: Interrupted system call",
+                # which this station's stderr was full of. Any signal
+                # aimed at our process GROUP (a stray killpg, a SIGHUP
+                # when a parent shell goes away, a terminal signal from
+                # the kiosk session) therefore kills the microphone,
+                # even though it was never meant for it.
+                #
+                # Nothing needs it in our group. We stop it by PID, on
+                # purpose, in close_capture(). So it is moved out of the
+                # blast radius: only a signal addressed to that exact
+                # pid can end it now.
                 p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE,
+                                     start_new_session=True,
                                      env=self._audio_env())
             except Exception:
                 return None
@@ -4518,7 +4534,7 @@ class DoseVoice:
             self._native_rate = native_rate
             self._ratecv_state = None
 
-            def reader(proc=p):
+            def reader(proc=p, label=name):
                 """Drain the recorder — and CLEAN UP WHEN IT ENDS.
 
                 This loop used to simply `break` and return. That is
@@ -4598,6 +4614,20 @@ class DoseVoice:
                         # beats inventing a second one.
                         self._capture_lost = True
                         self._force_reopen = True
+                        # SAY WHY, with the recorder's own exit status.
+                        # This is the reopen path that actually fires in
+                        # practice, and it was the one path that recorded
+                        # nothing: a report showing 33 selections and
+                        # "capture reopens since start: 1" sent me
+                        # looking for a caller that did not exist. The
+                        # recorder dying IS the reopen.
+                        try:
+                            rc = proc.poll()
+                        except Exception:
+                            rc = None
+                        self._note_reopen(
+                            "recorder %r exited (rc=%s) — capture lost"
+                            % (str(label)[:40], rc))
             threading.Thread(target=reader, daemon=True).start()
             self.mic_name = name
             return ("pipe", p)
@@ -4946,7 +4976,12 @@ class DoseVoice:
                          "targeted " + target)), False),
                 ]
             self.mic_trail = []
-            live = None          # best real-signal route (non-speaker)
+            # A live non-speaker route now returns its stream directly
+            # from inside the loop, so there is no `live` to carry out
+            # of it any more. These two are the fallbacks: a live route
+            # that looks like a speaker's dead capture endpoint, and a
+            # route that opened but showed nothing. Both are re-opened
+            # because their first stream was closed on the way past.
             live_speaker = None  # live but looks like a speaker's endpoint
             first_openable = None
             # A DEADLINE ON THE WHOLE WALK. There are a dozen-plus routes
@@ -4972,7 +5007,6 @@ class DoseVoice:
                     self.mic_trail.append(label + ": could not open")
                     continue
                 floor = route_floor()
-                close_capture(cap)
                 self.mic_trail.append(
                     "%s: opened, peak %d (rms %d)%s%s" % (
                         label, floor,
@@ -4980,17 +5014,52 @@ class DoseVoice:
                         "" if floor >= ROUTE_LIVE_PEAK
                         else " — DIGITALLY SILENT, rejected",
                         " (output device?)" if speakerish else ""))
+                if floor >= ROUTE_LIVE_PEAK and not speakerish:
+                    # ── KEEP THE STREAM WE ALREADY HAVE ──────────────
+                    # This used to close the capture and then call the
+                    # same opener again, reopening the same device a
+                    # fraction of a second later. That is a race against
+                    # the kernel releasing a USB PCM, and it is a race
+                    # this station lost in a loop.
+                    #
+                    # The device's own report, selection #33 in three
+                    # minutes: selection took 2.8s, chose "arecord
+                    # FORCED card 5,0", verdict "a route showed a real
+                    # noise floor" — correct every time, and then
+                    # immediately thrown away and done again. Meanwhile
+                    # the recorder's stderr filled with
+                    #
+                    #   arecord: pcm_read:2272: read error:
+                    #       Interrupted system call
+                    #
+                    # every one to three seconds, which is EINTR, which
+                    # is fatal to arecord: our own SIGTERM to the probe
+                    # recorder, printed by the process we had just
+                    # decided to trust and then killed. And
+                    #
+                    #   arecord sysdefault card 4: audio open error:
+                    #       Device or resource busy
+                    #
+                    # which is the reopen arriving before the kernel had
+                    # let go of the previous one.
+                    #
+                    # There was never a reason to close it. The stream
+                    # is open, it is the one we just measured, and it is
+                    # already feeding the queue. Keep it: no second
+                    # open, no EBUSY race, no self-inflicted EINTR, and
+                    # about two seconds off every selection.
+                    self.mic_name = (
+                        label + " · selected (speak to test)")
+                    self._dump_selection(label, True, t_walk)
+                    return cap
+                close_capture(cap)
                 if first_openable is None:
                     first_openable = (label, opener)
-                if floor >= ROUTE_LIVE_PEAK:
-                    if speakerish:
-                        if live_speaker is None:
-                            live_speaker = (label, opener)
-                    else:
-                        live = (label, opener)
-                        break   # a real mic with signal — take it
-            choice = live or live_speaker or first_openable
-            is_live = bool(live or live_speaker)
+                if floor >= ROUTE_LIVE_PEAK and speakerish:
+                    if live_speaker is None:
+                        live_speaker = (label, opener)
+            choice = live_speaker or first_openable
+            is_live = bool(live_speaker)
             if not choice:
                 self.mic_trail.append("no capture route opened at all")
                 self._dump_selection(None, False, t_walk)
