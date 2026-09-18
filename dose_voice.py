@@ -6698,13 +6698,33 @@ class DoseVoice:
             box = {"voice_ts": voice_ts, "done": ev, "text": ""}
 
             def work():
-                # yield to the camera: a missed QR decode is worse
-                # than a few milliseconds of extra speech latency,
-                # and this work is speculative anyway
-                try:
-                    os.nice(5)
-                except Exception:
-                    pass
+                # DO NOT DEPRIORITISE THE THREAD WE THEN WAIT ON.
+                #
+                # This used to call os.nice(5), reasoning that a missed
+                # QR decode was worse than "a few milliseconds of extra
+                # speech latency" and that the work was speculative
+                # anyway. Both halves stopped being true.
+                #
+                # The speculation is not discarded in the common case —
+                # finish() WAITS for it and uses its answer, and the
+                # device logs three hits to two misses. So the thread
+                # the turn blocks on was the one thread told to yield.
+                #
+                # And it is not milliseconds. Measured on the station,
+                # with the stage timings now in turns.jsonl:
+                #
+                #     fast 4.31s   of which decode 4.08s   audio 1.84s
+                #
+                # while the same model on the same board, measured
+                # standalone, runs at roughly 0.7x real time. Being
+                # niced against Vosk (which decodes every block at
+                # normal priority) is most of that gap.
+                #
+                # The camera argument is also gone: pyzbar is
+                # duty-cycled to an eight-frame burst every five
+                # minutes, so it is idle for essentially all of any
+                # turn. Nothing is being protected by this any more.
+                pass
                 try:
                     # speculative pass stays LOCAL — it may be discarded
                     # if more speech arrives, and spending free cloud

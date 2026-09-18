@@ -249,6 +249,31 @@ check("...and the block-count estimate is only a fallback",
       CODE.count("else round(blocks * BLOCK_SIZE") >= 2)
 check("it is reset per turn", "self._turn_secs = None" in CODE)
 
+print("\n── the thread the turn waits on is not deprioritised ───────")
+# It used to call os.nice(5), on the reasoning that a missed QR decode
+# was worse than "a few milliseconds of extra speech latency" and that
+# the work was speculative anyway. Both halves stopped being true:
+# finish() WAITS for the speculation and uses its answer (the device
+# logs three hits to two misses), and the cost is seconds, not
+# milliseconds —
+#
+#     fast 4.31s  of which decode 4.08s  on audio 1.84s
+#
+# against roughly 0.7x real time for the same model measured
+# standalone on the same board. The camera argument is gone too:
+# pyzbar bursts eight frames every five minutes.
+
+_spec = CODE[CODE.index("def speculate("):CODE.index("def finish(")]
+check("the speculative worker no longer nices itself",
+      "os.nice" not in _spec, _spec[:200])
+check("...and finish() still waits for it, which is why that matters",
+      'spec["done"].wait(' in CODE)
+check("the reasoning is written down where the nice used to be",
+      "DO NOT DEPRIORITISE THE THREAD WE THEN WAIT ON" in SRC)
+# Background work that nothing waits on SHOULD still yield.
+check("the reply prewarm still yields, because nothing blocks on it",
+      "os.nice(10)" in CODE)
+
 print("\n── nothing here can make a turn SLOWER ──────────────────────")
 
 check("the gate only ever skips work; it starts none",
