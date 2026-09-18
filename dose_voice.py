@@ -424,6 +424,38 @@ CAPTURE_OPEN_BUDGET = float(      # the entire route walk in open_capture
 # never RMS - in the same recordings, RMS was 0 for BOTH.
 ROUTE_LIVE_PEAK = int(os.environ.get("DOSE_ROUTE_LIVE_PEAK", "3"))
 
+# How long a card's mixer state is trusted before it is forced again.
+#
+# Unmuting a capture card is a fixed-up-front operation: it spawns one
+# `amixer scontrols`, then an `amixer sset` PER CONTROL PER ATTEMPT (four
+# attempt shapes each), then an `amixer contents` and a `cset` per
+# capture control — dozens of processes for one card. It ran on EVERY
+# capture open, for all six card numbers, plus again inside open_arecord
+# for each card it tried. Four full sweeps per selection, of work whose
+# result cannot have changed since the last one.
+#
+# Mixer state does not drift on its own. It changes when hardware is
+# plugged in or out, or when a person moves a slider. The first is
+# already detected — the hot-plug watch clears this cache — and the
+# second is covered by re-forcing every few minutes anyway. A user
+# action that needs it now (the full mic test, an explicit rescan)
+# passes force=True and bypasses the cache entirely.
+MIXER_REDO_AFTER = float(os.environ.get("DOSE_MIXER_REDO_AFTER", "300"))
+
+# Same reasoning for `systemctl --user start pipewire …`: a no-op on an
+# already-running unit, but still a process spawn that can block, and it
+# ran on every capture open. The failure paths pass force=True.
+SERVICE_KICK_AFTER = float(
+    os.environ.get("DOSE_SERVICE_KICK_AFTER", "120"))
+
+# How long before the default sink/source, its mute state and its volume
+# are asserted again. These are SYSTEM settings and a person can change
+# them in the desktop mixer, so they cannot be set once and forgotten —
+# but they also do not need three process spawns at the start of every
+# spoken reply, which is where they were.
+DEFAULT_REAPPLY_AFTER = float(
+    os.environ.get("DOSE_DEFAULT_REAPPLY_AFTER", "300"))
+
 
 def _peak_rms(data):
     """(peak, rms) of signed 16-bit mono PCM. Never raises.
@@ -2123,19 +2155,54 @@ class DoseVoice:
             return rms, rate
         return None
 
-    def _unmute_alsa_inputs(self):
+    def _unmute_alsa_inputs(self, force=False):
         """USB microphones AND speakers frequently arrive with their
         ALSA capture volume at zero or the capture switch OFF — which
         makes arecord record pure digital silence (the exact 'mic
         never hears anything' failure). Brute-force EVERY control on
         EVERY card to full, enabling capture, with several amixer
         forms so a differently-named C-Media control can't be
-        missed. Harmless if already fine."""
-        for card in range(6):
-            self._max_capture(card)
+        missed. Harmless if already fine.
 
-    def _max_capture(self, card):
-        """Force every control on one card to full & capturing."""
+        Harmless, but not free, and it was being done over and over.
+        See MIXER_REDO_AFTER. `force` is for the paths where a person
+        is waiting on the answer and stale is not acceptable — the full
+        mic test, an explicit rescan.
+        """
+        for card in range(6):
+            self._max_capture(card, force=force)
+
+    def _mixer_cache_clear(self):
+        """Forget which cards have been unmuted.
+
+        Called when the audio hardware fingerprint changes. A card
+        number can be REUSED by different hardware across a replug, so
+        this clears everything rather than trying to be clever about
+        which card moved.
+        """
+        try:
+            self._mixer_done = {}
+        except Exception:
+            pass
+
+    def _max_capture(self, card, force=False):
+        """Force every control on one card to full & capturing.
+
+        Skipped when this card was already forced recently — this is
+        dozens of process spawns and its result cannot have changed in
+        the meantime. See MIXER_REDO_AFTER.
+        """
+        done = getattr(self, "_mixer_done", None)
+        if done is None:
+            done = self._mixer_done = {}
+        if not force:
+            last = done.get(card)
+            if last is not None and time.time() - last < MIXER_REDO_AFTER:
+                return
+        # Stamp BEFORE the work, not after. If amixer hangs or the card
+        # does not exist, we must not come straight back and try the
+        # whole sweep again on the next capture open.
+        done[card] = time.time()
         try:
             out = subprocess.run(
                 ["amixer", "-c", str(card), "scontrols"],
@@ -2665,12 +2732,43 @@ class DoseVoice:
                 continue
         return None
 
-    def _make_default(self, target, media_class, boost):
+    def _make_default(self, target, media_class, boost, force=False):
         """Make a node the system default, unmuted, at the given
         gain — via pactl when present, else wpctl (ships with
         WirePlumber on every Pi OS install, so one of the two is
-        always there)."""
+        always there).
+
+        THREE process spawns, six if pactl is missing — and it was
+        being run on the way to choosing an output, which happens at
+        the start of every reply and then every few seconds while one
+        is being spoken. Setting the default sink to the sink it
+        already is, unmuting an unmuted sink and setting a volume to
+        the value it already holds are three no-ops with a real cost
+        on a Pi, and they sat directly in the path between a person
+        finishing a sentence and Dose starting to answer.
+
+        So an identical (target, class, boost) is skipped unless it has
+        been a while. The re-apply window exists because these are
+        SYSTEM settings — somebody can move the slider in the desktop
+        mixer, and a station that never reasserted itself would go
+        quiet with no way back short of a restart.
+        """
         kind = ("source" if media_class == "Audio/Source" else "sink")
+        key = (target, media_class, round(float(boost or 0), 3))
+        if not force:
+            seen = getattr(self, "_default_set", None)
+            if seen is None:
+                seen = self._default_set = {}
+            when = seen.get(key)
+            if when is not None and time.time() - when < DEFAULT_REAPPLY_AFTER:
+                return
+            seen[key] = time.time()
+            # A different target for the same class supersedes the old
+            # one — drop it so switching back re-applies immediately
+            # instead of being skipped as "already done".
+            for k in [k for k in seen
+                      if k[1] == media_class and k[0] != target]:
+                seen.pop(k, None)
         env = self._audio_env()
         got = False
         for cmd in (["pactl", "set-default-" + kind, target],
@@ -2901,7 +2999,11 @@ class DoseVoice:
         self._forced_sink = sink
         self._out_cache = None
         try:
-            self._make_default(sink, "Audio/Sink", SINK_VOLUME)
+            # force: a person just tapped this speaker in Settings. If
+            # the skip-if-recent cache swallowed it, their choice would
+            # appear to do nothing at all.
+            self._make_default(sink, "Audio/Sink", SINK_VOLUME,
+                               force=True)
         except Exception:
             pass
 
@@ -2980,7 +3082,9 @@ class DoseVoice:
             cards = self._alsa_capture_cards()
             report.append("Testing each capture device (speak now!):")
             for card, device, desc in cards:
-                self._max_capture(card)
+                # force: a person is watching this test and a
+                # cached skip would report a stale card state.
+                self._max_capture(card, force=True)
                 rms, note = self._arecord_probe(card, device, seconds)
                 kind = ("MIC" if self._looks_like_mic(desc) else
                         "speaker-in" if self._looks_like_speaker(desc)
@@ -3146,8 +3250,10 @@ class DoseVoice:
         and return a one-line human verdict. Called when a mic test
         reads silence, so we can see exactly what the audio system
         is exposing."""
-        self._kick_audio_services()
-        self._unmute_alsa_inputs()
+        self._kick_audio_services(force=True)
+        # force: this is the diagnostic somebody taps when the mic
+        # is misbehaving. It must reflect the hardware NOW.
+        self._unmute_alsa_inputs(force=True)
         lines = ["DOSE mic report", time.ctime(), ""]
         lines.append("chosen backend: %s (rms %s)"
                      % (self.mic_name, self.mic_rms))
@@ -3785,7 +3891,12 @@ class DoseVoice:
         card = (self._forced_card or (None,))[0]
         if card is not None:
             try:
-                self._max_capture(card)
+                # force, ALWAYS. This method exists to push a NEW
+                # capture level to the hardware; a cached skip here
+                # would mean the level silently never arrives —
+                # which is the exact class of bug _max_capture_by_numid's
+                # docstring already records once before.
+                self._max_capture(card, force=True)
             except Exception:
                 pass
 
@@ -4645,6 +4756,51 @@ class DoseVoice:
             through PipeWire. Ships in alsa-utils."""
             self.mic_card = card      # remember for the mixer readout
             self._max_capture(card)   # unmute + max this card's capture
+
+            def attempt(sd, base, rate, ch):
+                dev = "%s:%d,%d" % (base, card, sd)
+                cap = open_pipe_cmd(
+                    ["arecord", "-D", dev, "-f", "S16_LE",
+                     "-r", str(rate), "-c", str(ch),
+                     "-t", "raw", "-q", "-"],
+                    "mic arecord %s @%d %dch" % (dev, rate, ch),
+                    native_rate=rate, channels=ch)
+                if cap:
+                    # Remember the winner for this card. See below.
+                    try:
+                        self._arecord_win[card] = (sd, base, rate, ch)
+                    except Exception:
+                        pass
+                return cap
+
+            # THE COMBINATION THAT WORKED LAST TIME, FIRST.
+            #
+            # Below is a 5 x 2 x 3 x 2 sweep — sixty combinations, and
+            # every single one spawns an arecord and then waits to see
+            # whether it survived. On this board that is the better part
+            # of half a minute for a card that never opens, and the
+            # cost is paid again on every reopen, having learned nothing
+            # from the previous twenty.
+            #
+            # A microphone's working combination does not change while
+            # it stays plugged into the same port. So it is remembered
+            # per card and tried first; if it stops working, the full
+            # sweep still runs directly underneath and re-learns. The
+            # cache is cleared on hot-plug along with the mixer cache,
+            # because a card number can be reused by different
+            # hardware across a replug.
+            win = getattr(self, "_arecord_win", None)
+            if win is None:
+                win = self._arecord_win = {}
+            known = win.get(card)
+            if known:
+                cap = attempt(*known)
+                if cap:
+                    return cap
+                # It stopped working. Forget it rather than trying it
+                # first forever, and fall through to the full sweep.
+                win.pop(card, None)
+
             # Try the requested SUBDEVICE first, then the card's other
             # capture subdevices — some USB mics put the working capture
             # on subdevice 1, not 0, so plughw:card,0 records silence.
@@ -4654,16 +4810,11 @@ class DoseVoice:
                     subdevs.append(d)
             for sd in subdevs:
                 for base in ("plughw", "hw"):
-                    dev = "%s:%d,%d" % (base, card, sd)
                     for rate in (48000, 44100, 16000):
                         for ch in (1, 2):
-                            cmd = ["arecord", "-D", dev, "-f", "S16_LE",
-                                   "-r", str(rate), "-c", str(ch),
-                                   "-t", "raw", "-q", "-"]
-                            cap = open_pipe_cmd(
-                                cmd, "mic arecord %s @%d %dch"
-                                % (dev, rate, ch),
-                                native_rate=rate, channels=ch)
+                            if known and (sd, base, rate, ch) == known:
+                                continue     # just tried it
+                            cap = attempt(sd, base, rate, ch)
                             if cap:
                                 return cap
             return None
@@ -5062,6 +5213,15 @@ class DoseVoice:
             is_live = bool(live_speaker)
             if not choice:
                 self.mic_trail.append("no capture route opened at all")
+                # NOT ONE route opened. A dead pipewire-pulse is one of
+                # the few things that does this, so drop the
+                # service-kick and mixer caches: the next attempt pays
+                # for a real `systemctl start` and a real unmute sweep
+                # rather than skipping them because a healthy run
+                # skipped them minutes ago. Caching is for the happy
+                # path; this is not it.
+                self._kicked_at = 0.0
+                self._mixer_cache_clear()
                 self._dump_selection(None, False, t_walk)
                 return None
             cap = choice[1]()
@@ -5121,6 +5281,20 @@ class DoseVoice:
                     # card that was chosen by inference last time.
                     self._forced_card = MIC_CARD_PIN
                     self._force_reopen = True
+                    # New hardware, or the same hardware on a different
+                    # card number. Either way the mixer cache is about a
+                    # machine that no longer exists — and a card NUMBER
+                    # can be reused by a different device across a
+                    # replug, so a per-card skip would be actively wrong
+                    # rather than merely stale.
+                    self._mixer_cache_clear()
+                    # Same reason: the remembered arecord combination is
+                    # per card NUMBER, and that number may now belong to
+                    # a different microphone.
+                    try:
+                        self._arecord_win = {}
+                    except Exception:
+                        pass
                     self._note_reopen(
                         "audio device fingerprint changed (hot-plug)")
                 if sig is not None:
@@ -5742,9 +5916,21 @@ class DoseVoice:
             env["XDG_RUNTIME_DIR"] = "/run/user/%d" % os.getuid()
         return env
 
-    def _kick_audio_services(self):
+    def _kick_audio_services(self, force=False):
         """Make sure the user audio services are actually running —
-        a dead pipewire-pulse means silence in BOTH directions."""
+        a dead pipewire-pulse means silence in BOTH directions.
+
+        `systemctl start` on an already-running unit is a no-op that
+        still costs a process spawn and can block for up to its
+        timeout, and this ran on every single capture open. The
+        services do not stop spontaneously; when one does die, capture
+        fails and the failure path passes force=True.
+        """
+        if not force:
+            last = getattr(self, "_kicked_at", 0.0)
+            if last and time.time() - last < SERVICE_KICK_AFTER:
+                return
+        self._kicked_at = time.time()
         try:
             subprocess.run(["systemctl", "--user", "start",
                             "pipewire", "pipewire-pulse",
