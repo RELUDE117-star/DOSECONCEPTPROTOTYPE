@@ -4766,12 +4766,46 @@ class DoseVoice:
             #    it never spikes RAM at the same moment as the fast one.
             #    It is only needed on the minority of turns the fast
             #    model cannot make out, so a short delay costs nothing.
+            #    MEASURED: this was landing ON the first turns. Real
+            #    turns through the station, timed end to end:
+            #
+            #        turn 1  fast 22.09s     turn 3  fast 4.65s
+            #        turn 2  fast 19.60s     turn 4  fast 4.87s
+            #
+            #    Twenty seconds against five, for the same model on the
+            #    same audio. The difference is that turns 1 and 2 ran
+            #    while base.en was being loaded off an SD card and then
+            #    given a warm-up transcribe of its own — half a gigabyte
+            #    of I/O and every core busy, at exactly the moment
+            #    somebody first speaks to a station that has just
+            #    started.
+            #
+            #    So: wait longer, wait for the engine to be IDLE, and
+            #    drop the warm-up transcribe. Constructing the model is
+            #    what makes the first escalation quick; running an
+            #    inference on a second of silence to prove it was pure
+            #    cost. If the station is busy the whole time, the model
+            #    simply loads on first need, which is what it did
+            #    before this warm-up existed.
             try:
-                time.sleep(float(os.environ.get(
-                    "DOSE_ESCALATION_WARM_DELAY", "25")))
-                if not self._stop.is_set():
-                    self._load_whisper()
-                    self._whisper_transcribe(silence)
+                deadline = time.time() + float(os.environ.get(
+                    "DOSE_ESCALATION_WARM_DELAY", "90"))
+                while time.time() < deadline and not self._stop.is_set():
+                    time.sleep(2.0)
+                quiet_since = 0.0
+                while not self._stop.is_set():
+                    idle = (getattr(self, "state", "idle") == "idle"
+                            and time.time() - getattr(
+                                self, "_last_turn_end", 0) > 5.0)
+                    if idle:
+                        if not quiet_since:
+                            quiet_since = time.time()
+                        elif time.time() - quiet_since > 5.0:
+                            self._load_whisper()
+                            break
+                    else:
+                        quiet_since = 0.0
+                    time.sleep(2.0)
             except Exception:
                 pass
         threading.Thread(target=work, daemon=True,
@@ -8190,8 +8224,27 @@ class DoseVoice:
                 "secs": getattr(self, "_turn_secs", None)
                 if getattr(self, "_turn_secs", None) is not None
                 else round(blocks * BLOCK_SIZE / float(SAMPLE_RATE), 1),
+                # WHERE THE FAST PASS SPENT ITS TIME. These were added
+                # to self._turn, which turn_report() renders on screen —
+                # and NOT to the row that is written to turns.jsonl, so
+                # the one place anyone actually reads afterwards did not
+                # have them. A diagnostic in the wrong dictionary is a
+                # diagnostic that does not exist.
+                "fw": {k: round(getattr(self, "_t_fw_" + k, 0.0), 2)
+                       for k in ("wav", "prompt", "call", "decode",
+                                 "total", "audio")},
+                "stt_note": getattr(self, "_stt_note", ""),
+                "spec_hit": getattr(self, "_spec_hits", 0),
+                "spec_miss": getattr(self, "_spec_misses", 0),
+                "warmed": bool(getattr(self, "_warmed", False)),
+                "esc_loaded": getattr(self, "_whisper", None) is not None,
             })
 
+            # Stamp when this turn ended, so background work (the
+            # escalation model's load, above all) can tell the
+            # difference between "idle" and "idle for a moment between
+            # two sentences".
+            self._last_turn_end = time.time()
             # she has stopped speaking; clear whatever the microphone
             # picked up of her own voice before listening again
             self._drain(rec)
