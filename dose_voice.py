@@ -548,7 +548,31 @@ CHANNEL_RECHECK = int(os.environ.get("DOSE_CHANNEL_RECHECK", "47"))
 # The default is about half a second, and a decode on this board takes
 # four — so half a second of a busy machine costs the microphone. See
 # the arecord command in open_arecord for the measurement.
+#
+# IT IS A REQUEST, NOT A REQUIREMENT, AND THE DIFFERENCE COST A DEPLOY.
+# Asking for five seconds first produced this, which I read as success:
+#
+#   reopens: 168 -> 4    overruns: 0
+#
+# and then, in the next two fields on the same line, the truth:
+#
+#   rec=0   blocks/sec 0.0
+#
+# No recorder at all. A USB card will not necessarily install a
+# 240,000-frame capture buffer, and arecord does not negotiate — it
+# fails to open. Every arecord route failed, the walk fell through to
+# the endpoints that deliver nothing, and the reopen counter stopped
+# climbing because there was no longer anything to reopen. A zero can
+# mean "fixed" or "gone", and I nearly reported the wrong one.
+#
+# So: the ladder below is tried largest first and the FIRST size the
+# card accepts is used; if it refuses all of them the recorder opens
+# with ALSA's own default, exactly as it did before any of this. A
+# station that hears with a small buffer beats one that does not hear.
 CAPTURE_BUFFER_US = int(os.environ.get("DOSE_CAPTURE_BUFFER_US", "5000000"))
+# Descending, so the best case is tried first and the last entry is
+# "ask for nothing and take whatever the driver gives".
+CAPTURE_BUFFER_LADDER = [CAPTURE_BUFFER_US, 2000000, 1000000, 500000, 0]
 
 # How long a card's mixer state is trusted before it is forced again.
 #
@@ -6017,13 +6041,49 @@ class DoseVoice:
                 # latency while anything is draining it — a buffer only
                 # delays you if you stop reading, which is exactly the
                 # case it exists to survive.
-                cap = open_pipe_cmd(
-                    ["arecord", "-D", dev, "-f", "S16_LE",
-                     "-r", str(rate), "-c", str(ch),
-                     "--buffer-time", str(CAPTURE_BUFFER_US),
-                     "-t", "raw", "-"],
-                    "mic arecord %s @%d %dch" % (dev, rate, ch),
-                    native_rate=rate, channels=ch)
+                # Largest buffer the card will actually install, and
+                # ALSA's own default if it will install none of them.
+                # A refused --buffer-time is not a warning; arecord
+                # exits, which reads from the outside as "the
+                # microphone does not open".
+                # WHAT THIS CARD WILL ACCEPT IS A PROPERTY OF THE CARD,
+                # so it is learned once and then reused. Laddering
+                # inside every combination would turn a twelve-spawn
+                # sweep into sixty, at 0.3 s each — a cure worse than
+                # the disease, on a path whose whole history is being
+                # too slow.
+                bufs = getattr(self, "_cap_buf_us", None)
+                if bufs is None:
+                    bufs = self._cap_buf_us = {}
+                if card in bufs:
+                    ladder = [bufs[card]]
+                else:
+                    ladder = list(CAPTURE_BUFFER_LADDER)
+                cap = None
+                for us in ladder:
+                    argv = ["arecord", "-D", dev, "-f", "S16_LE",
+                            "-r", str(rate), "-c", str(ch)]
+                    if us:
+                        argv += ["--buffer-time", str(us)]
+                    argv += ["-t", "raw", "-"]
+                    cap = open_pipe_cmd(
+                        argv,
+                        "mic arecord %s @%d %dch%s" % (
+                            dev, rate, ch,
+                            (" buf%.1fs" % (us / 1e6)) if us
+                            else " default buf"),
+                        native_rate=rate, channels=ch)
+                    if cap:
+                        bufs[card] = us
+                        break
+                    if deadline is not None and time.time() >= deadline:
+                        break
+                if cap is None and card in bufs and len(ladder) == 1:
+                    # The remembered size stopped working (a replug, a
+                    # different card behind the same number). Forget it
+                    # so the next attempt ladders again rather than
+                    # failing the same way for the rest of the process.
+                    bufs.pop(card, None)
                 if cap:
                     # OPENING IS NOT WORKING, AND THE CACHE COULD NOT
                     # TELL THE DIFFERENCE.

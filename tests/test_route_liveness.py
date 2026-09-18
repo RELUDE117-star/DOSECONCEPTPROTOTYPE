@@ -524,7 +524,8 @@ print("\nThe capture buffer survives a decode")
 check("arecord is given an explicit buffer",
       "--buffer-time" in _code)
 check("it is a named constant, not a number in a list",
-      "str(CAPTURE_BUFFER_US)" in _code)
+      "CAPTURE_BUFFER_LADDER" in _code and "str(us)" in _code
+      and "--buffer-time\", str(5000000)" not in _code)
 check("it is an environment override",
       "DOSE_CAPTURE_BUFFER_US" in _src)
 check("it is longer than a decode on this board (>= 4s)",
@@ -532,6 +533,19 @@ check("it is longer than a decode on this board (>= 4s)",
       dose_voice.CAPTURE_BUFFER_US)
 check("...and not absurd (<= 20s)",
       dose_voice.CAPTURE_BUFFER_US <= 20_000_000)
+# AND THE REFUSAL PATH, which is the half I shipped without.
+# Asking for five seconds on this card meant arecord did not open at
+# all: rec=0, blocks/sec 0.0, and a reopen counter that stopped
+# climbing because there was nothing left to reopen. The preferred
+# size is a request; the station must still hear when it is declined.
+check("a card that refuses the preferred size still opens",
+      dose_voice.CAPTURE_BUFFER_LADDER[-1] == 0,
+      dose_voice.CAPTURE_BUFFER_LADDER)
+check("the ladder descends from the preferred size",
+      dose_voice.CAPTURE_BUFFER_LADDER[0] == dose_voice.CAPTURE_BUFFER_US
+      and dose_voice.CAPTURE_BUFFER_LADDER ==
+      sorted(dose_voice.CAPTURE_BUFFER_LADDER, reverse=True),
+      dose_voice.CAPTURE_BUFFER_LADDER)
 check("-q is gone, so the recorder can still say why it stopped",
       '"-q"' not in _code.split("def open_arecord")[1][:1500])
 

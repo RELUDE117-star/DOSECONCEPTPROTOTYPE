@@ -205,6 +205,73 @@ seq = [downmix([(0, 0)] * 900 + [(0, 6000)] * 20, st4),
 check("a speaking turn on one channel never switches mid-turn",
       len(set(seq)) == 1, seq)
 
+print("\n── the buffer is a REQUEST, and a refusal is not fatal ──────")
+# A decode on this board takes about four seconds and ALSA's default
+# capture buffer is about half of one, so a bigger buffer is right. I
+# asked for five seconds, deployed it, and read this as a fix:
+#
+#     reopens: 168 -> 4     overruns: 0
+#
+# The next two fields on the same line said what had really happened:
+#
+#     rec=0     blocks/sec 0.0
+#
+# No recorder at all. A USB card need not install a 240,000-frame
+# capture buffer, and arecord does not negotiate — it exits. Every
+# arecord route failed to open, the walk fell through to endpoints that
+# deliver nothing, and the reopen counter stopped climbing because
+# there was nothing left to reopen. A zero can mean "fixed" or "gone".
+
+check("there is a ladder, not a single demand",
+      isinstance(dose_voice.CAPTURE_BUFFER_LADDER, list)
+      and len(dose_voice.CAPTURE_BUFFER_LADDER) >= 3)
+check("it is tried largest first",
+      dose_voice.CAPTURE_BUFFER_LADDER ==
+      sorted(dose_voice.CAPTURE_BUFFER_LADDER, reverse=True),
+      dose_voice.CAPTURE_BUFFER_LADDER)
+check("the preferred size leads it",
+      dose_voice.CAPTURE_BUFFER_LADDER[0] == dose_voice.CAPTURE_BUFFER_US)
+check("it ENDS in asking for nothing, so ALSA's own default is always "
+      "reachable",
+      dose_voice.CAPTURE_BUFFER_LADDER[-1] == 0,
+      "without this rung a fussy card is a deaf station")
+check("every rung is at least the half-second we started with",
+      all(us == 0 or us >= 500000
+          for us in dose_voice.CAPTURE_BUFFER_LADDER))
+check("a rung of 0 passes no --buffer-time at all",
+      "if us:" in CODE and 'argv += ["--buffer-time", str(us)]' in CODE)
+check("the accepted size is remembered per card, not re-laddered per "
+      "combination",
+      "bufs[card] = us" in CODE and "if card in bufs:" in CODE,
+      "laddering inside the sweep turns 12 spawns into 60")
+check("a remembered size that stops working is forgotten",
+      "bufs.pop(card, None)" in CODE)
+check("the sweep deadline is still honoured inside the ladder",
+      "if deadline is not None and time.time() >= deadline:" in CODE)
+check("the label says which buffer was accepted, so the log can be "
+      "read without guessing", "buf%.1fs" in CODE and "default buf" in CODE)
+
+
+RUNGS = [5000000, 2000000, 1000000, 500000, 0]
+
+
+def first_accepted(rungs, accepts):
+    """What the loop settles on, given a card that accepts `accepts`."""
+    for us in rungs:
+        if us in accepts:
+            return us
+    return None
+
+
+check("a card that takes five seconds gets five seconds",
+      first_accepted(RUNGS, {5000000, 2000000, 1000000, 500000, 0})
+      == 5000000)
+check("a card that caps at one second gets one second, not silence",
+      first_accepted(RUNGS, {1000000, 500000, 0}) == 1000000)
+check("a card that refuses every explicit size still opens",
+      first_accepted(RUNGS, {0}) == 0,
+      "this is the case that made the station deaf")
+
 print("\n── the winner cache is fed by ACCEPTANCE, not by opening ────")
 # The channel fix above was correct and was being bypassed. open_arecord
 # remembers the combination that worked for a card and tries it first on
