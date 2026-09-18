@@ -819,25 +819,35 @@ BARGE_FRAMES = int(os.environ.get("DOSE_BARGE_FRAMES", "4"))  # ~128 ms
 # holding every core while the UI, the camera and the model downloads
 # all wanted time. Taking the whole machine for a burst is only free
 # if nothing else needs it, and on this board something always does.
-# CORES MINUS ONE, DELIBERATELY, AND THE MEASUREMENT SAYS SO TOO.
+# ALL THE CORES. I chose cores-minus-one, and then measured something
+# that overruled it.
+#
+# The caution was real: this device's history is CPU starvation turning
+# into dropped audio, so leaving a core for the capture thread, the UI
+# and the camera looked obviously right. Then a ten-minute soak pinned
+# all four cores with busy loops while the station ran, and the capture
+# did not care — PCM RUNNING at every sample, one recorder throughout,
+# 43-51 blocks/sec against a nominal 46.9, zero reopens, zero restarts,
+# 76.9'C peak with throttled 0x0.
+#
+# The recorder is a separate process writing into a pipe the kernel
+# buffers; our thread only has to drain it. Saturation does not break
+# that. The measurement beats the caution, so the last core goes to the
+# recogniser.
+#
+# tiny.en on this board, same recording, three passes each, median:
+#     1 thread 4.87s   2 threads 2.84s   3 threads 2.27s   4 threads 2.12s
+#
+# Set DOSE_STT_THREADS to go back to cores-1 on a board that needs it.
 #
 # tiny.en on this board, same recording, three passes each, median:
 #
 #     1 thread  4.87 s     3 threads  2.27 s
 #     2 threads 2.84 s     4 threads  2.12 s
 #
-# Four is faster by 0.15 s — seven per cent — and it takes the last
-# core. This device's entire history is CPU starvation turning into
-# dropped audio: Piper's ONNX session at 392% of a core produced XRUNs
-# and misrecognition, and a recogniser that owns all four cores for two
-# seconds every turn is the same shape of mistake for a fifteenth of a
-# second. The capture thread, the UI and the camera need somewhere to
-# run WHILE the recogniser runs.
-#
-# Set DOSE_STT_THREADS on a board with cores to spare.
 STT_THREADS = max(1, int(os.environ.get("DOSE_STT_THREADS",
-                                        max(1, CPU_CORES - 1))
-                         or max(1, CPU_CORES - 1)))
+                                        max(1, CPU_CORES))
+                         or max(1, CPU_CORES)))
 
 for _var in ("OMP_NUM_THREADS", "ORT_NUM_THREADS",
              "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",

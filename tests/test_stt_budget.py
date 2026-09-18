@@ -249,6 +249,21 @@ check("...and the block-count estimate is only a fallback",
       CODE.count("else round(blocks * BLOCK_SIZE") >= 2)
 check("it is reset per turn", "self._turn_secs = None" in CODE)
 
+print("\n── the recogniser gets the whole machine ───────────────────")
+# I chose cores-minus-one to protect the capture, then pinned all four
+# cores with busy loops for ten minutes while the station ran: PCM
+# RUNNING at every sample, one recorder throughout, 43-51 blocks/sec
+# against a nominal 46.9, zero reopens, 76.9'C with throttled 0x0. The
+# recorder is a separate process writing into a kernel-buffered pipe;
+# our thread only has to drain it. The measurement beat the caution.
+check("the recogniser is given every core by default",
+      dose_voice.STT_THREADS == dose_voice.CPU_CORES,
+      (dose_voice.STT_THREADS, dose_voice.CPU_CORES))
+check("...and it is still an environment override for boards that "
+      "cannot spare them", "DOSE_STT_THREADS" in SRC)
+check("the soak that justifies it is written down next to it",
+      "43-51 blocks/sec" in SRC)
+
 print("\n── the warm-up actually warms something ────────────────────")
 # It transcribed one second of ZEROS, with vad_filter on, which is how
 # the station runs it. The VAD removed the silence, there was nothing
