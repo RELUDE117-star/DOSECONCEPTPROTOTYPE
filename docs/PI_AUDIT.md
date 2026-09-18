@@ -1129,3 +1129,148 @@ session's device logs or from the container. In particular:
 - Confirm the escalation skip rate on real turns. If it skips often, the
   fast path is too slow and the budget is treating a symptom.
 - Everything in SESSION 4 § Still open remains true.
+
+---
+
+# SESSION 6 — the root cause, at last (2026-09-18, device live)
+
+Ryan's instruction: *"continue fixing all errors and dont come back
+until the pi passes all tests for latency, reliability of tts, safety
+for hardware and everything else weve been testing with at least an a
+plus score."*
+
+## What it actually was
+
+Not the model. Not the USB stack. Not the recorder. Not the CPU. Not
+the card pin, and not a swap between cards 4 and 5 — `arecord -l`
+confirmed card 5 was still the AIRHUG throughout.
+
+**The station asked ALSA to average its microphone away.**
+
+| command, app stopped, 12 s each | peak | non-zero |
+|---|---|---|
+| `arecord -D plughw:5,0 -r 48000 -c 1` | 103 | 740 / 570,000 |
+| `arecord -D plughw:5,0 -r 48000 -c 2` | **294** | **3,308 / 1,152,000** |
+
+The AIRHUG's only native mode is 48 kHz, S16_LE, **two channels**.
+`-c 1` does not request "the microphone in mono"; it requests the plug
+layer's **average** of the two. This capsule's quiet-room floor is one
+or two LSB, and (1 + 0) / 2 rounds to zero, so the average does not
+attenuate the floor — it annihilates it, and halves everything else.
+
+`open_arecord()`'s sweep tried channels in the order `(1, 2)`. Mono
+opened. Nothing after that had a chance.
+
+### How it was finally caught
+
+The silence watchdog written the night before, while the Pi was
+unplugged, armed the raw tap by itself the first time it fired:
+
+```
+engine.wav  ch=1  48000 Hz  96256 frames  PEAK=0  non-zero=0/96256
+```
+
+Ninety-six thousand consecutive samples without one non-zero value,
+from hardware that read peak 50 seconds later by hand. Every instrument
+had been honest the whole time — PCM RUNNING, `hw_ptr` +145,677
+frames/3 s, `wchar` +96,000 B/s — and every byte was a correctly
+computed zero.
+
+### The fix
+
+- `_native_channels()` reads `/proc/asound/card<N>/stream0` and that
+  count is tried first. Unknown defaults to **2**, the safe answer
+  rather than the neutral one.
+- The downmix picks the louder channel **by peak**, from slowly
+  decaying running maxima. It had used `audioop.rms()` — the third
+  place in this file with the peak/RMS mistake — and in a quiet room
+  both channels measure RMS 0, so the tie always resolved to left.
+- `tests/test_capture_channels.py` (24 checks).
+
+## The deploy that kept undoing itself
+
+```
+install dose_voice.py as e3e52dc, verify byte for byte  -> match
+start the service, wait for the heartbeat               -> running
+read the same path thirty seconds later                 -> c06b6681
+```
+
+`DOSE.sh` pulls four application files from raw.githubusercontent on
+**every launch** and had never heard of `DOSE_FREEZE`. The in-app
+updater was innocent; it had already declined. Anything not on the
+branch had a lifetime of one restart — which accounts for most of a
+week of "the update didn't go through".
+
+Third time for the same lesson, in a third file: **a fix the program
+undoes at startup is not a fix.** `tests/test_freeze.py` (25 checks)
+asserts the guard BRACKETS the downloads rather than merely mentioning
+the variable.
+
+## Quiet and dead look identical over a short window
+
+The silence watchdog's first two thresholds were wrong and the device
+said so both times. In an empty room the heartbeat sits at `peak 0` for
+tens of seconds with a capture that measures peak 20,347 minutes later,
+because the engine sees one 21 ms block at a time, on one channel, and
+only about **1.2 % of blocks carry a non-zero sample** (`blocks with
+signal: 38 of 3100`).
+
+No threshold separates them. **Time does.** The window is ten minutes:
+a room somebody lives in produces something inside that, and the fault
+is permanent and total.
+
+## The station tests itself now
+
+`tools/acceptance_test.py` — it says a phrase through its own speaker,
+records itself through its own microphone, transcribes with the app's
+own settings and vocabulary bias, and runs `dose_nlu` on the result.
+
+Verified run, after the channel fix:
+
+| | result | limit |
+|---|---|---|
+| understood | **4 / 4 (100 %)** | 100 % |
+| word error (worst) | **0.0 %** | informational |
+| STT latency (worst) | **2.28 s** | 6 s |
+| TTS render (worst) | **0.64 s** | 2 s |
+| capture peak (min) | **15,000** | 300 |
+| temperature | **54.5 °C** | 75 °C |
+| throttling | **0x0** | 0x0 |
+
+It grades **understanding**, not word error, because that is the
+cabinet's job. The first version graded WER, scored 20 % on "how many
+doses are left" → "How many doses are we left?", and called a working
+station a failure.
+
+A loopback flatters the recogniser. A pass means the path works and is
+fast, not that it will understand everyone.
+
+## Measurement traps, this session
+
+- **`pgrep -f "[a]record"` matched the ssh command's own text**, twice,
+  because the script it was inside contained the literal word `arecord`
+  further down. The remote shell killed itself mid-block, silently.
+  Match `/proc/<pid>/comm` — a shell's comm is `bash`, never `arecord`.
+- **A bridge file transfer reported success and left the old file in
+  place** (392,238 bytes, the previous day's build). Unique destination
+  names and hashes on both sides from now on.
+- **`cd /home/rjarv1/...` must be inside `sudo -u rjarv1`** — already
+  written down, done wrong anyway.
+- **`sudo -n tr … < /proc/PID/environ`** fails: the redirect is the
+  shell's, not sudo's.
+
+## Still open
+
+- **GitHub is behind the device.** `git` on the Mac is the Xcode
+  Command Line Tools shim and now refuses to run at all ("You have not
+  agreed to the Xcode license agreements"), so nothing has been pushed
+  since `9b11548`. The device is protected by `DOSE_FREEZE=1` in its
+  unit, which is now honoured by both pullers — but **one command on
+  the Mac** (`sudo xcodebuild -license`) restores pushing, and until
+  then the branch is not the source of truth.
+- Local STT is 2.2 s per turn on this board. Under a second is not
+  reachable with `tiny.en` on a Pi 4; a free-tier cloud key is the only
+  path to it, and Ryan has asked to stay local.
+- The startup sweep still probes `plughw:5,2` and friends for about
+  three seconds when the device is briefly busy after a restart.
+  Harmless, self-correcting, worth tidying.

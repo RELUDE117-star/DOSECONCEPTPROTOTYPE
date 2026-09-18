@@ -615,6 +615,141 @@ with no boundary at all is left alone rather than chopped mid-clause.
 `tests/test_tts_first_sound.py` (33 checks), including a corpus check
 that no word is ever lost, reordered or invented.
 
+## ROOT CAUSE, 2026-09-18: ALSA was averaging the microphone away
+
+Measured on the device, app stopped, twelve seconds each, same card,
+same rate, same quiet room:
+
+| command | peak | non-zero |
+|---|---|---|
+| `arecord -D plughw:5,0 -r 48000 -c 1` | 103 | 740 / 570,000 |
+| `arecord -D plughw:5,0 -r 48000 -c 2` | **294** | **3,308 / 1,152,000** |
+
+And the engine's own raw tap, armed automatically by the silence
+watchdog while the app ran that first command:
+
+```
+engine.wav  ch=1 48000 Hz  96256 frames  PEAK=0  non-zero=0/96256
+```
+
+**The AIRHUG's only native mode is 48 kHz S16_LE TWO channels.** Asking
+for one channel does not hand over the microphone — it asks ALSA's plug
+layer to AVERAGE the two. This capsule's quiet-room noise floor is one
+or two LSB, and (1 + 0) / 2 rounds to zero. Averaging does not
+attenuate a floor that small, it **annihilates** it, and halves
+everything else including speech.
+
+Every instrument was honest the whole time. The PCM was RUNNING,
+`hw_ptr` advanced 145,677 frames in three seconds, arecord's `wchar`
+climbed at exactly 96,000 B/s, and every byte it wrote was a correctly
+computed zero. `open_arecord()`'s sweep simply tried `(1, 2)` — mono
+first — and mono opened.
+
+**Rules that follow:**
+- Capture at the card's OWN channel count. `_native_channels()` reads
+  `/proc/asound/card<N>/stream0`; unknown defaults to **2**, which is
+  the safe answer, not the neutral one (two channels from a mono device
+  duplicates the channel and costs nothing; one channel from a stereo
+  device is this bug).
+- The app downmixes by taking the **louder channel by PEAK**, with
+  slowly decaying running maxima so the choice is made once. It used
+  `audioop.rms()` — the third place in this file with the peak/RMS
+  mistake — and in a quiet room both channels measure RMS 0, so the tie
+  always resolved to left.
+- `tests/test_capture_channels.py` fails if any of this regresses.
+
+## DOSE.sh was undoing every deploy, and DOSE_FREEZE did not stop it
+
+```
+install dose_voice.py as e3e52dc, verify byte for byte  -> match
+start the service, wait for the heartbeat               -> running
+read the same path thirty seconds later                 -> c06b6681
+```
+
+`c06b6681` is the branch build. **DOSE.sh pulls dose_app.py,
+dose_voice.py, dose_nlu.py and DOSE.sh from raw.githubusercontent on
+EVERY launch** and had never heard of `DOSE_FREEZE`. The in-app updater
+was innocent — it had already declined, exactly as the switch told it
+to — and an hour went into reading it.
+
+Anything not on the branch had a lifetime of **one restart**. That is
+most of a week of "the update didn't go through".
+
+Fixed: the whole update block in DOSE.sh is inside a `DOSE_FREEZE`
+guard, accepting exactly the words dose_app.py accepts.
+`tests/test_freeze.py` asserts both pullers obey it and that the guard
+BRACKETS the downloads rather than merely mentioning the variable.
+
+**Same lesson as the duplicate autostart entry, third time: A FIX THE
+PROGRAM UNDOES AT STARTUP IS NOT A FIX.**
+
+## The silence watchdog: quiet and dead look identical over a short window
+
+Its first two thresholds were wrong, and the device said so both times.
+In an empty room the heartbeat sits at `peak 0` for tens of seconds
+with a capture the acceptance run then measures at peak 20,347 —
+because the engine sees one 21 ms block at a time, on one channel, and
+**only about 1.2% of blocks carry a non-zero sample** (`blocks with
+signal: 38 of 3100`, measured).
+
+No threshold separates quiet from dead. **Time does.** A room somebody
+lives in produces something inside ten minutes; the fault is permanent
+and total. `SILENT_CAPTURE_AFTER` is 600 s, the bar is peak strictly
+above zero, and the heartbeat reports signal-carrying blocks against
+the total so the next person can tell them apart by reading one file.
+
+## The station tests itself now
+
+`tools/acceptance_test.py` — the station says a phrase through its own
+speaker, records itself through its own microphone, transcribes it with
+the app's own settings and vocabulary bias, and runs `dose_nlu` on the
+result. Stop the service first; it needs the capture device.
+
+```
+sudo -u rjarv1 python3 tools/acceptance_test.py --json /tmp/acc.json
+```
+
+It grades **understanding**, not word error: the cabinet's job is to
+work out what was asked. Word error is still printed because it says
+where a failure is — deletions mean capture or the VAD, insertions a
+hot capture, substitutions the model.
+
+Verified run, 2026-09-18, after the channel fix:
+
+| | result | limit |
+|---|---|---|
+| understood | **4/4 (100%)** | 100% |
+| word error (worst) | **0.0%** | informational |
+| STT latency (worst) | **2.28 s** | 6 s |
+| TTS render (worst) | **0.64 s** | 2 s |
+| capture peak (min) | **15,000** | 300 |
+| temperature | **54.5 °C** | 75 °C |
+| throttling | **0x0** | 0x0 |
+
+**A loopback flatters the recogniser** — a synthesised voice through a
+speaker is cleaner than a person at two metres. A pass means "the path
+works and is fast", never "it will understand everyone".
+
+## Three more measurement traps, from this session
+
+- **`pgrep -f "[a]record"` still matched the ssh command's own text.**
+  The bracket stops pgrep matching its own pattern; it does not stop it
+  matching a script that contains the literal word `arecord` further
+  down. The remote shell killed itself mid-block, silently, twice.
+  **Match `/proc/<pid>/comm`, not a command line** — a shell's comm is
+  `bash`, never `arecord`.
+- **A file transfer reported success and left the old file in place.**
+  Overwriting an existing path across the desktop bridge kept the
+  previous content (392,238 bytes, the build from the day before).
+  Every transfer now uses a uniquely named destination and is
+  hash-checked on both sides.
+- **`cd /home/rjarv1/...` must be INSIDE `sudo -u rjarv1`.** The home
+  is mode 0700, so a `cd` outside the sudo lands in `/home/claudeagent`
+  and every relative path after it is wrong. This was already written
+  down, and it happened anyway.
+- **`sudo -n tr ... < /proc/PID/environ` fails**: the redirect is done
+  by the *shell*, not by sudo. Use `sudo -n cat ... | tr`.
+
 ## Known limitations / TODO
 - `arecord -D default` fails with `Host is down` — the PipeWire ALSA plugin is
   not serving this user. Not blocking (the pinned `plughw:5,0` route works),
