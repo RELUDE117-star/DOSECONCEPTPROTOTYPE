@@ -419,6 +419,35 @@ fi
 #
 # Now: fetch everything, VALIDATE it, back up what is there, and only
 # then replace. A broken download changes nothing.
+# ── DOSE_FREEZE STOPS THIS TOO ───────────────────────────────────────
+# It did not, and that cost most of a day.
+#
+# dose_app.py has honoured DOSE_FREEZE since the auto-update brakes
+# went in: "whatever is installed stays installed". The launcher, five
+# hundred lines away, pulls the same four files from raw.github on
+# EVERY launch and had never heard of the switch. So a build installed
+# by hand, verified byte for byte, and confirmed running, was silently
+# replaced by the branch version at the next restart — which is every
+# time anything reopens the app.
+#
+# Observed on the device: dose_voice.py installed as e3e52dc and
+# verified, the service started, and thirty seconds later the same path
+# read c06b6681, the branch build, with the fix absent. Twice in a row.
+# I blamed the in-app updater, which was innocent and had already
+# declined to do anything.
+#
+# This is the same lesson as the duplicate autostart entry, in a
+# different file: A FIX THE PROGRAM UNDOES AT STARTUP IS NOT A FIX. Two
+# places may pull code; both must obey the same brake.
+case "$(printf '%s' "${DOSE_FREEZE:-}" | tr 'A-Z' 'a-z')" in
+    1|true|yes|on)
+        echo "  Frozen (DOSE_FREEZE) — keeping the installed build."
+        UPDATE_OK=0
+        ;;
+esac
+if [ "${UPDATE_OK:-1}" = "0" ]; then
+    :
+else
 echo "  Checking for updates..."
 STAGE=$(mktemp -d)
 UPDATE_OK=1
@@ -468,6 +497,7 @@ if [ "$UPDATE_OK" = "1" ]; then
     fi
 fi
 rm -rf "$STAGE"
+fi   # end of the DOSE_FREEZE guard around the whole update block
 echo ""
 
 # ── Create desktop shortcut ──
