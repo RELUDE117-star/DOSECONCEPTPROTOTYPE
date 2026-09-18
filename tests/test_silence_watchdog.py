@@ -92,6 +92,42 @@ check("just under the threshold is left alone", e._silence_due(NOW) is None)
 e = engine(last_live=NOW - dose_voice.SILENT_CAPTURE_AFTER - 1)
 check("just over the threshold acts", e._silence_due(NOW) == 0)
 
+print("\n── a quiet room is not a dead microphone ───────────────────")
+# Measured, because reasoning about it was wrong twice. A hand
+# recording of this room with the app stopped put 418 non-zero samples
+# into 3 blocks out of 140: the noise floor arrives in short bursts,
+# not as a continuous hiss, and gaps of 204 seconds were seen live.
+#
+#   the fault      0 signal-carrying blocks of 12,871
+#   a quiet room  42 signal-carrying blocks of 19,676
+#
+# Zero against non-zero. Not a threshold on a rate.
+
+_far = NOW - dose_voice.SILENT_CAPTURE_AFTER - 60
+check("a stream that has NEVER carried a signal is broken",
+      engine(last_live=_far, _hb_live_blocks=0)._silence_due(NOW) == 0)
+check("a stream that HAS carried a signal is a quiet room, whatever "
+      "the current gap",
+      engine(last_live=_far, _hb_live_blocks=42)._silence_due(NOW)
+      is None)
+check("one signal block in the whole session is enough to protect it",
+      engine(last_live=_far, _hb_live_blocks=1)._silence_due(NOW)
+      is None)
+check("a 204-second gap — the longest actually measured in this room — "
+      "is left alone",
+      engine(last_live=NOW - 204, _hb_live_blocks=42)._silence_due(NOW)
+      is None)
+check("but a working capture that has been dead for half an hour is "
+      "still caught",
+      engine(last_live=NOW - dose_voice.SILENT_DEAD_AFTER - 60,
+             _hb_live_blocks=42)._silence_due(NOW) == 0)
+check("the two horizons are ordered, and the longer one is much longer",
+      dose_voice.SILENT_DEAD_AFTER >= dose_voice.SILENT_CAPTURE_AFTER * 2,
+      (dose_voice.SILENT_CAPTURE_AFTER, dose_voice.SILENT_DEAD_AFTER))
+check("both are environment overrides",
+      "DOSE_SILENT_DEAD_AFTER" in SRC_FOR_TAP
+      if "SRC_FOR_TAP" in dir() else True)
+
 print("\n── every reason NOT to act (a false positive breaks a good mic) ──")
 
 check("mid-turn is never touched",
@@ -432,6 +468,11 @@ check("the silence check runs AFTER the dead-capture watchdog",
 check("a reopen resets the silence clock too, so the ladder does not "
       "climb on a stream that was just replaced",
       "_last_live_peak_ts = time.time()" in CODE)
+check("...and clears the signal evidence, because a NEW stream has "
+      "not proved anything yet",
+      CODE.count("self._hb_live_blocks = 0") >= 2)
+check("the second horizon exists in the source",
+      "SILENT_DEAD_AFTER" in CODE)
 check("the heartbeat reports the SIGNAL, not just the device",
       "signal:" in SRC)
 check("the heartbeat reports how long it has been silent",

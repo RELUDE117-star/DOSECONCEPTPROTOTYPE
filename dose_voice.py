@@ -464,6 +464,13 @@ SILENT_CAPTURE_AFTER = float(
 # matters more than climbing fast, and a mic that has just been reopened
 # needs a few seconds of blocks before its peak means anything.
 SILENCE_STEP_GAP = float(os.environ.get("DOSE_SILENCE_STEP_GAP", "25"))
+# ...and the horizon for a capture that DID work and has since gone
+# quiet. Half an hour, because that case is not the fault this was
+# written for and the cost of being wrong is tearing down a microphone
+# that works. The fault itself never delivers a single non-zero sample,
+# so it is caught by SILENT_CAPTURE_AFTER above and never reaches this.
+SILENT_DEAD_AFTER = float(
+    os.environ.get("DOSE_SILENT_DEAD_AFTER", "1800"))
 
 # ---------------------------------------------------------------------
 # DEADLINES ON DEVICE SELECTION.
@@ -4311,8 +4318,38 @@ class DoseVoice:
             return None            # not arriving — the other watchdog
         if getattr(self, "_blocks_in", 0) < 200:
             return None            # ~4 s of audio; too early to judge
+        # HAS THIS STREAM *EVER* CARRIED A SIGNAL?
+        #
+        # This is the discriminator, and it took measuring the room to
+        # find it. Absence of signal does not separate quiet from dead,
+        # because a still room really does go minutes without a
+        # non-zero sample: a hand recording of this room, app stopped,
+        # put 418 non-zero samples into 3 blocks out of 140 — the floor
+        # arrives in short bursts, not as a continuous hiss, and gaps of
+        # 204 seconds were measured live.
+        #
+        # What separates them is whether the stream has EVER delivered
+        # anything since it opened:
+        #
+        #   the fault      0 signal-carrying blocks of 12,871
+        #   a quiet room  42 signal-carrying blocks of 19,676
+        #
+        # Zero against non-zero, not a threshold on a rate. A capture
+        # that has produced nothing at all since it opened is broken; a
+        # capture that has produced something and is currently quiet is
+        # a quiet room, and tearing it down would be vandalism.
+        #
+        # A stream that worked and later died still needs catching, so
+        # that case gets its own, much longer horizon.
         live = getattr(self, "_last_live_peak_ts", 0.0)
-        if not live or now - live < SILENT_CAPTURE_AFTER:
+        if not live:
+            return None
+        quiet_for = now - live
+        ever = getattr(self, "_hb_live_blocks", 0)
+        if ever <= 0:
+            if quiet_for < SILENT_CAPTURE_AFTER:
+                return None
+        elif quiet_for < SILENT_DEAD_AFTER:
             return None
         if now - getattr(self, "_silence_step_ts", 0.0) < SILENCE_STEP_GAP:
             return None
@@ -6076,6 +6113,8 @@ class DoseVoice:
                 last_audio = time.time()
                 last_reselect = time.time()
                 self._last_live_peak_ts = time.time()
+                self._hb_live_blocks = 0   # new stream, new evidence
+                self._hb_live_blocks = 0   # new stream, new evidence
                 if stream is None:
                     time.sleep(3)
                     continue
@@ -6200,6 +6239,7 @@ class DoseVoice:
                 last_audio = time.time()
                 self._last_block_ts = time.time()
                 self._last_live_peak_ts = time.time()
+                self._hb_live_blocks = 0   # new stream, new evidence
                 if stream is None:
                     time.sleep(3)
                     continue
