@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""The Mac is the recogniser. The Pi is the parachute.
+
+Ryan, after being told the station was still doing all the work
+locally:
+
+    "lets have it put more emphasis so that it focuses on the mac
+     first more heavily"
+    "It should of course fall back but it shouldnt fall back so
+     easily if that makes sense"
+
+It makes sense, and the old policy was the opposite of it. ONE failed
+request wrote the Mac off for a flat two minutes. A laptop waking from
+sleep, a Wi-Fi roam, a single dropped packet — each cost the next
+twenty turns, silently, while the heartbeat still said "paired".
+
+Worse, the Mac was often never asked at all: the live-transcript
+shortcut answered the common phrases before any recogniser ran, so a
+paired Mac that was up and answering in 1.76 s had a hit counter of
+exactly zero.
+
+WHAT THIS FILE PINS
+
+  * a failure is not a verdict — three consecutive refusals are
+  * the back-off starts small and grows, and any success clears it
+  * a TIMEOUT is not a REFUSAL. A timeout means the Mac answered the
+    door and is busy; only refusals count toward giving up
+  * a health probe runs between turns, so a Mac that comes back is
+    used again in seconds rather than when a timer happens to expire
+  * the first request after a cold start gets a longer budget, because
+    giving up on the model load is giving up on the whole point
+
+Run:  python3 tests/test_remote_priority.py
+"""
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+import dose_remote_stt as R                                   # noqa: E402
+
+FAILURES = []
+CHECKS = [0]
+
+
+def check(label, cond, detail=""):
+    CHECKS[0] += 1
+    if cond:
+        print("  ok   %s" % label)
+    else:
+        print("  FAIL %s %s" % (label, detail))
+        FAILURES.append(label)
+
+
+def reset(paired=True):
+    R._STATE.update({"down_until": 0.0, "hits": 0, "misses": 0,
+                     "last_error": "", "fails": 0, "backoff_at": 0,
+                     "timeouts": 0, "healthy_at": 0.0, "health_at": 0.0,
+                     "warmed": False, "last_ms": 0})
+    # Pretend a conf is loaded, without writing one to disk.
+    R._STATE["conf"] = ("192.168.4.21", 8765, "x") if paired else None
+    R._STATE["conf_at"] = 1e18 if paired else 0.0
+
+
+print("\n── one bad second is not a verdict ──────────────────────────")
+reset()
+R._mark_down("connection refused")
+check("one refusal does not stop us asking", R.available() is True,
+      R._STATE["down_until"])
+R._mark_down("connection refused")
+check("two refusals do not either", R.available() is True)
+R._mark_down("connection refused")
+check("three consecutive refusals do", R.available() is False,
+      "this is the only thing that should cost the Mac a turn")
+
+print("\n── and any success wipes the slate ─────────────────────────")
+reset()
+R._mark_down("x"); R._mark_down("x")
+check("two failures are remembered", R._STATE["fails"] == 2)
+R._mark_ok(120)
+check("a single success clears the count", R._STATE["fails"] == 0)
+check("...and the back-off", R._STATE["down_until"] == 0.0)
+check("...and the station is available again", R.available() is True)
+check("...and the round trip is recorded", R._STATE["last_ms"] == 120)
+R._mark_down("x"); R._mark_down("x")
+check("it takes three MORE to go down again", R.available() is True)
+
+print("\n── a timeout is not a refusal ──────────────────────────────")
+# A timeout means the Mac answered the door and is busy. Writing it off
+# for that is exactly the too-easy fallback Ryan objected to.
+reset()
+for _ in range(6):
+    R._mark_soft("no answer in 6s")
+check("six timeouts do not write the Mac off", R.available() is True,
+      "a busy Mac is still the better recogniser")
+check("...but they are counted, so a slow Mac is visible",
+      R._STATE["timeouts"] == 6)
+check("...and do not pollute the refusal count", R._STATE["fails"] == 0)
+
+print("\n── the back-off grows, and is never permanent ──────────────")
+reset()
+ladders = []
+for _ in range(5):
+    for _ in range(R.FAILS_BEFORE_DOWN):
+        R._mark_down("refused")
+    ladders.append(round(R._STATE["down_until"] - __import__("time").time()))
+    R._STATE["down_until"] = 0.0          # pretend the wait elapsed
+check("each spell of failure waits longer than the last",
+      all(b >= a for a, b in zip(ladders, ladders[1:])), ladders)
+check("it starts small", ladders[0] <= 15, ladders[0])
+check("and it is capped", max(ladders) <= 200, ladders)
+check("the ladder is ordered", R.BACKOFF == sorted(R.BACKOFF), R.BACKOFF)
+
+print("\n── the first request is given time to wake the Mac ─────────")
+check("a cold start gets a longer budget than a warm one",
+      R.WARM_TIMEOUT > R.TIMEOUT, (R.WARM_TIMEOUT, R.TIMEOUT))
+check("the warm budget is long enough to load a model",
+      R.WARM_TIMEOUT >= 10.0, R.WARM_TIMEOUT)
+check("the normal budget still fits inside a turn",
+      R.TIMEOUT <= 7.0, R.TIMEOUT)
+
+print("\n── the Mac is asked whether it is awake, between turns ─────")
+src = open(os.path.join(ROOT, "dose_remote_stt.py"),
+           encoding="utf-8").read()
+check("there is a probe", "def probe(" in src)
+check("it is rate limited, so it cannot become traffic",
+      "HEALTH_EVERY" in src and "_STATE[\"health_at\"]" in src)
+check("it is cheap", R.HEALTH_TIMEOUT <= 3.0, R.HEALTH_TIMEOUT)
+check("it uses the health route, not the transcription route",
+      "/health" in src)
+check("a failed probe uses the same three-strikes rule",
+      "_mark_down(\"health: \"" in src,
+      "one bad probe must not take the Mac out of service")
+check("a good probe marks the Mac warm, so the next real request "
+      "is not paying for a model load",
+      "_STATE[\"warmed\"] = True" in src)
+
+print("\n── none of this weakens the address rule ───────────────────")
+reset(paired=False)
+R._STATE["conf"] = None
+R._STATE["conf_at"] = 0.0
+check("no configuration means no remote at all",
+      R.available() is False)
+check("the private-address check still happens before a socket",
+      "ipaddress.ip_address(host)" in src
+      and src.index("ipaddress.ip_address(host)")
+      < src.index("def transcribe("))
+check("a public address is still refused",
+      "not a local address" in src)
+check("proxies are still refused", "ProxyHandler({})" in src)
+check("the upload cap is still there", "MAX_UPLOAD" in src)
+check("transcribe still cannot raise into a turn",
+      "except Exception as e:" in src
+      and src.rindex("return \"\"") > src.index("def transcribe("))
+
+print("\n── and the station can SAY where the work happened ─────────")
+reset()
+R._STATE["hits"] = 7
+R._STATE["healthy_at"] = __import__("time").time()
+s = R.stats()
+for k in ("hits", "misses", "timeouts", "paired", "down_for",
+          "healthy", "last_ms", "fails_in_a_row"):
+    check("stats() reports %s" % k, k in s, sorted(s))
+check("a healthy paired server reads as healthy", s["healthy"] is True)
+
+print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
+if FAILURES:
+    for f in FAILURES:
+        print("  - " + f)
+    sys.exit(1)
+print("remote priority OK")

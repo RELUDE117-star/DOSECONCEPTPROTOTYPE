@@ -119,13 +119,42 @@ SRC = open(os.path.join(os.path.dirname(os.path.dirname(
 CODE = "\n".join(ln for ln in SRC.splitlines()
                  if not ln.lstrip().startswith("#"))
 
-check("finish() consults it", "quick = self._quick_answer(hint)" in CODE)
+QUICK_CALL = "self._quick_answer(hint)"
+check("finish() consults it", QUICK_CALL in CODE)
 check("...before waiting for the speculation",
-      CODE.index("quick = self._quick_answer(hint)")
-      < CODE.index('spec["done"].wait('))
+      CODE.index(QUICK_CALL) < CODE.index('spec["done"].wait('))
 check("...and before the full recogniser",
-      CODE.index("quick = self._quick_answer(hint)")
+      CODE.index(QUICK_CALL)
       < CODE.index("return self._better_transcribe(final_buf, hint)"))
+
+print("\n── but it does NOT get in front of the Mac ─────────────────")
+# This shortcut is why the Mac's hit counter sat at zero while the Mac
+# was paired, running, and answering in 1.76 s: Vosk's live text got
+# there first on exactly the phrases people say most, so the better
+# recogniser was never asked anything at all.
+#
+# Ryan: "have it put more emphasis so that it focuses on the mac first
+# more heavily" and "it should of course fall back but it shouldn't
+# fall back so easily."
+check("the shortcut is skipped when the Mac is available",
+      "None if self._remote_ready() else self._quick_answer(hint)" in CODE,
+      "the local path is the parachute, not the plan")
+check("the readiness check makes no network call on a turn",
+      "_remote_stt.available()" in CODE,
+      "available() reads a cached flag; probe() does the talking")
+check("something refreshes that flag between turns",
+      "_remote_probe_tick" in CODE and "_remote_stt.probe()" in CODE)
+check("...from the heartbeat thread, never from a turn",
+      "self._remote_probe_tick()" in CODE
+      and CODE.index("def _heartbeat_loop")
+      < CODE.index("self._remote_probe_tick()")
+      < CODE.index("def stop(self)"))
+check("...and never while the station is mid-turn",
+      'if self.state != "idle":' in CODE)
+check("the heartbeat says WHERE the recognising happens",
+      "Mac speech server:" in CODE and "turns answered by Mac" in CODE,
+      "a claim that cannot be checked by reading a file is a claim "
+      "somebody has to take on trust")
 check("a quick answer records zero recogniser time, honestly",
       "self._t_fast = 0.0" in CODE and "self._t_slow = 0.0" in CODE)
 check("...and says in the log how it was answered",

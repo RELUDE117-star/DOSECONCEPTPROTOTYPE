@@ -2326,6 +2326,68 @@ class DoseVoice:
         "adherence", "did_take", "greeting", "thanks", "repeat", "help",
     ))
 
+    def _remote_line(self):
+        """One heartbeat line answering 'is the Mac doing the work'."""
+        if _remote_stt is None:
+            return "Mac speech server: not installed on this build"
+        try:
+            s = _remote_stt.stats()
+        except Exception as e:
+            return "Mac speech server: unreadable (%s)" % str(e)[:40]
+        if not s.get("paired"):
+            return ("Mac speech server: NOT PAIRED — %s"
+                    % (s.get("last_error") or "no dose_server.conf"))
+        where = ("MAC" if (s.get("healthy") and not s.get("down_for"))
+                 else "PI (local)")
+        out = ("Mac speech server: %s   turns answered by Mac: %d   "
+               "refused: %d   slow: %d   last round trip: %d ms"
+               % (where, s.get("hits", 0), s.get("misses", 0),
+                  s.get("timeouts", 0), s.get("last_ms", 0)))
+        if s.get("down_for"):
+            out += ("\n  backing off for %ds after %d failure(s) in a "
+                    "row: %s" % (s["down_for"], s.get("fails_in_a_row", 0),
+                                 s.get("last_error", "")[:60]))
+        elif s.get("last_error"):
+            out += "\n  last trouble: %s" % s["last_error"][:70]
+        return out
+
+    def _remote_ready(self):
+        """Is the Mac there, right now, without asking the network?
+
+        Read on the critical path of every turn, so it must never make
+        a call. The probe below does that between turns and leaves the
+        answer here; this is only the flag.
+        """
+        if _remote_stt is None:
+            return False
+        try:
+            return bool(_remote_stt.available())
+        except Exception:
+            return False
+
+    def _remote_probe_tick(self):
+        """Ask the Mac whether it is awake, between turns.
+
+        The Mac is the recogniser this station wants to use. Before
+        this existed, the only thing that could bring it back after a
+        failure was a timer — so a laptop that reopened its lid ten
+        seconds into a back-off went unused until the timer expired,
+        and every turn in between quietly used the slower local models
+        while the heartbeat still said "paired".
+
+        Cheap (one GET, two seconds at worst), never on a turn's
+        critical path, and it warms the Mac's model so the first real
+        question does not pay for the load.
+        """
+        if _remote_stt is None:
+            return
+        if self.state != "idle":
+            return          # never compete with a turn in progress
+        try:
+            _remote_stt.probe()
+        except Exception:
+            pass
+
     def _quick_answer(self, live_text):
         """Answer from Vosk's transcript when it already says enough.
 
@@ -3847,6 +3909,16 @@ class DoseVoice:
                 "capture reopens: %d   closed on purpose: %d" % (
                     getattr(self, "_capture_restarts", 0),
                     getattr(self, "_capture_closes", 0)),
+                # WHERE IS THE RECOGNISING ACTUALLY HAPPENING?
+                #
+                # Ryan asked for confirmation that the models run on
+                # the Mac and not on the Pi, and the only honest answer
+                # was "no, and here is why" — because nothing on this
+                # station reported it. A claim that cannot be checked
+                # by reading a file is a claim somebody has to take on
+                # trust, and this project has already learned what that
+                # costs.
+                self._remote_line(),
                 # The fault this station actually had: blocks arriving
                 # on time, every sample zero. "HEARING: YES" above is
                 # about the DEVICE; this line is about the SIGNAL.
@@ -4224,10 +4296,21 @@ class DoseVoice:
                          name="heartbeat").start()
 
     def _heartbeat_loop(self):
-        """Write voice/live.txt once a second, for as long as we run."""
+        """Write voice/live.txt once a second, for as long as we run.
+
+        Also keeps the Mac's availability fresh. This thread is the
+        right place for it: it already runs once a second, it is never
+        on a turn's critical path, and dose_remote_stt.probe() rate
+        limits itself, so the cost is one small GET every twenty
+        seconds while the station is idle.
+        """
         while not self._stop.is_set():
             try:
                 self._heartbeat()
+            except Exception:
+                pass
+            try:
+                self._remote_probe_tick()
             except Exception:
                 pass
             self._stop.wait(1.0)
@@ -7475,7 +7558,24 @@ class DoseVoice:
             # See _quick_answer(). This is the difference between a
             # station that replies in about a second and one that
             # replies in seven, on the commands people actually use.
-            quick = self._quick_answer(hint)
+            #
+            # BUT NOT WHEN THE MAC IS THERE.
+            #
+            # This shortcut is why the Mac's hit counter sat at zero
+            # while the Mac was paired, running and answering in 1.76 s:
+            # Vosk's live text got there first on exactly the phrases
+            # people say most, so the better recogniser was never asked
+            # anything. Ryan: "have it put more emphasis so that it
+            # focuses on the mac first more heavily."
+            #
+            # The Mac is asked when the Mac is there. The shortcut is
+            # what happens when it is not — which is the same shape as
+            # every other decision in this file: the local path is the
+            # parachute, not the plan. It costs about a second on those
+            # phrases and buys a recogniser several sizes larger, and
+            # `_remote_ready()` is a cached flag, not a network call, so
+            # asking it here costs nothing.
+            quick = None if self._remote_ready() else self._quick_answer(hint)
             if quick:
                 self._t_fast = 0.0
                 self._t_slow = 0.0

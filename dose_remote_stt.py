@@ -39,6 +39,7 @@ No file, no remote. That is the off switch.
 import ipaddress
 import json
 import os
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -46,18 +47,47 @@ import urllib.request
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONF = os.path.join(APP_DIR, "dose_server.conf")
 
-# A turn is already spending time; this may not add to it meaningfully.
-# If the Mac cannot answer within this, the local models were the
-# better choice anyway.
-TIMEOUT = float(os.environ.get("DOSE_REMOTE_TIMEOUT", "4.0"))
-# How long a "the Mac is not there" answer is trusted before trying
-# again. Without this, every turn pays a connection timeout while the
-# laptop is at the office.
-DOWN_FOR = float(os.environ.get("DOSE_REMOTE_DOWN_FOR", "120"))
+# THE MAC IS THE RECOGNISER. THE PI IS THE PARACHUTE.
+#
+# This file used to give up on the Mac after ONE failure and then
+# refuse to try again for two minutes. That is a parachute that opens
+# when the plane hits turbulence. A laptop waking from sleep, a Wi-Fi
+# roam, a single dropped packet — any of them cost the next twenty
+# turns, silently, and the station looked like it had never been
+# paired at all.
+#
+# Ryan, exactly: "it should of course fall back but it shouldn't fall
+# back so easily."
+#
+# So the policy is now:
+#   * a failure is not a verdict. Three CONSECUTIVE failures are.
+#   * the back-off starts small and grows (10s, 30s, 90s, 180s), and
+#     any success resets it to nothing.
+#   * a TIMEOUT is not the same as a REFUSAL. A timeout means the Mac
+#     answered the door and is busy; a refusal means nobody is home.
+#     Only refusals count toward giving up.
+#   * a cheap /health probe runs between turns, so the moment the Mac
+#     comes back the station knows — rather than serving local results
+#     for another two minutes because of one bad second.
+TIMEOUT = float(os.environ.get("DOSE_REMOTE_TIMEOUT", "6.0"))
+# The first request after an idle spell may land while the Mac is
+# still loading its model. Giving up on THAT is giving up on the
+# thing we actually want, so the first call gets longer.
+WARM_TIMEOUT = float(os.environ.get("DOSE_REMOTE_WARM_TIMEOUT", "12.0"))
+# How many consecutive refusals before the Mac is written off at all.
+FAILS_BEFORE_DOWN = int(os.environ.get("DOSE_REMOTE_FAILS", "3"))
+# Escalating back-off, in seconds. The last value repeats.
+BACKOFF = [10.0, 30.0, 90.0, 180.0]
+# How stale a health answer may be before it is re-asked.
+HEALTH_EVERY = float(os.environ.get("DOSE_REMOTE_HEALTH_EVERY", "20"))
+HEALTH_TIMEOUT = float(os.environ.get("DOSE_REMOTE_HEALTH_TIMEOUT", "2.0"))
 MAX_UPLOAD = 2 * 1024 * 1024
 
 _STATE = {"down_until": 0.0, "conf": None, "conf_at": 0.0,
-          "hits": 0, "misses": 0, "last_error": ""}
+          "hits": 0, "misses": 0, "last_error": "",
+          "fails": 0, "backoff_at": 0, "timeouts": 0,
+          "healthy_at": 0.0, "health_at": 0.0, "warmed": False,
+          "last_ms": 0}
 
 
 def _conf():
@@ -98,10 +128,76 @@ def available():
     return _conf() is not None
 
 
+def _mark_ok(ms=0):
+    """Anything that worked clears the whole back-off. One good answer
+    is better evidence than three old bad ones."""
+    _STATE["fails"] = 0
+    _STATE["backoff_at"] = 0
+    _STATE["down_until"] = 0.0
+    _STATE["healthy_at"] = time.time()
+    if ms:
+        _STATE["last_ms"] = int(ms)
+
+
+def _mark_soft(why):
+    """It answered, but not in time. The Mac is THERE. Do not write it
+    off — this turn falls back, the next one asks again."""
+    _STATE["timeouts"] += 1
+    _STATE["last_error"] = ("slow: " + why)[:120]
+
+
 def _mark_down(why):
-    _STATE["down_until"] = time.time() + DOWN_FOR
+    """A refusal: nobody answered the door. Only these accumulate, and
+    only FAILS_BEFORE_DOWN of them in a row stop us asking."""
     _STATE["misses"] += 1
+    _STATE["fails"] += 1
     _STATE["last_error"] = why[:120]
+    if _STATE["fails"] < FAILS_BEFORE_DOWN:
+        return
+    i = min(_STATE["backoff_at"], len(BACKOFF) - 1)
+    _STATE["down_until"] = time.time() + BACKOFF[i]
+    _STATE["backoff_at"] = min(_STATE["backoff_at"] + 1, len(BACKOFF) - 1)
+
+
+def probe(force=False):
+    """Ask the Mac whether it is there, cheaply, between turns.
+
+    Without this, the only thing that could clear a back-off was the
+    clock — so a Mac that came back after ten seconds went unused for
+    as long as the back-off happened to be. A GET that costs two
+    seconds at worst, run while nobody is speaking, means the station
+    notices its recogniser returning almost immediately.
+
+    Also warms the model: the first real request then lands on a Mac
+    that has already loaded it, instead of paying for the load inside
+    somebody's question.
+    """
+    conf = _conf()
+    if conf is None:
+        return False
+    now = time.time()
+    if not force and now - _STATE["health_at"] < HEALTH_EVERY:
+        return _STATE["healthy_at"] >= _STATE["health_at"]
+    _STATE["health_at"] = now
+    host, port, token = conf
+    req = urllib.request.Request(
+        "http://%s:%d/health" % (host, port), method="GET",
+        headers={"Authorization": "Bearer " + token})
+    try:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}))
+        t0 = time.time()
+        with opener.open(req, timeout=HEALTH_TIMEOUT) as r:
+            r.read(4096)
+        _mark_ok((time.time() - t0) * 1000)
+        _STATE["warmed"] = True
+        return True
+    except Exception as e:
+        # A failed probe is information, not a verdict: it uses the
+        # same three-strikes rule as a real request, so one bad probe
+        # cannot take the Mac out of service.
+        _mark_down("health: " + str(e))
+        return False
 
 
 def transcribe(wav_bytes):
@@ -123,28 +219,53 @@ def transcribe(wav_bytes):
         headers={"Authorization": "Bearer " + token,
                  "Content-Type": "audio/wav",
                  "Content-Length": str(len(wav_bytes))})
+    # The first call after a cold start may land while the Mac is still
+    # loading its model. Giving up on that one is giving up on exactly
+    # the thing this file exists for.
+    budget = TIMEOUT if _STATE["warmed"] else WARM_TIMEOUT
+    t0 = time.time()
     try:
         # No proxies, ever. A proxy is a third machine, and there is no
         # third machine in this arrangement.
         opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}))
-        with opener.open(req, timeout=TIMEOUT) as r:
+        with opener.open(req, timeout=budget) as r:
             body = r.read(64 * 1024)
         data = json.loads(body.decode("utf-8", "replace"))
         text = (data.get("text") or "").strip()
+        _STATE["warmed"] = True
+        _mark_ok((time.time() - t0) * 1000)
         if text:
             _STATE["hits"] += 1
             _STATE["last_error"] = ""
         return text
     except urllib.error.HTTPError as e:
+        # The server is RUNNING — it just said no. That is a
+        # configuration problem (usually a stale token), and hammering
+        # it will not fix it, so it counts.
         _mark_down("server said %s" % e.code)
+    except socket.timeout:
+        _mark_soft("no answer in %.0fs" % budget)
+    except urllib.error.URLError as e:
+        if isinstance(getattr(e, "reason", None), socket.timeout):
+            _mark_soft("no answer in %.0fs" % budget)
+        else:
+            _mark_down(str(e.reason or e))
     except Exception as e:
         _mark_down(str(e))
     return ""
 
 
 def stats():
+    """What the heartbeat prints. 'Is the Mac doing the work' should be
+    answerable by reading one line, not by trusting anybody's word."""
+    now = time.time()
     return {"hits": _STATE["hits"], "misses": _STATE["misses"],
+            "timeouts": _STATE["timeouts"],
             "paired": _conf() is not None,
-            "down_for": max(0, round(_STATE["down_until"] - time.time())),
+            "fails_in_a_row": _STATE["fails"],
+            "down_for": max(0, round(_STATE["down_until"] - now)),
+            "healthy": bool(_STATE["healthy_at"]
+                            and now - _STATE["healthy_at"] < 60),
+            "last_ms": _STATE["last_ms"],
             "last_error": _STATE["last_error"]}
