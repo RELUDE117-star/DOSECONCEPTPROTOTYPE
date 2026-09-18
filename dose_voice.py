@@ -456,6 +456,22 @@ SERVICE_KICK_AFTER = float(
 DEFAULT_REAPPLY_AFTER = float(
     os.environ.get("DOSE_DEFAULT_REAPPLY_AFTER", "300"))
 
+# Piper-in-a-subprocess. ONNX Runtime aborts this app with SIGABRT from
+# native code, which no Python handler can catch, so synthesis runs in a
+# child that loads the model once and then waits for work. See
+# tools/piper_worker.py.
+#
+# The timeout is generous: a Pi 4 synthesising a long sentence is slow,
+# and cutting off a working synthesiser to fall back to an identical
+# in-process one would just add latency. It exists so a HUNG worker
+# costs one wait, not a station that never speaks again.
+PIPER_WORKER_TIMEOUT = float(
+    os.environ.get("DOSE_PIPER_WORKER_TIMEOUT", "25"))
+# Floor between respawns, so a model that aborts during load cannot
+# make us fork in a tight loop.
+PIPER_WORKER_MIN_GAP = float(
+    os.environ.get("DOSE_PIPER_WORKER_MIN_GAP", "10"))
+
 
 def _peak_rms(data):
     """(peak, rms) of signed 16-bit mono PCM. Never raises.
@@ -5850,6 +5866,154 @@ class DoseVoice:
     #    on a Pi 4, and having two engines meant the station could
     #    answer in two different voices depending on which one loaded.
     #    One voice, one engine, one file.
+    # ── Piper in a separate process ───────────────────────────────────
+    # ONNX Runtime aborts this application. SIGABRT from native code,
+    # which NOTHING in Python can catch — see tools/piper_worker.py for
+    # the stack and the reasoning. The abort is survivable only if the
+    # thing that aborts is not the app, so synthesis is handed to a
+    # persistent child that loads the model once and then waits.
+    #
+    # Every failure mode here falls back to in-process synthesis, which
+    # is exactly today's behaviour. That is deliberate: this ships to a
+    # station that has a pitch to get through, and the worst case must
+    # be "no better than before", never "worse than before".
+    #
+    # DOSE_PIPER_WORKER=0 disables it outright, so if it misbehaves on
+    # the device it can be switched off without a code change.
+    def _worker_enabled(self):
+        return os.environ.get("DOSE_PIPER_WORKER", "1") not in (
+            "0", "false", "no", "")
+
+    def _piper_worker(self):
+        """The live worker, started if needed. None if unavailable."""
+        p = getattr(self, "_pw_proc", None)
+        if p is not None and p.poll() is None:
+            return p
+        if p is not None:
+            # It died. Almost certainly the abort this exists to
+            # contain, so say so — a silent respawn would hide the very
+            # event we built this to observe.
+            self._pw_deaths = getattr(self, "_pw_deaths", 0) + 1
+            try:
+                rc = p.poll()
+            except Exception:
+                rc = None
+            self._note_tts("piper worker died (rc=%s, death #%d) — "
+                           "respawning" % (rc, self._pw_deaths))
+            try:
+                if p.stdin:
+                    p.stdin.close()
+            except Exception:
+                pass
+        if not self._worker_enabled() or not self._piper_path:
+            return None
+        # Do not respawn in a tight loop: a model that aborts on load
+        # would otherwise fork forever.
+        now = time.time()
+        last = getattr(self, "_pw_spawned_at", 0.0)
+        if last and now - last < PIPER_WORKER_MIN_GAP:
+            return None
+        self._pw_spawned_at = now
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "tools", "piper_worker.py")
+        if not os.path.exists(script):
+            return None
+        try:
+            p = subprocess.Popen(
+                [sys.executable, script, self._piper_path,
+                 str(INFER_THREADS)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True,
+                # Its own session: a signal aimed at our process group
+                # must not take the synthesiser with it.
+                start_new_session=True)
+        except Exception as e:
+            self._note_tts("piper worker would not start: %r" % (e,))
+            return None
+        # Wait for READY, so the first real sentence does not pay the
+        # model load inside its own timeout budget.
+        try:
+            p.stdout.readline()
+        except Exception:
+            pass
+        if p.poll() is not None:
+            self._note_tts("piper worker exited during load")
+            return None
+        self._pw_proc = p
+        self._note_tts("piper worker ready")
+        return p
+
+    def _note_tts(self, msg):
+        """Record a synthesis event. Bounded, never raises."""
+        try:
+            lst = getattr(self, "_tts_events", None)
+            if lst is None:
+                lst = self._tts_events = []
+            lst.append("%s  %s" % (time.strftime("%H:%M:%S"), msg))
+            del lst[:-20]
+        except Exception:
+            pass
+
+    def _synth_via_worker(self, text, wav):
+        """True if the worker produced the wav. False to fall back."""
+        p = self._piper_worker()
+        if p is None:
+            return False
+        req = json.dumps({"text": text, "wav": os.path.abspath(wav),
+                          "length_scale": 1.0, "noise_scale": 0.62,
+                          "noise_w": 0.75})
+        try:
+            p.stdin.write(req + "\n")
+            p.stdin.flush()
+        except Exception:
+            # Pipe gone — the child died mid-write, which is the abort.
+            self._pw_proc = p
+            return False
+        # A bounded read. A hung synthesiser must cost one timeout and
+        # a fallback, not a station that never speaks again.
+        done = threading.Event()
+        box = {}
+
+        def read():
+            try:
+                box["line"] = p.stdout.readline()
+            except Exception as e:
+                box["err"] = e
+            done.set()
+
+        threading.Thread(target=read, name="piper-wait",
+                         daemon=True).start()
+        if not done.wait(PIPER_WORKER_TIMEOUT):
+            self._note_tts("piper worker did not answer in %.0fs — "
+                           "killing it and falling back"
+                           % PIPER_WORKER_TIMEOUT)
+            try:
+                p.kill()
+            except Exception:
+                pass
+            try:
+                p.wait(timeout=2)
+            except Exception:
+                pass
+            self._pw_proc = p
+            return False
+        line = (box.get("line") or "").strip()
+        if not line:
+            self._note_tts("piper worker closed its pipe (native abort "
+                           "contained — the app survived)")
+            return False
+        try:
+            resp = json.loads(line)
+        except Exception:
+            return False
+        if resp.get("ok") and os.path.exists(wav) \
+                and os.path.getsize(wav) > 44:
+            return True
+        err = resp.get("error")
+        if err:
+            self._note_tts("piper worker error: %s" % str(err)[:120])
+        return False
+
     def _synth(self, voice, text, wav):
         """Synthesize with an EXTREMELY COMFORTING delivery — a soft
         female guardian: calm and unhurried, smooth and even, gentle
@@ -5858,6 +6022,16 @@ class DoseVoice:
         character, not a copy of any specific game/film character or
         its voice actor. Falls back to the plain call on any Piper API
         difference."""
+        # OUT OF PROCESS FIRST. If it works, a future ONNX abort costs a
+        # respawn instead of the application. If anything about it does
+        # not work, we are straight back to the in-process path below,
+        # which is what this station does today.
+        try:
+            if self._synth_via_worker(text, wav):
+                return
+        except Exception as e:
+            self._note_tts("worker path raised, using in-process: %r"
+                           % (e,))
         # Newer piper-tts: SynthesisConfig(length_scale, noise_scale,...)
         try:
             from piper import SynthesisConfig

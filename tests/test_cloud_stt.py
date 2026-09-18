@@ -12,7 +12,18 @@ synthetic. The live paths are exercised on the device.
 import os
 import sys
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    # Not a failure. This suite needs numpy to synthesise test audio;
+    # the Pi and the build container both have it, a bare Mac may not.
+    # A suite that HARD-FAILS on a machine merely lacking a dev
+    # dependency is the cry-wolf problem the security tooling already
+    # had three rounds of: the owner learns to skim past red, and then
+    # skims past the red that matters. Skip loudly, exit 0.
+    print("SKIP: numpy not installed here — this suite synthesises "
+          "audio and needs it")
+    sys.exit(0)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)

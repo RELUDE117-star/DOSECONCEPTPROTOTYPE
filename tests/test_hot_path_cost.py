@@ -252,7 +252,10 @@ print("\n6b. Silero is not asked its input names 31 times a second")
 # speaking this crossed into the ONNX Runtime C API, allocated a NodeArg
 # per input and built a fresh set about thirty-one times a second, to
 # answer a question fixed for the life of a loaded session.
-import numpy as _np                                          # noqa: E402
+try:
+    import numpy as _np                                      # noqa: E402
+except ImportError:
+    _np = None
 
 
 class _NodeArg:
@@ -276,36 +279,44 @@ class _FakeSess:
                 _np.zeros((2, 1, 128), dtype=_np.float32)]
 
 
-ev = object.__new__(dose_voice.DoseVoice)
-ev._vad_state = None
-s1 = _FakeSess(["input", "sr", "state"])
-ev._load_vad = lambda: s1
-frame = (_np.zeros(dose_voice.DoseVoice.VAD_FRAME, dtype=_np.int16)
-         + 100).tobytes()
-prob = None
-for _ in range(120):                      # about four seconds of speech
-    prob = ev.vad_speech_prob(frame)
-check("the VAD still returns a probability", prob is not None
-      and 0.0 <= prob <= 1.0, "got %r" % (prob,))
-check("120 frames ask the model its input names ONCE",
-      s1.get_inputs_calls == 1,
-      "got %d calls" % s1.get_inputs_calls)
-check("all three inputs are still fed",
-      s1.feed_keys == {"input", "sr", "state"},
-      "got %r" % (s1.feed_keys,))
+if _np is None:
+    # Same reasoning as test_cloud_stt: a missing dev dependency is not
+    # a defect. A suite that reports RED because a machine lacks numpy
+    # is the cry-wolf problem the security tooling already had three
+    # rounds of — the owner learns to skim past red, and then skims past
+    # the red that matters. Say so plainly and skip.
+    print("  SKIP numpy not installed here — the Silero frame-cost "
+          "checks need it to build a fake session")
+else:
+    ev = object.__new__(dose_voice.DoseVoice)
+    ev._vad_state = None
+    s1 = _FakeSess(["input", "sr", "state"])
+    ev._load_vad = lambda: s1
+    frame = (_np.zeros(dose_voice.DoseVoice.VAD_FRAME, dtype=_np.int16)
+             + 100).tobytes()
+    prob = None
+    for _ in range(120):                  # about four seconds of speech
+        prob = ev.vad_speech_prob(frame)
+    check("the VAD still returns a probability", prob is not None
+          and 0.0 <= prob <= 1.0, "got %r" % (prob,))
+    check("120 frames ask the model its input names ONCE",
+          s1.get_inputs_calls == 1,
+          "got %d calls" % s1.get_inputs_calls)
+    check("all three inputs are still fed",
+          s1.feed_keys == {"input", "sr", "state"},
+          "got %r" % (s1.feed_keys,))
 
-# A swapped model must not inherit the old session's names.
-s2 = _FakeSess(["input"])
-ev._load_vad = lambda: s2
-ev._vad_state = None
-ev.vad_speech_prob(frame)
-check("a swapped model re-reads its own input names",
-      s2.get_inputs_calls == 1, "got %d" % s2.get_inputs_calls)
-check("and is not fed the previous model's inputs",
-      s2.feed_keys == {"input"}, "got %r" % (s2.feed_keys,))
-check("the old session is not re-read either",
-      s1.get_inputs_calls == 1, "got %d" % s1.get_inputs_calls)
-
+    # A swapped model must not inherit the old session's names.
+    s2 = _FakeSess(["input"])
+    ev._load_vad = lambda: s2
+    ev._vad_state = None
+    ev.vad_speech_prob(frame)
+    check("a swapped model re-reads its own input names",
+          s2.get_inputs_calls == 1, "got %d" % s2.get_inputs_calls)
+    check("and is not fed the previous model's inputs",
+          s2.feed_keys == {"input"}, "got %r" % (s2.feed_keys,))
+    check("the old session is not re-read either",
+          s1.get_inputs_calls == 1, "got %d" % s1.get_inputs_calls)
 
 print("\n6c. The half-built by-name mic picker is gone, not half-gone")
 check("no mic_device setting (nothing ever read it)",

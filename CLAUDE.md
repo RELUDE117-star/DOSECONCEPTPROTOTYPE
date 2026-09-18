@@ -234,10 +234,37 @@ occurrences logged in one afternoon. It is NOT caused by the ONNX thread cap
 which points at conditions inside the running app (two ONNX sessions, Silero
 VAD and Piper, under concurrent load).
 
-Not yet root-caused. Mitigated instead, and the mitigation is what matters:
-the supervisor restarts in ~20 s, and `DOSE.sh` guarantees the restart gets a
-clean audio device. If this needs a real fix, run Piper synthesis in a
-SUBPROCESS so a native abort kills only that child.
+**CONTAINED 2026-09-18 — synthesis now runs in a child process.**
+`tools/piper_worker.py` loads the voice ONCE and then waits for work, one
+JSON line in, one out. An abort kills the child; the parent sees its pipe
+close, respawns it, and the crash costs a retry instead of the application.
+
+It is still not root-caused, and that is fine — the blast radius is what
+mattered. Notes for anyone touching it:
+
+- **A process per sentence would have been worse than the bug.** Loading the
+  voice means building an ONNX session off an SD card: seconds, every
+  sentence. The crash is occasional; that latency would be constant. Hence a
+  persistent worker.
+- **Every failure mode falls back to in-process synthesis**, which is exactly
+  the old behaviour — worker missing, won't start, dies, hangs
+  (`PIPER_WORKER_TIMEOUT`, 25 s), returns an error, or writes no audio. The
+  worst case is "no better than before", never "worse".
+- **`DOSE_PIPER_WORKER=0` turns it off** without a code change, if it
+  misbehaves on the device.
+- Respawns are floored at `PIPER_WORKER_MIN_GAP` (10 s) so a model that
+  aborts *during load* cannot make the app fork in a loop.
+- The worker caps `intra_op_num_threads` too. Without that, moving synthesis
+  out of process would have re-created the 392%-CPU mic starvation that
+  `_cap_onnx_threads()` was written to fix.
+- Both paths use identical noise parameters on purpose: if they differed, the
+  station's voice would change depending on whether a crash had happened
+  recently.
+- `tests/test_piper_worker.py` (27 checks) fires a real `os.abort()` in the
+  child and asserts the parent survives, plus every fallback path.
+
+**STILL NEEDS A DEVICE SOAK.** This was written and tested against a fake
+Piper in the container; the real model has never run through it.
 - Safe headless test on a dev box: `xvfb-run -a python3.12 dose_app.py`
   (needs a display; tkinter). Set `DOSE_DISABLE_SELF_INSTALL=1` first.
 
@@ -373,9 +400,6 @@ now append through `tee`, rotated at 8 MB. The unit's `StandardOutput` is
   errors by type — deletions mean capture/VAD, insertions mean a hot capture,
   substitutions mean the model. Drop matched `tests/audio/<name>.wav` +
   `<name>.txt` pairs in to score the real pipeline (`*.wav` is git-ignored).
-- `tests/test_security.py` and `tests/test_brain.py` fail on a clean checkout
-  for reasons predating this work (test_security hardcodes
-  `/home/user/DOSECONCEPTPROTOTYPE/`). Not regressions — but not green either.
 - `tests/test_security.py` and `tests/test_brain.py` fail on a clean checkout
   for reasons predating this work (test_security hardcodes
   `/home/user/DOSECONCEPTPROTOTYPE/`). Not regressions — but not green either.
