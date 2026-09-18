@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Time-to-first-sound is the whole of perceived response time.
+
+WHY THIS TEST EXISTS
+--------------------
+The owner's words: "I want the visual overlay to be fast and quick
+especially tts."
+
+_speak() renders the FIRST chunk, plays it, and renders the rest on a
+worker while that audio is in the air. Piper runs about three times
+real time on this board, so every later chunk is ready long before the
+previous one finishes and the reply comes out continuous. That design
+was already right. The problem was what counted as a chunk.
+
+_sentences() splits only on sentence ENDS. So:
+
+    "You have two doses left today, Ryan, and the next one is at six."
+
+is ONE chunk — sixty-four characters, about four seconds of speech,
+and nothing at all is audible until the whole of it has been
+synthesized. The person is looking at a screen that says nothing is
+happening, which is exactly the complaint.
+
+Splitting that at the comma costs nothing: Piper puts a small pause at
+a comma anyway, so the seam is inaudible, and the remainder renders
+while the opening plays.
+
+These tests are mostly about the ways that can go WRONG — a split that
+loses words, a split that opens with a stutter, a split that walks
+straight over a full stop to break at "and".
+
+Run:  python3 tests/test_tts_first_sound.py
+"""
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import dose_voice                                            # noqa: E402
+
+V = dose_voice.DoseVoice
+MAXC = dose_voice.TTS_FIRST_CHUNK_MAX
+MINC = dose_voice.TTS_FIRST_CHUNK_MIN
+
+FAILURES = []
+CHECKS = [0]
+
+
+def check(label, cond, detail=""):
+    CHECKS[0] += 1
+    if cond:
+        print("  ok   %s" % label)
+    else:
+        print("  FAIL %s %s" % (label, detail))
+        FAILURES.append(label)
+
+
+def pipeline(text):
+    return V._split_first(V._sentences(text))
+
+
+def words(s):
+    return re.findall(r"[A-Za-z0-9']+", s)
+
+
+print("\n── nothing may be lost or invented ──────────────────────────")
+
+CORPUS = [
+    "You have two doses left today, Ryan, and the next one is at six.",
+    "I didn't catch that, Ryan. Tap the logo and try again.",
+    "Your next dose is metformin at six in the evening, and you have "
+    "taken two of three today.",
+    "Aspirin is a blood thinner which reduces the risk of clots.",
+    "Good morning, Ryan. You have three medications scheduled today: "
+    "metformin, lisinopril and aspirin.",
+    "Yes, Ryan - that one is due at eight.",
+    "That medication is not in my database, Ryan.",
+    "Sure.",
+    "Okay",
+    "",
+    "   ",
+    "No.",
+    "A" * 300,
+    "one, two, three, four, five, six, seven, eight, nine, ten, eleven",
+    "Wait. What? Really! Yes... no.",
+    "supercalifragilisticexpialidociousandmorewordswithoutanybreakhere",
+    "Take one tablet with food; the second is due at eight, but only "
+    "if you have eaten.",
+]
+
+lost = []
+for t in CORPUS:
+    out = pipeline(t)
+    if words(" ".join(out)) != words(t):
+        lost.append(t[:40])
+check("every word survives the split, in order", not lost, lost)
+
+empties = [t for t in CORPUS if any(not c.strip() for c in pipeline(t))]
+check("no empty fragment is ever produced", not empties, empties)
+
+stutters = []
+for t in CORPUS:
+    out = pipeline(t)
+    if len(out) > 1 and any(len(c) < MINC for c in out[:2]):
+        stutters.append((t[:35], out[:2]))
+check("a split never opens with a stutter", not stutters, stutters)
+
+print("\n── it actually gets the station talking sooner ──────────────")
+
+t = "You have two doses left today, Ryan, and the next one is at six."
+out = pipeline(t)
+check("the long single-sentence reply is now split", len(out) == 2, out)
+check("...at the comma, where a speaker pauses anyway",
+      out[0].endswith(","), out)
+check("...and the opening fits the first-sound budget",
+      len(out[0]) <= MAXC, len(out[0]))
+check("...which is most of the sentence, not a fragment of it",
+      len(out[0]) >= MAXC * 0.6, len(out[0]))
+
+before = V._sentences(t)
+check("before the split, that reply was ONE chunk — nothing audible "
+      "until all of it had rendered", len(before) == 1)
+
+print("\n── the strongest boundary wins, not the latest ──────────────")
+
+t = "I didn't catch that, Ryan. Tap the logo and try again."
+out = pipeline(t)
+check("a full stop beats a comma and a conjunction",
+      out[0] == "I didn't catch that, Ryan.", out)
+check("...so it does not break across a sentence end at 'and'",
+      not out[0].endswith("logo"), out)
+
+t = "Good morning, Ryan. You have three medications scheduled today: " \
+    "metformin, lisinopril and aspirin."
+out = pipeline(t)
+check("a greeting is split off whole", out[0] == "Good morning, Ryan.", out)
+
+t = "Aspirin is a blood thinner which reduces the risk of clots."
+out = pipeline(t)
+check("with no punctuation at all, a conjunction will do",
+      len(out) == 2 and out[1].startswith("which"), out)
+
+print("\n── one long clause overshoots rather than giving up ─────────")
+
+t = "Your next dose is metformin at six in the evening, and you have " \
+    "taken two of three today."
+out = pipeline(t)
+check("a sentence whose only break is past the window still splits",
+      len(out) == 2, out)
+check("...just past it, not at the far end",
+      MAXC < len(out[0]) <= MAXC * 2, len(out[0]))
+check("...and a 50-character opening beats the 89-character original",
+      len(out[0]) < len(t) * 0.7, len(out[0]))
+
+check("a word with no break anywhere is left alone rather than "
+      "chopped mid-phrase",
+      pipeline("A" * 300) == ["A" * 300])
+
+print("\n── short and cached replies are untouched ───────────────────")
+
+for t in ("Sure.", "Okay", "No.", "Yes, Ryan."):
+    check("%r is spoken whole" % t, pipeline(t) == [t.strip()])
+check("an empty reply produces nothing to say", pipeline("") == [])
+check("whitespace produces nothing to say", pipeline("   ") == [])
+check("_split_first on an empty list is safe", V._split_first([]) == [])
+
+print("\n── later chunks are left exactly as they were ───────────────")
+
+t = ("One sentence here that is quite long, yes. And a second one. "
+     "And a third one that also runs on for a while.")
+sents = V._sentences(t)
+out = pipeline(t)
+check("only the first chunk is ever touched",
+      out[len(out) - len(sents) + 1:] == sents[1:], (out, sents))
+
+print("\n── it is wired in, and bounded ──────────────────────────────")
+
+SRC = open(os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "dose_voice.py"), encoding="utf-8").read()
+CODE = "\n".join(ln for ln in SRC.splitlines()
+                 if not ln.lstrip().startswith("#"))
+
+check("_speak splits the first chunk before rendering anything",
+      "chunks = self._split_first(chunks)" in CODE)
+check("...after _sentences, so sentence structure is respected first",
+      CODE.index("chunks = self._sentences(text)")
+      < CODE.index("chunks = self._split_first(chunks)"))
+check("...and before the first chunk is rendered",
+      CODE.index("chunks = self._split_first(chunks)")
+      < CODE.index("first = self.render_to_cache(chunks[0])"))
+check("a fully cached reply still skips all of this",
+      CODE.index("if os.path.exists(whole):")
+      < CODE.index("chunks = self._sentences(text)"))
+check("the limits are environment overrides",
+      "DOSE_TTS_FIRST_MAX" in SRC and "DOSE_TTS_FIRST_MIN" in SRC)
+check("the opening is short enough to be quick (<= 60 chars)",
+      MAXC <= 60, MAXC)
+check("...and long enough not to sound clipped (>= 25 chars)",
+      MAXC >= 25, MAXC)
+check("the minimum leaves room for a real phrase", 6 <= MINC < MAXC)
+check("the remainder still renders on a worker while the opening "
+      "plays — that is what makes this free",
+      "name=\"tts-stream\"" in CODE)
+
+print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
+if FAILURES:
+    for f in FAILURES:
+        print("  - " + f)
+    sys.exit(1)
+print("TTS first sound OK")

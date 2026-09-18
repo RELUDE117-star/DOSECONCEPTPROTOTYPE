@@ -342,6 +342,15 @@ FAST_ENGINE_PIN = os.environ.get("DOSE_FAST_ENGINE", "").strip().lower()
 # turn and makes everything worse. Raise it on better hardware; the
 # escalation simply gets used more often.
 STT_TURN_BUDGET = float(os.environ.get("DOSE_STT_BUDGET", "6.0"))
+# The longest FIRST spoken fragment. Only this chunk is rendered before
+# any sound comes out, so this number IS the station's time-to-first-
+# sound on an uncached reply. Around forty characters is roughly two
+# seconds of speech, which Piper renders in well under one on this
+# board — and the remainder renders on a worker while it plays.
+TTS_FIRST_CHUNK_MAX = int(os.environ.get("DOSE_TTS_FIRST_MAX", "42"))
+# ...and the shortest. Below this a reply opens with a stutter, which
+# sounds broken in a way that being half a second slower does not.
+TTS_FIRST_CHUNK_MIN = int(os.environ.get("DOSE_TTS_FIRST_MIN", "12"))
 # base.en against tiny.en on identical audio. Used only to decide
 # whether the escalation FITS, never to time anything out, and it is
 # multiplied by this device's own freshly measured fast-pass time, so
@@ -6948,6 +6957,90 @@ class DoseVoice:
             parts.append(buf)
         return parts or [text]
 
+    @staticmethod
+    def _split_first(chunks):
+        """Make the FIRST chunk short, so the station starts talking
+        sooner. Everything after it is left exactly as it was.
+
+        TIME-TO-FIRST-SOUND is the whole of perceived response time,
+        and until now it was the render time of a whole sentence.
+        _sentences() only ever splits on sentence ends, so a reply like
+
+            "You have two doses left today, Ryan, and the next one
+             is at six."
+
+        is ONE chunk: nothing is audible until the entire thing has
+        been synthesized. Piper runs about three times real time on
+        this board, so a four-second sentence is well over a second of
+        silence before the first syllable — and the person is watching
+        a screen that says nothing is happening.
+
+        Splitting it at the comma costs nothing. Piper puts a small
+        pause at a comma anyway, so the seam is inaudible, and by the
+        time the first fragment has finished playing the remainder has
+        long since rendered on the worker.
+
+        The rules are all about NOT making it worse:
+        - only boundaries a speaker would pause at, ranked by how hard
+          the pause is: a sentence end beats a comma, a comma beats a
+          conjunction. Never a space in the middle of a phrase.
+        - the STRONGEST boundary in the window, not the latest one.
+          Taking the latest split "I didn't catch that, Ryan. Tap the
+          logo and try again." across the word "and" — straight over a
+          full stop that was sitting right there.
+        - both halves must be long enough to be worth saying, or the
+          reply opens with a one-word stutter, which sounds broken in
+          a way that half a second of silence does not.
+        - if the sentence has no boundary inside the window, overshoot
+          to the first one that IS available rather than give up: the
+          case that needs this most is one long clause, and a 50-
+          character opening beats a 90-character one.
+        - if nothing qualifies at all, hand back the original
+          untouched.
+
+        A short leading fragment is also far more likely to be a cache
+        hit next time ("Sure, Ryan," "You have two doses left today,")
+        which makes the second occurrence instant rather than fast.
+        """
+        if not chunks:
+            return chunks
+        head = chunks[0]
+        if len(head) <= TTS_FIRST_CHUNK_MAX:
+            return chunks
+        cands = []
+        for m in re.finditer(
+                r"(?:[.!?…]\s)|(?:[,;:]\s)|(?:\s[-–—]\s)"
+                r"|(?:\s(?:and|but|so|then|because|which|while)\s)", head):
+            tok = m.group(0)
+            if tok[0] in ".!?…":
+                rank, cut = 0, m.end()
+            elif tok[0] in ",;:":
+                rank, cut = 1, m.end()
+            elif tok.strip() in ("-", "–", "—"):
+                rank, cut = 1, m.start()
+            else:
+                rank, cut = 2, m.start()
+            if cut < TTS_FIRST_CHUNK_MIN:
+                continue
+            if len(head) - cut < TTS_FIRST_CHUNK_MIN:
+                continue
+            cands.append((rank, cut))
+        if not cands:
+            return chunks
+        inside = [c for c in cands if c[1] <= TTS_FIRST_CHUNK_MAX]
+        if inside:
+            # strongest boundary; among equals, as much as fits
+            best = min(inside, key=lambda rc: (rc[0], -rc[1]))[1]
+        else:
+            # nothing inside the window — overshoot to the earliest
+            # usable boundary, but not indefinitely
+            over = [c for c in cands
+                    if c[1] <= TTS_FIRST_CHUNK_MAX * 2]
+            if not over:
+                return chunks
+            best = min(over, key=lambda rc: (rc[0], rc[1]))[1]
+        return [head[:best].strip(), head[best:].strip()] + list(chunks[1:])
+
     def _speak(self, text, user_text=""):
         """Say one line, conversationally.
 
@@ -6976,6 +7069,10 @@ class DoseVoice:
             chunks = self._sentences(text)
             if not chunks:
                 return
+            # Start talking sooner: only the first chunk is rendered
+            # before any sound comes out, so only the first chunk's
+            # length is on the critical path. See _split_first().
+            chunks = self._split_first(chunks)
 
             # 2) render the rest in the background, starting NOW, so it
             #    overlaps with playback of the first chunk
