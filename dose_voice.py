@@ -3499,12 +3499,42 @@ class DoseVoice:
 
     def prewarm_replies(self):
         """Render every fixed line into the cache, in the background at
-        low priority so it never competes with live audio."""
+        low priority so it never competes with live audio.
+
+        "Low priority" was os.nice(10) and nothing else, and that turned
+        out not to be enough. nice only decides who wins when two
+        runnable threads want the same core; it does not stop ONNX
+        Runtime spinning up a worker per core and it does nothing for a
+        capture that must be drained on time. On the device this ran
+        flat out the moment the app started — the same moment the USB
+        capture stream was coming up — and the PCM reported XRUN, which
+        is dropped audio, which is misrecognition.
+
+        Two changes: the thread count is capped in _cap_onnx_threads(),
+        and this now WAITS for audio to actually be flowing before it
+        starts. Getting the cache warm a few seconds later costs
+        nothing; taking the machine away from the microphone during
+        startup costs recognition accuracy, which is the whole point of
+        the device."""
         def work():
             try:
                 os.nice(10)
             except Exception:
                 pass
+            # Wait for the capture to be alive (blocks arriving), up to
+            # a bounded time so a mic that never comes up cannot stop
+            # the cache being built at all.
+            deadline = time.time() + float(os.environ.get(
+                "DOSE_PREWARM_DELAY_MAX", "45"))
+            while time.time() < deadline:
+                if self._stop.is_set():
+                    return
+                if getattr(self, "_blocks_seen", 0) > 0:
+                    # Audio is flowing. Give the stream a moment to
+                    # settle at its steady state before adding load.
+                    time.sleep(3.0)
+                    break
+                time.sleep(0.5)
             n = 0
             for line in self._fixed_lines():
                 if self._stop.is_set():
