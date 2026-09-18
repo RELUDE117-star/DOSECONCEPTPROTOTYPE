@@ -246,6 +246,82 @@ check("once the window elapses the mixer is forced again",
 
 restore()
 
+print("\n6b. Silero is not asked its input names 31 times a second")
+# vad_speech_prob() ran `{i.name for i in sess.get_inputs()}` on EVERY
+# frame. A frame is 512 samples at 16 kHz — 32 ms — so while anybody was
+# speaking this crossed into the ONNX Runtime C API, allocated a NodeArg
+# per input and built a fresh set about thirty-one times a second, to
+# answer a question fixed for the life of a loaded session.
+import numpy as _np                                          # noqa: E402
+
+
+class _NodeArg:
+    def __init__(self, n):
+        self.name = n
+
+
+class _FakeSess:
+    def __init__(self, names):
+        self._names = names
+        self.get_inputs_calls = 0
+        self.feed_keys = None
+
+    def get_inputs(self):
+        self.get_inputs_calls += 1
+        return [_NodeArg(n) for n in self._names]
+
+    def run(self, _out, feed):
+        self.feed_keys = set(feed)
+        return [_np.array([0.7], dtype=_np.float32),
+                _np.zeros((2, 1, 128), dtype=_np.float32)]
+
+
+ev = object.__new__(dose_voice.DoseVoice)
+ev._vad_state = None
+s1 = _FakeSess(["input", "sr", "state"])
+ev._load_vad = lambda: s1
+frame = (_np.zeros(dose_voice.DoseVoice.VAD_FRAME, dtype=_np.int16)
+         + 100).tobytes()
+prob = None
+for _ in range(120):                      # about four seconds of speech
+    prob = ev.vad_speech_prob(frame)
+check("the VAD still returns a probability", prob is not None
+      and 0.0 <= prob <= 1.0, "got %r" % (prob,))
+check("120 frames ask the model its input names ONCE",
+      s1.get_inputs_calls == 1,
+      "got %d calls" % s1.get_inputs_calls)
+check("all three inputs are still fed",
+      s1.feed_keys == {"input", "sr", "state"},
+      "got %r" % (s1.feed_keys,))
+
+# A swapped model must not inherit the old session's names.
+s2 = _FakeSess(["input"])
+ev._load_vad = lambda: s2
+ev._vad_state = None
+ev.vad_speech_prob(frame)
+check("a swapped model re-reads its own input names",
+      s2.get_inputs_calls == 1, "got %d" % s2.get_inputs_calls)
+check("and is not fed the previous model's inputs",
+      s2.feed_keys == {"input"}, "got %r" % (s2.feed_keys,))
+check("the old session is not re-read either",
+      s1.get_inputs_calls == 1, "got %d" % s1.get_inputs_calls)
+
+
+print("\n6c. The half-built by-name mic picker is gone, not half-gone")
+check("no mic_device setting (nothing ever read it)",
+      '"mic_device": "auto"' not in
+      open(os.path.join(os.path.dirname(os.path.dirname(
+          os.path.abspath(__file__))), "dose_app.py"),
+          encoding="utf-8").read())
+check("no by-name PortAudio opener", "def open_named" not in
+      open(os.path.join(os.path.dirname(os.path.dirname(
+          os.path.abspath(__file__))), "dose_voice.py"),
+          encoding="utf-8").read())
+check("force_card (by ALSA card number) is still the live path",
+      "def force_card" in open(os.path.join(os.path.dirname(
+          os.path.dirname(os.path.abspath(__file__))),
+          "dose_voice.py"), encoding="utf-8").read())
+
 print("\n7. The four places a cached skip would be a BUG")
 src = open(os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "dose_voice.py"), encoding="utf-8").read()

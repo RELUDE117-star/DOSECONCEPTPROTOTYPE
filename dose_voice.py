@@ -1077,6 +1077,11 @@ class DoseVoice:
     _probe_wedged = []
     _probe_timeouts = 0
     _select_timeouts = 0
+    # Silero's input names, and the session they were read from. Cached
+    # because asking cost an ONNX Runtime round trip on every 32 ms
+    # frame; keyed on the session so a swapped model re-reads them.
+    _vad_input_names = None
+    _vad_names_for = None
 
     def __init__(self, app):
         self.app = app
@@ -1480,7 +1485,25 @@ class DoseVoice:
             a = a[:self.VAD_FRAME].astype(np.float32) / 32768.0
             if self._vad_state is None:
                 self._vad_state = np.zeros((2, 1, 128), dtype=np.float32)
-            names = {i.name for i in sess.get_inputs()}
+            # ASK THE MODEL ITS INPUT NAMES ONCE, NOT 31 TIMES A SECOND.
+            #
+            # This was `names = {i.name for i in sess.get_inputs()}`,
+            # evaluated on EVERY VAD frame. A frame is 512 samples at
+            # 16 kHz — 32 ms — so while anybody is speaking this crossed
+            # into the ONNX Runtime C API, allocated a NodeArg per
+            # input and built a fresh set roughly thirty-one times a
+            # second, forever, to answer a question that is fixed for
+            # the life of a loaded session.
+            #
+            # Cached against the session object itself, so swapping the
+            # model (a re-download, a different Silero build with
+            # different input names) re-reads it rather than feeding the
+            # new session the old session's names.
+            names = getattr(self, "_vad_input_names", None)
+            if names is None or self._vad_names_for is not sess:
+                names = {i.name for i in sess.get_inputs()}
+                self._vad_input_names = names
+                self._vad_names_for = sess
             feed = {"input": a.reshape(1, -1)}
             if "sr" in names:
                 feed["sr"] = np.array(SAMPLE_RATE, dtype=np.int64)
@@ -2890,26 +2913,6 @@ class DoseVoice:
             except Exception:
                 continue
         return False
-
-    def list_inputs(self):
-        """Names of all input-capable devices for the mic selector,
-        USB microphones first (they're the ones people plug in on
-        purpose), then Bluetooth, then everything else."""
-        out = []
-        try:
-            for d in self._sd.query_devices():
-                if d.get("max_input_channels", 0) > 0:
-                    n = d.get("name", "")
-                    if n and n not in out:
-                        out.append(n)
-        except Exception:
-            pass
-        out.sort(key=lambda n: (
-            0 if self._is_usb_name(n) else
-            1 if any(k in n.lower() for k in
-                     ("airpod", "bluez", "headset")) else 2,
-            n.lower()))
-        return out
 
     def request_reopen(self):
         """Ask the capture loop to redo device selection now (used
@@ -4908,33 +4911,6 @@ class DoseVoice:
                     h.stdout.close()
             except Exception:
                 pass
-
-        def open_named(pref_name):
-            """User picked a specific device by name: honor it."""
-            try:
-                for i, d in enumerate(self._sd.query_devices()):
-                    if (d.get("max_input_channels", 0) > 0
-                            and d.get("name") == pref_name):
-                        for rate in (SAMPLE_RATE,
-                                     int(d.get("default_samplerate")
-                                         or 48000), 48000, 8000):
-                            try:
-                                s = self._sd.RawInputStream(
-                                    device=i, samplerate=rate,
-                                    blocksize=int(BLOCK_SIZE * rate
-                                                  / SAMPLE_RATE),
-                                    dtype="int16", channels=1,
-                                    callback=callback)
-                                s.start()
-                                self._native_rate = rate
-                                self._ratecv_state = None
-                                self.mic_name = pref_name
-                                return ("portaudio", s)
-                            except Exception:
-                                continue
-            except Exception:
-                pass
-            return None
 
         def open_usb_portaudio():
             """Open the plugged-in USB microphone's hardware directly

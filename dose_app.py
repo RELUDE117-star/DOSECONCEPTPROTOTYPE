@@ -729,9 +729,15 @@ class DoseApp:
 
         # ── State ──────────────────────────────────────────────────────────
         self.med_data = {}
+        # NOTE: there is no "mic_device" here any more. A by-name mic
+        # picker was half-built — this key, a setter, a device lister and
+        # a by-name PortAudio opener — and nothing ever READ the key, so
+        # the picker did nothing. It is superseded by force_card(), which
+        # selects by ALSA card number, is wired to the Settings UI, is
+        # tested, and survives a device being renamed. A settings key
+        # that looks live and is not is worse than no key at all.
         self.settings = {"night_mode": False, "alarm_sound": True,
-                         "constant_scan": False, "voice_enabled": True,
-                         "mic_device": "auto"}
+                         "constant_scan": False, "voice_enabled": True}
         self.theme = dict(DARK_THEME)
         self.mode = "home"
         self.selected_pill = "blue"
@@ -5039,7 +5045,6 @@ class DoseApp:
         # Bluetooth audio is retired: USB mic + USB speaker only.
         # (_ensure_bt_mic_config kept in the code but no longer run —
         # its user-service restarts could disrupt live USB audio.)
-        self.settings["mic_device"] = "auto"
         try:
             from dose_voice import DoseVoice
         except Exception:
@@ -5707,14 +5712,6 @@ class DoseApp:
             except Exception:
                 pass
         threading.Thread(target=worker, daemon=True).start()
-
-    def _set_mic_device(self, value):
-        self.settings["mic_device"] = value
-        self._save_config()
-        self._mic_test_result = None
-        if self.voice:
-            self.voice.request_reopen()
-        self._draw_frame()
 
     # ── LIVE MIC LEVEL METER ────────────────────────────────────────────
     def _open_mic_meter(self):
