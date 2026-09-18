@@ -8383,17 +8383,52 @@ class DoseVoice:
 
     def render_to_cache(self, text):
         """Render one sentence into the cache if it isn't there yet.
-        Returns its path (or None). Safe to call from a worker."""
+        Returns its path (or None). Safe to call from a worker.
+
+        TIMED, BECAUSE THE TURN LOG AND THE BENCH DISAGREE BY TWO
+        SECONDS AND I HAVE GUESSED WRONG FOUR TIMES.
+
+        The turn records 2.78 s for the first chunk. Measured on the
+        device, in the app's own interpreter, with the app running:
+
+            to_speech()                          0.000 s
+            synthesize_wav, no config            0.699 s
+            synthesize_wav, the app's config     0.719 s
+            ONNX thread cap (2 vs 4)             0.18 s of the total
+            CPU contention, app running vs not   15%
+
+        Every layer I could measure from outside is small, so the
+        remaining ~2 s is inside this method or inside _synth, and the
+        only honest way to find it is to make the program report it.
+        Guessing produced: a background thread that was not the cause,
+        a chunker that was already splitting correctly, contention that
+        was 15%, and a thread cap worth 0.18 s.
+        """
+        t0 = time.time()
+        parts = {}
         try:
             path = self._cache_path(text)
+            parts["cache"] = time.time() - t0
             if os.path.exists(path):
+                parts["hit"] = 1
+                self._t_tts = parts
                 return path
+            parts["hit"] = 0
+            t1 = time.time()
             tmp = path + ".tmp"
             with wave.open(tmp, "wb") as w:
                 self._synth(None, to_speech(text), w)
+            parts["synth"] = time.time() - t1
+            t2 = time.time()
             os.replace(tmp, path)
+            parts["write"] = time.time() - t2
+            parts["total"] = time.time() - t0
+            self._t_tts = parts
             return path
-        except Exception:
+        except Exception as e:
+            parts["failed"] = str(e)[:60]
+            parts["total"] = time.time() - t0
+            self._t_tts = parts
             return None
 
     @staticmethod
@@ -9122,6 +9157,12 @@ class DoseVoice:
                 or self._whisper_size,
                 "think": t_think,
                 "speak": getattr(self, "_t_first_sound", 0.0),
+                # WHERE THE FIRST CHUNK'S TIME WENT. `speak` above is
+                # one number and it has disagreed with every bench I
+                # ran by about two seconds. This is the breakdown from
+                # inside render_to_cache: the cache lookup, whether it
+                # was a hit, the synthesis, and the write.
+                "tts": getattr(self, "_t_tts", {}),
                 "cached": getattr(self, "_t_cached", False),
                 "total": (t1 - t_stop) + getattr(
                     self, "_t_first_sound", 0.0),
