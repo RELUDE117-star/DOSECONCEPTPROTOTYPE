@@ -133,6 +133,21 @@ CONFIG_PATH = os.path.expanduser("~/.dose_config.json")
 DATA_PATH = os.path.expanduser("~/dose-home-station/med_data.json")
 ADHERENCE_PATH = os.path.expanduser("~/dose-home-station/adherence_log.json")
 APP_DIR = os.path.expanduser("~/dose-home-station")
+
+# ── AUTO-UPDATE BRAKES ───────────────────────────────────────────────
+# This station both runs a live demo and follows a git branch, and those
+# two jobs are in direct conflict. An update ends in os.execv and the
+# relaunched app checks again two seconds later, so without a brake the
+# cadence of pushes IS the restart rate — and a non-converging update
+# spins forever, reloading four speech models from an SD card each time.
+#
+# Minimum gap between update-driven restarts.
+UPDATE_RESTART_COOLDOWN = float(
+    os.environ.get("DOSE_UPDATE_COOLDOWN", "900"))     # 15 minutes
+# How many restarts one remote hash may cause before the station gives
+# up and stays running instead. Three failures mean the fourth will
+# fail too, and a stuck station that RUNS beats one that reboots.
+UPDATE_MAX_TRIES = int(os.environ.get("DOSE_UPDATE_MAX_TRIES", "3"))
 APP_FILE = os.path.join(APP_DIR, "dose_app.py")
 REPO = "relude117-star/doseconceptprototype"
 BRANCH = "claude/quirky-brown-vkHwi"
@@ -3680,6 +3695,12 @@ class DoseApp:
         "calibration.json", "learning.json", "turns.jsonl",
         "claude-bootstrap-status.json", "error.log", "faulthandler.log",
         "audit-latest.txt", ".installed", ".ready",
+        # The update brake's own state. It is not in the repo, so the
+        # updater has nothing to write here anyway — but an updater that
+        # ever clobbered this file would reset the loop counter on every
+        # update, which is precisely the failure it exists to stop.
+        # Listed explicitly so that stays true if the file is ever added.
+        "update_state.json", ".deps_checked",
     )
     UPDATE_SKIP_DIRS = ("voice/", ".git/", "__pycache__/", "diagnostics/")
     UPDATE_EXTS = (".py", ".sh", ".md", ".png", ".json", ".txt", ".html")
@@ -3890,6 +3911,40 @@ class DoseApp:
                                 "Update available: %s → %s"
                                 % (local_hash[:7], remote_hash[:7]))
                 return
+            # ── TWO BRAKES ON AUTO-UPDATE ────────────────────────────
+            #
+            # There were none, and the shape of the thing is a loop:
+            # _do_update_check runs 2 s after launch, _apply_update ends
+            # in os.execv, and the relaunched app checks again 2 s
+            # later. Nothing counted, nothing waited, nothing could stop
+            # it. Six pushes to the branch this evening meant six
+            # update-and-restart cycles, each one reloading
+            # faster-whisper, Vosk, Silero and Piper from an SD card —
+            # and if an update ever fails to make the on-disk state
+            # match the remote hash, the same cycle runs forever at
+            # whatever speed the Pi can manage.
+            #
+            # Ryan's station went unreachable twice tonight and needed
+            # physical restarts. He suggested the update cadence, and he
+            # was looking at the right thing: a device cannot be
+            # simultaneously a live demo and a continuous-deployment
+            # target.
+            #
+            # BRAKE 1 — a freeze switch. DOSE_FREEZE=1 stops the station
+            # pulling anything at all. This is what to set before a
+            # pitch: whatever is installed stays installed.
+            if os.environ.get("DOSE_FREEZE", "").lower() in (
+                    "1", "true", "yes", "on"):
+                self.root.after(0, self._update_result,
+                                "Frozen (DOSE_FREEZE) — %s available, "
+                                "not applying" % remote_hash[:7])
+                return
+            # BRAKE 2 — a cooldown between update-driven restarts, so a
+            # never-converging update cannot spin. Persisted, because
+            # the whole problem is that the process restarts: anything
+            # held in memory is forgotten by the process that needs it.
+            if not self._update_cooldown_ok(remote_hash):
+                return
             try:
                 authoritative = self._fetch_repo_file(
                     "dose_app.py", api_only=True)
@@ -3908,6 +3963,77 @@ class DoseApp:
             self.root.after(0, self._apply_update, authoritative)
             return
         self.root.after(0, self._apply_update, remote_data)
+
+    def _update_cooldown_ok(self, remote_hash):
+        """Decide whether an auto-update may restart the app right now.
+
+        THE LOOP THIS BREAKS. _do_update_check runs 2 s after launch,
+        _apply_update ends in os.execv, and the relaunched app checks
+        again 2 s later. If an update ever does not make the on-disk
+        state match the remote hash — an unwritable file, a blob that
+        will not verify, a partial fetch — the station updates,
+        restarts, finds the same difference, and does it again, forever,
+        reloading four speech models from an SD card every cycle.
+
+        The state has to be ON DISK. The whole failure mode is that the
+        process restarts, so a counter in memory is forgotten by exactly
+        the process that needs to read it.
+
+        Rules:
+          * the same remote hash may drive at most UPDATE_MAX_TRIES
+            restarts. After that the station stops and says so — an
+            update that has not taken after three attempts is not going
+            to take on the fourth, and a stuck station that is RUNNING
+            beats one that is rebooting.
+          * consecutive update-restarts are spaced at least
+            UPDATE_RESTART_COOLDOWN apart, so even a converging stream
+            of pushes cannot restart the app back to back.
+          * a NEW hash resets the counter but still respects the
+            cooldown.
+
+        Returns True to proceed. Never raises: a broken brake must not
+        stop the station updating at all, because a device nobody can
+        update is a device nobody can fix.
+        """
+        try:
+            path = os.path.join(APP_DIR, "update_state.json")
+            now = time.time()
+            st = {}
+            try:
+                with open(path) as f:
+                    st = json.load(f) or {}
+            except Exception:
+                st = {}
+            last_at = float(st.get("last_restart_at") or 0)
+            last_hash = str(st.get("hash") or "")
+            tries = int(st.get("tries") or 0)
+            if last_hash != remote_hash:
+                tries = 0                      # a genuinely new build
+
+            since = now - last_at
+            if last_at and since < UPDATE_RESTART_COOLDOWN:
+                self.root.after(
+                    0, self._update_result,
+                    "Update %s held %ds (cooldown)"
+                    % (remote_hash[:7],
+                       int(UPDATE_RESTART_COOLDOWN - since)))
+                return False
+            if tries >= UPDATE_MAX_TRIES:
+                self.root.after(
+                    0, self._update_result,
+                    "Update %s failed %d times — STOPPED. Tap UPDATE to "
+                    "retry." % (remote_hash[:7], tries))
+                return False
+
+            st.update({"hash": remote_hash, "tries": tries + 1,
+                       "last_restart_at": now})
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(st, f)
+            os.replace(tmp, path)
+            return True
+        except Exception:
+            return True
 
     def _update_result(self, msg):
         self._update_status_text = msg

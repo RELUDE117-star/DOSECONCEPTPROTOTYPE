@@ -69,3 +69,8 @@ id_*
 # Device-local marker: when the dependency pass last ran. Per-device
 # state, not source.
 .deps_checked
+
+# The auto-update brake's state: how many restarts one remote hash has
+# already caused, and when the last one was. Per-device by definition —
+# committing it would hand every station another device's counter.
+update_state.json

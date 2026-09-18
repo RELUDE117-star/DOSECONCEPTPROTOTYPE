@@ -239,6 +239,7 @@ def fell_back(**kw):
     return par._synth_via_worker("hello", kw.get("wav", "/tmp/x.wav"))
 
 
+os.environ["DOSE_PIPER_WORKER"] = "1"   # exercise the ON path's fallbacks
 with tempfile.TemporaryDirectory() as tmp:
     # no model path at all
     check("no Piper model -> falls back",
@@ -256,6 +257,7 @@ try:
 finally:
     dose_voice.os.path.exists = saved
 
+os.environ.pop("DOSE_PIPER_WORKER", None)
 # disabled by environment
 os.environ["DOSE_PIPER_WORKER"] = "0"
 try:
@@ -266,8 +268,33 @@ try:
 finally:
     os.environ.pop("DOSE_PIPER_WORKER", None)
 
-check("DOSE_PIPER_WORKER unset -> enabled by default",
-      Parent()._worker_enabled() is True)
+check("DOSE_PIPER_WORKER unset -> DISABLED by default",
+      Parent()._worker_enabled() is False)
+check("DOSE_PIPER_WORKER=1 -> enabled",
+      (os.environ.__setitem__("DOSE_PIPER_WORKER", "1"),
+       Parent()._worker_enabled(),
+       os.environ.pop("DOSE_PIPER_WORKER", None))[1] is True)
+# WHY THE DEFAULT IS OFF: it shipped on, and Ryan's station went
+# unreachable twice within the hour and needed a physical restart both
+# times. The likely cause — a second resident ONNX session, because
+# every caller pre-loaded the parent's Piper voice whether or not the
+# worker was going to do the work — is fixed below. But "likely" is not
+# a standard worth holding when the failure mode is a device that must
+# be unplugged, so the station runs this morning's known-good path
+# until a soak measures the memory.
+src_dv = open(os.path.join(ROOT, "dose_voice.py"), encoding="utf-8").read()
+# Count CODE, not the comment that explains why this rule exists —
+# the same mistake the injection detector made four times over.
+_code_lines = [ln for ln in src_dv.splitlines()
+               if not ln.lstrip().startswith("#")]
+_n_loads = sum(ln.count("self._load_piper()") for ln in _code_lines)
+check("the parent's Piper voice is loaded at exactly ONE site",
+      _n_loads == 1, "found %d call sites" % _n_loads)
+check("and that one load sits after the worker has declined",
+      src_dv.index("_synth_via_worker(text, wav)")
+      < src_dv.index("voice = self._load_piper()"))
+check("no caller pre-loads a voice just to hand it in",
+      "self._synth(voice," not in src_dv)
 
 
 print("\n4. Respawn, but never in a tight loop")
@@ -354,6 +381,8 @@ with tempfile.TemporaryDirectory() as tmp:
     saved_path = os.environ.get("PYTHONPATH", "")
     os.environ["PYTHONPATH"] = d + os.pathsep + saved_path
     os.environ["FAKE_LOAD_COUNTER"] = loads
+    # The worker is default-OFF now, so these checks ask for it.
+    os.environ["DOSE_PIPER_WORKER"] = "1"
     try:
         eng = object.__new__(_dv.DoseVoice)
         eng._piper_path = model
@@ -439,6 +468,7 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         os.environ["PYTHONPATH"] = saved_path
         os.environ.pop("FAKE_LOAD_COUNTER", None)
+        os.environ.pop("DOSE_PIPER_WORKER", None)
 
 check("the lock covers the whole request/response, not just the spawn",
       "_synth_via_worker_locked" in

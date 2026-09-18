@@ -3171,12 +3171,11 @@ class DoseVoice:
         """Play a short spoken line on the current speaker. Returns
         the playback path used, or False if nothing could play."""
         try:
-            voice = self._load_piper()
             fd, path = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
             with wave.open(path, "wb") as w:
                 self._synth(
-                    voice,
+                    None,
                     "Speaker test. If you can hear me, Ryan, this "
                     "speaker is working.", w)
             method = self._play_wav(path)
@@ -3543,7 +3542,9 @@ class DoseVoice:
         clip in any other voice simply cannot be selected."""
         try:
             self._purge_foreign_cache()
-            self._load_piper()
+            # No eager _load_piper() here. render_to_cache() below goes
+            # through _synth(), which uses the worker and only builds an
+            # in-process session if the worker declines.
             self._ack_files = []
             for line in self.ACKS:
                 path = self.render_to_cache(line)
@@ -4005,13 +4006,12 @@ class DoseVoice:
             except Exception:
                 pass
             try:
-                voice = self._load_piper()
                 fd, wp = tempfile.mkstemp(suffix=".wav",
                                           dir=TMP_AUDIO_DIR)
                 os.close(fd)
                 try:
                     with wave.open(wp, "wb") as w:
-                        self._synth(voice, "ready", w)
+                        self._synth(None, "ready", w)
                 finally:
                     try:
                         os.unlink(wp)
@@ -5906,8 +5906,26 @@ class DoseVoice:
     # DOSE_PIPER_WORKER=0 disables it outright, so if it misbehaves on
     # the device it can be switched off without a code change.
     def _worker_enabled(self):
-        return os.environ.get("DOSE_PIPER_WORKER", "1") not in (
-            "0", "false", "no", "")
+        # DEFAULT OFF, DELIBERATELY, UNTIL MEASURED ON HARDWARE.
+        #
+        # This shipped default-on and the station went unreachable twice
+        # within the hour, needing a physical restart both times. The
+        # cause was almost certainly a second resident ONNX session (see
+        # the note in _synth) and that is now fixed — but "almost
+        # certainly" is not a standard worth holding when the failure
+        # mode is a device that has to be unplugged, and a pitch is
+        # coming.
+        #
+        # So the station goes back to exactly the behaviour it had this
+        # morning: in-process synthesis, with the ONNX abort handled by
+        # the supervisor's ~20 s restart. A known 20-second recovery
+        # beats an unknown hard lockup.
+        #
+        # DOSE_PIPER_WORKER=1 turns it on for a measured soak. When a
+        # soak shows total RSS at or below the in-process baseline, this
+        # default flips back and the abort stops costing 20 seconds.
+        return os.environ.get("DOSE_PIPER_WORKER", "0") in (
+            "1", "true", "yes", "on")
 
     def _piper_worker(self):
         """The live worker, started if needed. None if unavailable."""
@@ -6099,6 +6117,27 @@ class DoseVoice:
         except Exception as e:
             self._note_tts("worker path raised, using in-process: %r"
                            % (e,))
+        # THE PARENT'S MODEL IS LOADED HERE AND NOWHERE ELSE.
+        #
+        # Every caller used to do `voice = self._load_piper()` and hand
+        # the result in, which meant the parent built a full Piper ONNX
+        # session whether or not it was going to use it. With synthesis
+        # moved into a worker, that made TWO complete sessions resident:
+        # the child's, doing the work, and the parent's, doing nothing.
+        #
+        # On a 4 GB Pi already holding faster-whisper, Vosk, Silero VAD,
+        # picamera2 and Tkinter — the app measured 33.5% of memory
+        # BEFORE any of this — a second ONNX session is the difference
+        # between tight and over. Ryan's station went unreachable twice
+        # this evening and needed a physical restart, which is what
+        # memory pressure looks like from outside and is NOT what a
+        # Wi-Fi drop looks like.
+        #
+        # So the voice is resolved lazily, at the one point it is
+        # actually needed: after the worker has declined. A station
+        # whose worker is healthy never builds this session at all.
+        if voice is None:
+            voice = self._load_piper()
         # Newer piper-tts: SynthesisConfig(length_scale, noise_scale,...)
         try:
             from piper import SynthesisConfig
@@ -6291,10 +6330,9 @@ class DoseVoice:
             path = self._cache_path(text)
             if os.path.exists(path):
                 return path
-            voice = self._load_piper()
             tmp = path + ".tmp"
             with wave.open(tmp, "wb") as w:
-                self._synth(voice, to_speech(text), w)
+                self._synth(None, to_speech(text), w)
             os.replace(tmp, path)
             return path
         except Exception:
@@ -6417,12 +6455,11 @@ class DoseVoice:
         """Last resort: synthesize straight to a temp file and play."""
         tmp = None
         try:
-            voice = self._load_piper()
             fd, tmp = tempfile.mkstemp(suffix=".wav",
                                        dir=TMP_AUDIO_DIR)
             os.close(fd)
             with wave.open(tmp, "wb") as w:
-                self._synth(voice, to_speech(text), w)
+                self._synth(None, to_speech(text), w)
             self._play_wav(tmp)
         except Exception:
             pass
