@@ -104,6 +104,10 @@ check("it is long enough for a normal escalation (>= 3s)",
       dose_voice.STT_TURN_BUDGET >= 3, dose_voice.STT_TURN_BUDGET)
 check("the escalation is more expensive than the fast model",
       dose_voice.ESCALATION_COST_RATIO > 1)
+check("...and the ratio is the measured one (base.en 3.98s against "
+      "tiny.en 2.12s on this board), not a round guess",
+      1.5 <= dose_voice.ESCALATION_COST_RATIO <= 2.5,
+      dose_voice.ESCALATION_COST_RATIO)
 check("the budget is an environment override",
       "DOSE_STT_BUDGET" in open(dose_voice.__file__.replace(".pyc", ".py"),
                                 encoding="utf-8").read())
@@ -144,12 +148,17 @@ check("the fast turn from the log (0.12s) still escalates",
       decide(0.12))
 check("the worst turn from the log (17.26s) does NOT",
       not decide(17.26))
-check("a 1s fast pass escalates (1s + ~3s fits in the budget)",
-      decide(1.0))
-check("a 2s fast pass does not (2s + ~6s does not)",
-      not decide(2.0))
+check("a 1s fast pass escalates", decide(1.0))
+# The ratio is MEASURED on this board, not assumed: same recording,
+# three passes, median, tiny.en 2.12s against base.en 3.98s. It started
+# at 3x, which made the station skip escalations it had time for and
+# traded accuracy away for latency it was not short of.
+check("the typical 2.1s pass on this board still escalates — the "
+      "measured ratio bought that back", decide(2.1))
+check("a 3s fast pass does not", not decide(3.0))
+_edge = dose_voice.STT_TURN_BUDGET / (1 + dose_voice.ESCALATION_COST_RATIO)
 check("the boundary is where the estimate stops fitting",
-      decide(1.4) and not decide(1.6))
+      decide(_edge - 0.1) and not decide(_edge + 0.1), _edge)
 
 print("\n── what a skipped escalation hands back ─────────────────────")
 
