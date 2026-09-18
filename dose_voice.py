@@ -8564,22 +8564,50 @@ class DoseVoice:
                     for e in done:
                         e.set()
 
-            if len(chunks) > 1:
-                threading.Thread(target=render_rest, daemon=True,
-                                 name="tts-stream").start()
-
             # 3) first chunk: render and speak immediately
+            #
+            # THE BACKGROUND RENDER USED TO START BEFORE THIS ONE.
+            #
+            # The intent was right — overlap the rest with playback of
+            # the first chunk — but starting the thread here overlapped
+            # it with the RENDER of the first chunk instead, which is
+            # the one piece of work on the critical path. On four cores
+            # running ONNX that is direct competition for the thing the
+            # person is waiting for.
+            #
+            # The device measured it plainly. `speak` is the first
+            # chunk's render time and nothing else, so it should be
+            # roughly CONSTANT no matter how long the reply is. It was
+            # not:
+            #
+            #   reply                                  speak
+            #   "The time is 1:18 PM."                  2.00
+            #   "I could not find aspirin, Ryan."       2.31
+            #   "No medications are in view today..."   3.14
+            #   "Current inventory: New Medication..."  4.55
+            #
+            # It scales with the length of the WHOLE reply, which a
+            # first-chunk render cannot do on its own. The extra is the
+            # background thread rendering chunks two onward, and a
+            # longer reply has more of them.
+            #
+            # So: render the first chunk, note the time, THEN start the
+            # rest, then play. The overlap that was wanted is still
+            # there — it now overlaps playback, which is what the
+            # comment above always said it did.
             _t_speak0 = time.time()
             self._t_cached = False
             try:
                 first = self.render_to_cache(chunks[0])
             except Exception:
                 first = None
+            self._t_first_sound = time.time() - _t_speak0
+            if len(chunks) > 1:
+                threading.Thread(target=render_rest, daemon=True,
+                                 name="tts-stream").start()
             if first:
-                self._t_first_sound = time.time() - _t_speak0
                 self._play_wav(first)
             else:
-                self._t_first_sound = time.time() - _t_speak0
                 self._speak_uncached(chunks[0])
 
             # 4) the remainder, each as soon as it exists — unless

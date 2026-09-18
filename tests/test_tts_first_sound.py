@@ -203,6 +203,41 @@ check("the remainder still renders on a worker while the opening "
       "plays — that is what makes this free",
       "name=\"tts-stream\"" in CODE)
 
+print("\n── the background render must not race the first chunk ─────")
+# The intent was always to overlap the remaining chunks with PLAYBACK
+# of the first one. The thread was started before the first chunk was
+# rendered, so it overlapped the RENDER instead — competing, on four
+# cores running ONNX, with the single piece of work the person is
+# waiting for.
+#
+# The device measured it. `speak` in the turn row is the first chunk's
+# render time and nothing else, so it should be roughly constant
+# whatever the reply length. It was not:
+#
+#   "The time is 1:18 PM."                  speak 2.00
+#   "I could not find aspirin, Ryan."       speak 2.31
+#   "No medications are in view today..."   speak 3.14
+#   "Current inventory: New Medication..."  speak 4.55
+#
+# A first-chunk render cannot scale with the length of the whole reply
+# on its own. The extra is the other chunks, rendering underneath it.
+_i_render = SRC.index("first = self.render_to_cache(chunks[0])")
+_i_thread = SRC.index('name="tts-stream"')
+_i_play = SRC.index("self._play_wav(first)")
+_i_stamp = SRC.index("self._t_first_sound = time.time() - _t_speak0")
+
+check("the first chunk is rendered before the worker starts",
+      _i_render < _i_thread,
+      "otherwise the worker competes for the critical path")
+check("time-to-first-sound is stamped before the worker starts too",
+      _i_stamp < _i_thread,
+      "or the measurement includes the contention it caused")
+check("the worker still starts before playback, so it overlaps the "
+      "AUDIO — which is what makes streaming free",
+      _i_thread < _i_play)
+check("there is still exactly one worker",
+      SRC.count('name="tts-stream"') == 1)
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:
