@@ -86,6 +86,23 @@ SPIN_TIME = 4.0
 DISPENSED_TIME = 4.0
 DEFAULT_QTY = 30
 QR_PRESENCE_TIMEOUT = 2.5   # removal shows within ~2.5s of pickup
+
+# ── QR camera duty cycle ──────────────────────────────────────────────
+# The camera loop used to decode five frames a second for ever, which
+# py-spy measured at ~84% of a core CONTINUOUSLY — the largest
+# steady-state cost on the board, taken from the microphone and paid for
+# in heat. A lit cabinet whose contents change a few times a day does not
+# need five looks a second.
+#
+# It now bursts every QR_SCAN_INTERVAL seconds and idles in between. The
+# burst exists because one frame is a coin-flip against glare, focus and
+# hand shadow, while eight consecutive frames is not.
+#
+# The camera debug view and request_qr_scan() both still scan
+# immediately, so nothing a person is watching or has just asked for
+# waits on this timer.
+QR_SCAN_INTERVAL = float(os.environ.get("DOSE_QR_SCAN_INTERVAL", "300"))
+QR_BURST_FRAMES = int(os.environ.get("DOSE_QR_BURST_FRAMES", "8"))
 # A bottle counts as REMOVED only after this many completed scan passes
 # in a row that did not see its code — never on elapsed time alone.
 # At the camera's ~0.2 s cadence that is about 1.6 s of real scanning.
@@ -786,6 +803,8 @@ class DoseApp:
         self._camera_view = False
         self._camera_frame = None
         self._camera_qr_results = []
+        # Set to ask the duty-cycled camera loop for an immediate burst.
+        self._qr_scan_now = False
         self._settings_tap_count = 0
         self._settings_tap_time = 0
 
@@ -2163,7 +2182,29 @@ class DoseApp:
             c.create_text(200, SCREEN_H - 16, text="  |  ".join(info_parts),
                           font=self.font_small, fill=t["muted"], anchor="sw")
 
+    def request_qr_scan(self, force=False):
+        """Ask the camera loop for an immediate QR burst.
+
+        The loop is duty-cycled (see QR_SCAN_INTERVAL) to keep ~84% of a
+        core away from pyzbar. This is the escape hatch for anything
+        that means "look NOW": a bottle has just been put in, a screen
+        has just been closed, the assistant was asked what is in the
+        cabinet.
+
+        Rate-limited to one burst per 10 s unless forced, so wiring it
+        to a touch handler cannot accidentally restore the old
+        always-scanning behaviour through the back door."""
+        now = time.time()
+        if not force and now - getattr(self, "_qr_last_request", 0) < 10:
+            return False
+        self._qr_last_request = now
+        self._qr_scan_now = True
+        return True
+
     def _close_camview(self):
+        # Take a fresh reading on the way out: whoever just had the
+        # camera view open may well have been putting something in.
+        self.request_qr_scan(force=True)
         self._camera_view = False
         self.mode = self._prev_mode
         self._draw_frame()
@@ -4239,8 +4280,56 @@ class DoseApp:
         # bottles look like they were being removed and replaced.
         locked = False
         settle_until = time.time() + 3.5
+        # ── DUTY CYCLE ───────────────────────────────────────────────
+        # This loop used to capture and decode five frames a second,
+        # for ever. Measured on the device with py-spy, pyzbar.decode
+        # in here held ~84% of a core CONTINUOUSLY — the single largest
+        # steady-state cost on the board, competing directly with the
+        # microphone for a core and pushing the SoC temperature up for
+        # no benefit. The cabinet is internally lit and its contents
+        # change a few times a day, not five times a second.
+        #
+        # So it now BURSTS: a short run of frames (a burst decodes far
+        # more reliably than a single frame — glare, focus and hand
+        # shadow all vary between frames), then sleeps.
+        #
+        # Three things still get an IMMEDIATE scan, because a
+        # medication cabinet that takes five minutes to notice a bottle
+        # would be worse than useless:
+        #   * the camera debug view, which stays fully live while open
+        #   * anything calling request_qr_scan()
+        #   * the first pass after launch (last_burst starts at 0)
+        last_burst = 0.0
+        # Burst on the FIRST pass explicitly, rather than relying on
+        # (time.time() - 0.0) happening to exceed the interval. That is
+        # true today and would stop being true the moment anyone made
+        # this clock monotonic — and the failure would be a five-minute
+        # blind spot at launch, which is exactly when someone is most
+        # likely to be standing in front of the cabinet.
+        burst_left = QR_BURST_FRAMES
         while self.camera_running:
             try:
+                # Fully live while someone is actually watching the
+                # camera view; duty-cycled otherwise.
+                live = bool(self._camera_view and self.mode == "camview")
+                now = time.time()
+                if getattr(self, "_qr_scan_now", False):
+                    self._qr_scan_now = False
+                    burst_left = QR_BURST_FRAMES
+                elif (not live and burst_left <= 0
+                        and now - last_burst >= QR_SCAN_INTERVAL):
+                    burst_left = QR_BURST_FRAMES
+                if not live and burst_left <= 0:
+                    # IDLE: no capture, no decode, no colour convert.
+                    # Short sleep so camera_running and an on-demand
+                    # request are still noticed promptly.
+                    time.sleep(0.5)
+                    continue
+                if not live:
+                    burst_left -= 1
+                    if burst_left <= 0:
+                        last_burst = time.time()
+
                 if not locked and time.time() >= settle_until:
                     try:
                         meta = self.camera.capture_metadata()
