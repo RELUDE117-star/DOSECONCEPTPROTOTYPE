@@ -5838,9 +5838,25 @@ class DoseVoice:
                             rc = None
                         if proc.poll() is None and self._stop.is_set():
                             why = "stop event set while running"
+                        # Say what the recorder SAID, not just that it
+                        # went. The last line of its stderr is the
+                        # difference between "overrun" and "device
+                        # disappeared" and "we closed it", and those
+                        # want three different fixes.
+                        last = ""
+                        try:
+                            buf = getattr(self, "_capture_errs", None) or []
+                            for line in reversed(buf):
+                                if str(label)[:24] in line:
+                                    last = line.split(": ", 1)[-1][:90]
+                                    break
+                        except Exception:
+                            pass
                         self._note_reopen(
-                            "recorder %r ended after %d blocks (rc=%s): %s"
-                            % (str(label)[:40], delivered, rc, why))
+                            "recorder %r ended after %d blocks (rc=%s): %s%s"
+                            % (str(label)[:40], delivered, rc, why,
+                               ("  | said: " + last) if last else
+                               "  | said nothing"))
             threading.Thread(target=reader, daemon=True).start()
             self.mic_name = name
             return ("pipe", p)
@@ -5861,10 +5877,23 @@ class DoseVoice:
 
             def attempt(sd, base, rate, ch):
                 dev = "%s:%d,%d" % (base, card, sd)
+                # NO -q. It suppresses arecord's own messages, and
+                # arecord's own messages are the only thing that says
+                # WHY it stopped. The device has been recording
+                #
+                #     recorder ended after 100 blocks (rc=1): unknown
+                #
+                # about thirty times a minute, and "unknown" is not the
+                # recorder being unhelpful — it is this flag. A hand-run
+                # arecord on the same card survives thirty seconds and
+                # captures exactly 5,736,000 bytes, so the hardware is
+                # fine and the answer is in the text we were throwing
+                # away. The stderr drain already keeps the last forty
+                # lines and cannot fill a pipe.
                 cap = open_pipe_cmd(
                     ["arecord", "-D", dev, "-f", "S16_LE",
                      "-r", str(rate), "-c", str(ch),
-                     "-t", "raw", "-q", "-"],
+                     "-t", "raw", "-"],
                     "mic arecord %s @%d %dch" % (dev, rate, ch),
                     native_rate=rate, channels=ch)
                 if cap:
