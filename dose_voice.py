@@ -4738,13 +4738,49 @@ class DoseVoice:
                 os.nice(10)
             except Exception:
                 pass
-            silence = b"\x00\x00" * SAMPLE_RATE      # 1 s of nothing
+            # WARM WITH A SIGNAL, NOT WITH SILENCE.
+            #
+            # This warmed the recogniser by transcribing one second of
+            # zeros — with vad_filter on, which is how the station runs
+            # it. The VAD removed the silence, there was nothing left
+            # to decode, and the "warm-up" returned without the model
+            # ever performing an inference. It warmed nothing.
+            #
+            # Measured on the device, real turns after a restart:
+            #
+            #     turn 1  decode 21.42s   on 0.96s of audio
+            #     turn 2  decode  4.08s   on 1.72s of audio
+            #     turn 3  decode  4.09s   on 2.66s of audio
+            #
+            # Twenty-one seconds of first-inference cost — building
+            # kernels, faulting weights in off the SD card — landing on
+            # the first person who speaks to a station that has just
+            # started, every single time. Steady state is flat at about
+            # 4.1s regardless of length, because Whisper pads every
+            # utterance to thirty seconds, so that 21s is not the audio
+            # being long. It is the first run.
+            #
+            # A quiet tone is enough to make the VAD keep it and the
+            # decoder actually run. It is never heard by anyone: this
+            # is a buffer handed straight to the model.
+            import math as _m
+            from array import array as _arr
+            _n = int(SAMPLE_RATE * 1.2)
+            warm_audio = _arr(
+                "h", (int(1200 * _m.sin(i * 0.06)) for i in range(_n))
+            ).tobytes()
+            silence = warm_audio
             # 1) the FAST model (tiny.en) + Piper — the two things the
             #    very first turn needs. Warm Piper with a real synth so
             #    the first reply does not pay the ONNX graph cost.
             try:
                 self._load_whisper_fast()
-                self._fw_transcribe(self._whisper_fast, silence)
+                # vad=False as well as a real signal: belt and braces,
+                # because the whole point is that an inference HAPPENS.
+                self._fw_transcribe(self._whisper_fast, warm_audio,
+                                    vad=False)
+                self._warm_decode = round(
+                    getattr(self, "_t_fw_decode", 0.0), 2)
             except Exception:
                 pass
             try:

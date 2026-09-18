@@ -249,6 +249,44 @@ check("...and the block-count estimate is only a fallback",
       CODE.count("else round(blocks * BLOCK_SIZE") >= 2)
 check("it is reset per turn", "self._turn_secs = None" in CODE)
 
+print("\n── the warm-up actually warms something ────────────────────")
+# It transcribed one second of ZEROS, with vad_filter on, which is how
+# the station runs it. The VAD removed the silence, there was nothing
+# left to decode, and the model never performed an inference. Measured
+# on the device, real turns after a restart:
+#
+#     turn 1  decode 21.42s  on 0.96s of audio
+#     turn 2  decode  4.08s  on 1.72s of audio
+#     turn 3  decode  4.09s  on 2.66s of audio
+#
+# Twenty-one seconds of first-inference cost landing on the first
+# person to speak to a station that has just started. Steady state is
+# flat at ~4.1s whatever the length, because Whisper pads every
+# utterance to thirty seconds — so the 21s is not long audio, it is
+# the first run.
+
+check("the warm-up no longer hands the model pure zeros",
+      'silence = b"\\x00\\x00" * SAMPLE_RATE' not in CODE)
+check("it builds a real signal", "warm_audio" in CODE)
+check("...and turns the VAD OFF for it, so a decode cannot be skipped",
+      "self._fw_transcribe(self._whisper_fast, warm_audio," in CODE
+      and "vad=False)" in CODE)
+check("how long the warm decode took is recorded",
+      "_warm_decode" in CODE)
+
+import math as _math                                         # noqa: E402
+from array import array as _ar                               # noqa: E402
+_n = int(dose_voice.SAMPLE_RATE * 1.2)
+_buf = _ar("h", (int(1200 * _math.sin(i * 0.06))
+                 for i in range(_n))).tobytes()
+_a = _ar("h")
+_a.frombytes(_buf)
+check("the warm buffer is something a VAD would keep",
+      max(max(_a), -min(_a)) > 500 and sum(1 for v in _a if v) > _n * 0.9,
+      (max(max(_a), -min(_a)), sum(1 for v in _a if v), _n))
+check("...and is over a second long, so it is a real decode",
+      len(_a) / float(dose_voice.SAMPLE_RATE) >= 1.0)
+
 print("\n── the thread the turn waits on is not deprioritised ───────")
 # It used to call os.nice(5), on the reasoning that a missed QR decode
 # was worse than "a few milliseconds of extra speech latency" and that
