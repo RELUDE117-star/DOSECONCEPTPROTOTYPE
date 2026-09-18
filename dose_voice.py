@@ -538,6 +538,25 @@ CAPTURE_OPEN_BUDGET = float(      # the entire route walk in open_capture
 # never RMS - in the same recordings, RMS was 0 for BOTH.
 ROUTE_LIVE_PEAK = int(os.environ.get("DOSE_ROUTE_LIVE_PEAK", "3"))
 
+# How long a route is listened to before it is judged, and how long a
+# route that has NOT proven itself is given before it is condemned.
+#
+# 1.6 s was the whole window, and it was not long enough to ask. In
+# this room about 1.2% of blocks carry a non-zero sample (38 of 3100,
+# measured), so 1.6 s is about 75 blocks and an expected 0.9 of them
+# carry anything at all. The station rejected its own working
+# microphone on that coin toss roughly half the time, TERMed it, and
+# started the walk again — 146 reopens in six minutes, every one of
+# them "Aborted by signal Terminated" at exactly 94 blocks.
+#
+# Listening stops the instant a sample clears ROUTE_LIVE_PEAK, so a
+# live route costs about what it always did and only a silent one pays
+# the patience.
+ROUTE_FLOOR_SECONDS = float(os.environ.get("DOSE_ROUTE_FLOOR_SECONDS",
+                                           "1.6"))
+ROUTE_FLOOR_PATIENCE = float(os.environ.get("DOSE_ROUTE_FLOOR_PATIENCE",
+                                            "5.0"))
+
 # How often the stereo downmix re-decides which channel carries the
 # microphone. Once a second is far more often than a soldered capsule
 # changes sides, and doing it every block cost three quarters of the
@@ -6345,7 +6364,8 @@ class DoseVoice:
                         continue
             return None
 
-        def route_floor(seconds=1.6):
+        def route_floor(seconds=ROUTE_FLOOR_SECONDS,
+                        patience=ROUTE_FLOOR_PATIENCE, deadline=None):
             """PEAK level from the just-opened route. A real microphone
             ALWAYS has an analog noise floor above zero; a wrong or dead
             route delivers perfect digital silence. This tells them
@@ -6381,19 +6401,79 @@ class DoseVoice:
             RMS is still computed and returned alongside, because it is
             the right measure for SPEECH once a route is chosen — it
             just cannot be the test for whether a device is connected.
+
+            AND 1.6 SECONDS WAS NOT LONG ENOUGH TO ASK.
+
+            With the channel fix in and the buffer negotiated, the
+            device delivered this:
+
+                mic:         arecord plughw:5,0 @48000 2ch
+                blocks/sec:  45.9        (nominal 46.9)
+                live level:  peak 11
+                capture reopens: 146
+
+            and, every 2.07 seconds without exception:
+
+                recorder ... ended after 94 blocks (rc=1):
+                  said: Aborted by signal Terminated
+
+            A SIGTERM, on a route the heartbeat could see was live.
+            The walk was killing a working microphone, over and over,
+            because this function told it to: 94 blocks is 1.6 s at 47
+            blocks/sec, which is exactly this window.
+
+            The reason is measured and already written down one section
+            away, about the silence watchdog: in this room only about
+            1.2% of blocks carry a non-zero sample (38 of 3100). A
+            1.6-second window is about 75 blocks, so the expected
+            number of blocks carrying ANY signal is 0.9. Rejecting a
+            microphone on that is a coin toss, and the station lost it
+            about half the time, forever.
+
+            No threshold separates quiet from dead. Time does — the
+            same conclusion, reached twice in this file, and this is
+            the second place that needed it.
+
+            So a route that has not proven itself is listened to for
+            longer instead of being condemned: up to
+            ROUTE_FLOOR_PATIENCE, and the moment a sample clears
+            ROUTE_LIVE_PEAK the listening STOPS, so a live route costs
+            barely more than before and only a genuinely silent one
+            pays the full patience. The walk's own deadline is passed
+            in and honoured, because a budget consulted only after the
+            expensive thing has finished is not a budget — also
+            already learned here, also the hard way.
             """
             try:
                 while True:
                     self._audio_q.get_nowait()
             except queue.Empty:
                 pass
-            end = time.time() + seconds
+            t0 = time.time()
+            floor_end = t0 + seconds
+            patient_end = t0 + max(seconds, patience)
+            if deadline is not None:
+                # Never let a second look push the walk past its budget.
+                patient_end = min(patient_end, deadline)
+                floor_end = min(floor_end, deadline)
             peak = 0
             rms = 0
             seen = 0
             self._measuring_route = True
             try:
-                while time.time() < end:
+                while True:
+                    now = time.time()
+                    if peak >= ROUTE_LIVE_PEAK:
+                        # Proven live. Nothing is learned by listening
+                        # to a microphone we have already believed.
+                        break
+                    if now >= patient_end:
+                        break
+                    if now >= floor_end and seen == 0:
+                        # Not quiet — not delivering at all. More time
+                        # will not produce blocks that are not coming,
+                        # and this is the case a dead pipe looks like.
+                        break
                     try:
                         data = self._audio_q.get(timeout=0.4)
                     except queue.Empty:
@@ -6406,6 +6486,7 @@ class DoseVoice:
                 self._measuring_route = False
             self._last_route_rms = rms
             self._last_route_blocks = seen
+            self._last_route_secs = time.time() - t0
             return peak
 
         def open_capture():
@@ -6560,15 +6641,26 @@ class DoseVoice:
                 if not cap:
                     self.mic_trail.append(label + ": could not open")
                     continue
-                floor = route_floor()
+                # The walk's own budget bounds the patience, so giving
+                # a quiet route a fair hearing can never cost the walk
+                # its deadline.
+                floor = route_floor(deadline=walk_end)
+                # HOW LONG IT WAS LISTENED TO IS PART OF THE VERDICT.
+                # "peak 0, rejected" was written identically whether
+                # the route had been given 1.6 s or none at all, and
+                # the difference between those two is the difference
+                # between a dead endpoint and a walk that ran out of
+                # budget — which is a whole session of looking in the
+                # wrong place.
                 self.mic_trail.append(
-                    "%s: opened, peak %d (rms %d, %d blocks)%s%s" % (
-                        label, floor,
-                        getattr(self, "_last_route_rms", 0),
-                        getattr(self, "_last_route_blocks", 0),
-                        "" if floor >= ROUTE_LIVE_PEAK
-                        else " — DIGITALLY SILENT, rejected",
-                        " (output device?)" if speakerish else ""))
+                    "%s: opened, peak %d (rms %d, %d blocks in %.1fs)%s%s"
+                    % (label, floor,
+                       getattr(self, "_last_route_rms", 0),
+                       getattr(self, "_last_route_blocks", 0),
+                       getattr(self, "_last_route_secs", 0.0),
+                       "" if floor >= ROUTE_LIVE_PEAK
+                       else " — DIGITALLY SILENT, rejected",
+                       " (output device?)" if speakerish else ""))
                 if floor >= ROUTE_LIVE_PEAK and not speakerish:
                     # ── KEEP THE STREAM WE ALREADY HAVE ──────────────
                     # This used to close the capture and then call the

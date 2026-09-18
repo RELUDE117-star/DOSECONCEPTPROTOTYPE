@@ -153,8 +153,20 @@ for fn in ("def route_floor", "def capture_is_live"):
     check("%s() still exists" % fn.split()[-1], i > 0)
     if i < 0:
         continue
-    # the body, to the next def at the same or lower indent
-    body = src[i:i + 3000]
+    # THE BODY, TO THE NEXT def AT THE SAME INDENT — not a fixed number
+    # of characters. This was src[i:i + 3000], and adding a paragraph of
+    # explanation to route_floor's docstring pushed the code it was
+    # checking past the end of the slice: the assertion failed against
+    # a function that had not changed. A window that moves when a
+    # comment grows is not measuring the code.
+    lines = src[i:].splitlines(True)
+    indent = len(lines[0]) - len(lines[0].lstrip())
+    body = lines[0]
+    for ln in lines[1:]:
+        if ln.strip() and (len(ln) - len(ln.lstrip())) <= indent \
+                and ln.lstrip().startswith(("def ", "class ", "@")):
+            break
+        body += ln
     check("%s() measures peak via _peak_rms()" % fn.split()[-1],
           "_peak_rms(" in body)
     check("%s() does not return an RMS as its verdict"
@@ -541,6 +553,93 @@ check("...and not absurd (<= 20s)",
 check("a card that refuses the preferred size still opens",
       dose_voice.CAPTURE_BUFFER_LADDER[-1] == 0,
       dose_voice.CAPTURE_BUFFER_LADDER)
+
+print("\n── a quiet microphone is not a dead one, and 1.6s cannot tell ──")
+# With the channel fix in and the buffer negotiated, the device was
+# delivering 45.9 blocks/sec at live level peak 11 — a working
+# microphone — and TERMing it every 2.07 seconds, 146 times in six
+# minutes, always at 94 blocks. 94 blocks at 47/sec is 1.6 s, which was
+# route_floor's entire window.
+#
+# The arithmetic was already in this repo, about the silence watchdog:
+# in this room about 1.2% of blocks carry a non-zero sample (38 of
+# 3100, measured on the device). So:
+P_SIGNAL = 38.0 / 3100.0
+BLOCKS_PER_S = 46.9
+
+
+def p_all_silent(seconds):
+    """Chance a window of this length sees NOTHING, on a live mic."""
+    return (1.0 - P_SIGNAL) ** (seconds * BLOCKS_PER_S)
+
+
+check("a 1.6s window misses a live microphone far too often",
+      p_all_silent(1.6) > 0.30,
+      "%.0f%% of windows see nothing at all" % (100 * p_all_silent(1.6)))
+check("the patience window almost never does",
+      p_all_silent(dose_voice.ROUTE_FLOOR_PATIENCE) < 0.10,
+      "%.1f%%" % (100 * p_all_silent(dose_voice.ROUTE_FLOOR_PATIENCE)))
+check("patience is longer than the first look",
+      dose_voice.ROUTE_FLOOR_PATIENCE > dose_voice.ROUTE_FLOOR_SECONDS,
+      (dose_voice.ROUTE_FLOOR_SECONDS, dose_voice.ROUTE_FLOOR_PATIENCE))
+check("...and still fits inside the walk's budget several times over",
+      dose_voice.ROUTE_FLOOR_PATIENCE * 4
+      <= dose_voice.CAPTURE_OPEN_BUDGET,
+      (dose_voice.ROUTE_FLOOR_PATIENCE, dose_voice.CAPTURE_OPEN_BUDGET))
+check("both are environment-overridable on the device",
+      "DOSE_ROUTE_FLOOR_SECONDS" in _src
+      and "DOSE_ROUTE_FLOOR_PATIENCE" in _src)
+
+check("listening STOPS the moment the route proves itself",
+      "if peak >= ROUTE_LIVE_PEAK:" in _code and "break" in _code,
+      "otherwise every good route costs the full patience")
+check("a route delivering NO blocks is not given the patience",
+      "if now >= floor_end and seen == 0:" in _code,
+      "more time cannot produce blocks that are not coming")
+check("the walk's deadline is passed in and bounds the patience",
+      "def route_floor(seconds=ROUTE_FLOOR_SECONDS," in _code
+      and "route_floor(deadline=walk_end)" in _code
+      and "patient_end = min(patient_end, deadline)" in _code)
+check("the trail records how long each route was actually listened to",
+      "_last_route_secs" in _code and "blocks in %.1fs" in _code,
+      "'peak 0, rejected' read the same after 1.6s and after none")
+
+
+def floor_sim(samples, seconds, patience, live_peak=3, rate=46.9):
+    """route_floor's stopping rule, isolated: returns (peak, secs)."""
+    peak = 0
+    n = 0
+    for v in samples:
+        t = n / rate
+        if peak >= live_peak:
+            break
+        if t >= patience:
+            break
+        if t >= seconds and n == 0:
+            break
+        n += 1
+        peak = max(peak, v)
+    return peak, n / rate
+
+
+# A live mic whose first signal arrives at 3.5 s: rejected at 1.6 s,
+# found with patience.
+late = [0] * 165 + [11] * 5 + [0] * 200
+check("a live route whose first signal is late is now FOUND",
+      floor_sim(late, 1.6, 5.0)[0] >= 3, floor_sim(late, 1.6, 5.0))
+check("...and was rejected before", floor_sim(late, 1.6, 1.6)[0] < 3)
+
+early = [0] * 10 + [29] * 5 + [0] * 400
+pk, secs = floor_sim(early, 1.6, 5.0)
+check("a route that proves itself early is not held for the patience",
+      pk >= 3 and secs < 1.0, (pk, secs))
+
+dead = [0] * 500
+pk, secs = floor_sim(dead, 1.6, 5.0)
+check("a genuinely dead route is still rejected",
+      pk == 0, (pk, secs))
+check("...and costs the patience, which is the price of not being "
+      "wrong about a real one", 4.5 <= secs <= 5.1, secs)
 check("the ladder descends from the preferred size",
       dose_voice.CAPTURE_BUFFER_LADDER[0] == dose_voice.CAPTURE_BUFFER_US
       and dose_voice.CAPTURE_BUFFER_LADDER ==
