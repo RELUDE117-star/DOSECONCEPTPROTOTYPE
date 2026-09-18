@@ -3225,6 +3225,12 @@ class DoseVoice:
                 "live level:     peak %d  rms %d" % (
                     getattr(self, "_hb_peak", 0),
                     getattr(self, "mic_rms", 0)),
+                "block bytes:    %d   non-zero in first 64: %d" % (
+                    getattr(self, "_hb_bytes", 0),
+                    getattr(self, "_hb_nz", 0)),
+                "native rate:    %s   backend: %s" % (
+                    getattr(self, "_native_rate", "?"),
+                    getattr(self, "mic_name", "?")),
                 "",
                 "heard so far:   %r" % (
                     str(getattr(self, "_partial", ""))[:80]),
@@ -4501,6 +4507,36 @@ class DoseVoice:
                 # loudest thing since boot
                 self._hb_peak = max(pk, int(getattr(self, "_hb_peak", 0)
                                             * 0.95))
+                self._hb_bytes = len(data)
+                self._hb_nz = sum(1 for b in data[:64] if b)
+            except Exception:
+                pass
+            # RAW TAP. Touch voice/dump_raw to have the engine write the
+            # next ~2 s of capture EXACTLY as it arrives, before any
+            # gate, resample or gain. The heartbeat says the bytes are
+            # all zero while a standalone arecord on the same card, at
+            # the same moment, reads peak 8917. One of those is wrong
+            # and guessing which has already cost hours — so the engine
+            # hands over its own bytes and the question is settled by
+            # comparing two files.
+            try:
+                flag = os.path.join(VOICE_DIR, "dump_raw")
+                if os.path.exists(flag):
+                    buf = getattr(self, "_raw_dump", None)
+                    if buf is None:
+                        buf = self._raw_dump = bytearray()
+                    buf += data
+                    if len(buf) >= self._native_rate * 2 * 2:
+                        import wave as _w
+                        out = os.path.join(VOICE_DIR, "raw_from_engine.wav")
+                        f = _w.open(out, "wb")
+                        f.setnchannels(1)
+                        f.setsampwidth(2)
+                        f.setframerate(self._native_rate)
+                        f.writeframes(bytes(buf))
+                        f.close()
+                        self._raw_dump = None
+                        os.remove(flag)
             except Exception:
                 pass
             # MEASUREMENT BEATS MUTE AND BARGE-IN.
