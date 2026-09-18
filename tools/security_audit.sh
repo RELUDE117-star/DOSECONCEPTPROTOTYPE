@@ -84,8 +84,24 @@ hdr "B. Can the Pi command the Mac?  (it must not)"
 #     eval …                 bash <(…)      sh <(…)      . <(…)
 #     … | bash               … | sh         source <(…)
 #     $(ssh …) in command position (start of line, after ; or &&)
-INJ=$(grep -rlE 'eval[[:space:]]|(bash|sh|source|\.)[[:space:]]+<\(|\|[[:space:]]*(bash|sh)([[:space:]]|$)|(^|;|&&|\|\|)[[:space:]]*[`$]\(?ssh' \
-        "$AG/queue" "$AG/done" 2>/dev/null)
+# ...and then it flagged a COMMENT explaining the rule, and a COMMIT
+# MESSAGE in a quoted heredoc describing the fix for the first two. Three
+# rounds of false positives from one grep. That is not a cosmetic
+# problem: an audit that fails on a clean tree teaches its owner to skip
+# the summary line, and the day it finds something real he skips that too.
+#
+# So the check moved to tools/scan_job_injection.py, which strips
+# comments and quoted-heredoc bodies (literal data handed to another
+# program — not shell code) before testing what the shell would actually
+# run. Its own test suite proves it both ways: five real injection forms
+# caught, four look-alikes left alone.
+SCAN="$REPO/tools/scan_job_injection.py"
+if [ -f "$SCAN" ]; then
+    INJ=$(python3 "$SCAN" "$AG/queue" "$AG/done" 2>/dev/null)
+else
+    INJ=""
+    warn "scan_job_injection.py missing — injection check SKIPPED"
+fi
 if [ -n "$INJ" ]; then
     bad "a job EXECUTES data that came from the Pi — this is the one way a compromised Pi could run code here:"
     echo "$INJ" | sed 's/^/          /'
@@ -151,7 +167,7 @@ elif command -v gtimeout >/dev/null 2>&1; then TO="gtimeout 180"
 else TO=""; fi
 
 if [ -d "$REPO" ]; then
-    for t in test_egress test_no_private_keys; do
+    for t in test_egress test_no_private_keys test_job_injection; do
         OUT=$(cd "$REPO" && $TO python3 "tests/$t.py" 2>&1 | tail -3)
         if echo "$OUT" | grep -q '0 failed'; then
             ok "$t: $(echo "$OUT" | grep -oE '[0-9]+ passed, [0-9]+ failed')"
