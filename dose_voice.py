@@ -828,26 +828,37 @@ BARGE_FRAMES = int(os.environ.get("DOSE_BARGE_FRAMES", "4"))  # ~128 ms
 # holding every core while the UI, the camera and the model downloads
 # all wanted time. Taking the whole machine for a burst is only free
 # if nothing else needs it, and on this board something always does.
-# ALL THE CORES. I chose cores-minus-one, and then measured something
-# that overruled it.
+# CORES MINUS ONE. I took the last core for the recogniser, and the
+# device threw the microphone away twice a second until I gave it back.
 #
-# The caution was real: this device's history is CPU starvation turning
-# into dropped audio, so leaving a core for the capture thread, the UI
-# and the camera looked obviously right. Then a ten-minute soak pinned
-# all four cores with busy loops while the station ran, and the capture
-# did not care — PCM RUNNING at every sample, one recorder throughout,
-# 43-51 blocks/sec against a nominal 46.9, zero reopens, zero restarts,
-# 76.9'C peak with throttled 0x0.
+# The soak I justified it with was the wrong experiment. It pinned all
+# four cores with external busy loops, and the capture was fine —
+# because the scheduler balances an unrelated process against the app's
+# threads, and the reader thread still got its turn. Giving the
+# RECOGNISER four threads is different: those threads are inside this
+# process, they run flat out for seconds during a turn, and the one
+# thread that must drain arecord's pipe on time is competing with them.
 #
-# The recorder is a separate process writing into a pipe the kernel
-# buffers; our thread only has to drain it. Saturation does not break
-# that. The measurement beats the caution, so the last core goes to the
-# recogniser.
+# What the device did, with the reopen trail as evidence:
 #
-# tiny.en on this board, same recording, three passes each, median:
+#     11:00:42  recorder ended after 100 blocks (rc=1)
+#     11:00:44  recorder ended after 100 blocks (rc=1)
+#     11:00:47  recorder ended after 100 blocks (rc=1)
+#     ... 115 reopens, climbing about 26 a minute, selection #73
+#
+# arecord exits on an overrun. An overrun is what happens when nothing
+# drains the capture in time. This file has a whole section on that
+# already, written the last time it happened.
+#
+# "The measurement beats the caution" was the right instinct applied to
+# the wrong measurement. tiny.en at three threads is 2.27s against
+# 2.12s at four — a fifteenth of a second, for which I broke the
+# microphone.
+#
 #     1 thread 4.87s   2 threads 2.84s   3 threads 2.27s   4 threads 2.12s
 #
-# Set DOSE_STT_THREADS to go back to cores-1 on a board that needs it.
+# DOSE_STT_THREADS still takes the last core on a board that can spare
+# it. This one cannot.
 #
 # tiny.en on this board, same recording, three passes each, median:
 #
@@ -855,8 +866,8 @@ BARGE_FRAMES = int(os.environ.get("DOSE_BARGE_FRAMES", "4"))  # ~128 ms
 #     2 threads 2.84 s     4 threads  2.12 s
 #
 STT_THREADS = max(1, int(os.environ.get("DOSE_STT_THREADS",
-                                        max(1, CPU_CORES))
-                         or max(1, CPU_CORES)))
+                                        max(1, CPU_CORES - 1))
+                         or max(1, CPU_CORES - 1)))
 
 for _var in ("OMP_NUM_THREADS", "ORT_NUM_THREADS",
              "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",

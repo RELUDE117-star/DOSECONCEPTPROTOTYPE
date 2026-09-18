@@ -249,20 +249,28 @@ check("...and the block-count estimate is only a fallback",
       CODE.count("else round(blocks * BLOCK_SIZE") >= 2)
 check("it is reset per turn", "self._turn_secs = None" in CODE)
 
-print("\n── the recogniser gets the whole machine ───────────────────")
-# I chose cores-minus-one to protect the capture, then pinned all four
-# cores with busy loops for ten minutes while the station ran: PCM
-# RUNNING at every sample, one recorder throughout, 43-51 blocks/sec
-# against a nominal 46.9, zero reopens, 76.9'C with throttled 0x0. The
-# recorder is a separate process writing into a kernel-buffered pipe;
-# our thread only has to drain it. The measurement beat the caution.
-check("the recogniser is given every core by default",
-      dose_voice.STT_THREADS == dose_voice.CPU_CORES,
+print("\n── the recogniser never gets the LAST core ─────────────────")
+# I gave it all four, justified by a soak that pinned the cores with
+# EXTERNAL busy loops — which the scheduler balances against the app's
+# threads, so the reader still got its turn. The recogniser's own
+# threads are different: inside this process, flat out for seconds,
+# competing with the one thread that must drain arecord's pipe on time.
+# The device threw the microphone away twice a second:
+#
+#     11:00:42  recorder ended after 100 blocks (rc=1)
+#     11:00:44  recorder ended after 100 blocks (rc=1)
+#     ... 115 reopens, ~26 a minute, selection #73
+#
+# arecord exits on an overrun, and an overrun is what happens when
+# nothing drains the capture in time. The cost of the last core was
+# 2.27s against 2.12s — a fifteenth of a second.
+check("a core is always left for the capture thread",
+      dose_voice.STT_THREADS <= max(1, dose_voice.CPU_CORES - 1),
       (dose_voice.STT_THREADS, dose_voice.CPU_CORES))
 check("...and it is still an environment override for boards that "
-      "cannot spare them", "DOSE_STT_THREADS" in SRC)
-check("the soak that justifies it is written down next to it",
-      "43-51 blocks/sec" in SRC)
+      "can spare one", "DOSE_STT_THREADS" in SRC)
+check("what happened is written down next to it",
+      "ended after 100 blocks" in SRC)
 
 print("\n── the warm-up actually warms something ────────────────────")
 # It transcribed one second of ZEROS, with vad_filter on, which is how
