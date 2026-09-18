@@ -380,6 +380,39 @@ CAPTURE_REOPEN_MIN_GAP = float(
     os.environ.get("DOSE_CAPTURE_REOPEN_GAP", "5"))
 CAPTURE_REOPEN_MAX_GAP = float(
     os.environ.get("DOSE_CAPTURE_REOPEN_MAX_GAP", "60"))
+
+
+def _parse_mic_pin():
+    """DOSE_MIC_CARD="5" or "5,0" — pin capture to ONE ALSA device.
+
+    THIS STATION HAS TWO USB CAPTURE DEVICES. Card 5 is the AIRHUG, the
+    actual microphone. Card 4 is a "USB Composite Device" that also
+    advertises capture and hears essentially nothing. Device selection
+    is otherwise a runtime guess, and it has guessed wrong: an orphaned
+    `arecord -D plughw:4,0` was found on the device, left behind by a
+    crashed instance, meaning the app had been recording from the wrong
+    device entirely.
+
+    For a demo — or for a medication cabinet somebody relies on — a
+    microphone that is picked by inference is a microphone that can be
+    picked wrongly at the worst moment. Pinning removes the guess.
+
+    Empty (the default) keeps the old auto-selection, so this changes
+    nothing for a device that has not set it.
+    """
+    raw = os.environ.get("DOSE_MIC_CARD", "").strip()
+    if not raw:
+        return None
+    try:
+        bits = [b for b in raw.replace(":", ",").split(",") if b != ""]
+        card = int(bits[0])
+        dev = int(bits[1]) if len(bits) > 1 else 0
+        return (card, dev)
+    except Exception:
+        return None
+
+
+MIC_CARD_PIN = _parse_mic_pin()
 # Where the hardware capture starts before the auto-leveller tunes it.
 # Moderate on purpose: high enough to lift a stuck-low USB capsule off
 # near-silence, low enough not to slam a hot one into clipping.
@@ -976,7 +1009,10 @@ class DoseVoice:
         self._ptt_requested = False   # push-to-talk (hold Dose logo)
         self._pause_capture = False   # full self-test holds the devices
         self._paused_ack = False      # capture loop released the device
-        self._forced_card = None      # (card, device) the self-test found
+        # A PIN BEATS A GUESS. DOSE_MIC_CARD names the real
+        # microphone so selection never has to infer it; None
+        # keeps the old auto-selection. See _parse_mic_pin().
+        self._forced_card = MIC_CARD_PIN   # (card, device) or None
         self._forced_sink = None      # user-picked speaker output
         self._probe()
         self._probe_moonshine()
@@ -4458,7 +4494,14 @@ class DoseVoice:
                      (lambda c=fc[0], d=fc[1]: open_arecord(c, d)),
                      False))
             else:
-                self._forced_card = None
+                # The pinned/forced card is not in the capture list
+                # right now. Deliberately do NOTHING here: re-pinning
+                # would make a stale pin permanent, and clearing it
+                # would throw away an explicit DOSE_MIC_CARD the moment
+                # the device blinked. Skip the forced route for this
+                # pass; the loop below auto-selects, and the pin is
+                # honoured again as soon as the card comes back.
+                pass
             for card_num, dev_num, desc in cap_cards:
                 short = desc.split("[")[0].strip() or desc[:20]
                 tag = "card %d,%d %s" % (card_num, dev_num, short)
@@ -4596,7 +4639,10 @@ class DoseVoice:
                     # that reassigns card numbers) — drop any pinned
                     # card and re-find the mic wherever it now lives
                     self._out_cache = None
-                    self._forced_card = None
+                    # Back to the PIN if one is set, otherwise to
+                    # auto-selection. A replug must not leave us on a
+                    # card that was chosen by inference last time.
+                    self._forced_card = MIC_CARD_PIN
                     self._force_reopen = True
                 if sig is not None:
                     dev_sig = sig

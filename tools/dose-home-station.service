@@ -55,6 +55,15 @@ Environment=XAUTHORITY=%h/.Xauthority
 # now tolerates that on its own; this is the belt to that braces, and
 # costs nothing.
 Environment=TERM=dumb
+# PIN THE MICROPHONE. This station exposes TWO USB capture devices:
+# card 5 is the AIRHUG (the real microphone) and card 4 is a "USB
+# Composite Device" that advertises capture and hears essentially
+# nothing. Selection was otherwise inferred at runtime, and it has been
+# observed getting it wrong — an orphaned `arecord -D plughw:4,0` was
+# found on the device, left by a crashed instance recording from the
+# wrong card. A demo is not the moment to discover that.
+# Check with `arecord -l` if the hardware ever changes.
+Environment=DOSE_MIC_CARD=5,0
 
 # SIGTERM to the whole group, and give the app time to release the USB
 # audio device before anything harsher. A capture killed with SIGKILL does
