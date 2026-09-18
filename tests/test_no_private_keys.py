@@ -79,9 +79,23 @@ print("== 2. no private key anywhere in git HISTORY ==")
 #
 # Excluding the file by pathspec removes the self-reference entirely, and
 # lets the match below be exact rather than heuristic.
+#
+# Two further refinements, both learned the hard way:
+#
+#   --format=""  suppresses commit MESSAGES. Without it, a commit whose
+#   message merely *discusses* a marker — such as the one explaining this
+#   very fix — trips the check. What matters is whether key material
+#   entered the tree, not whether anyone wrote the words down.
+#
+#   Only '+' lines count, because only ADDED content enters the
+#   repository. A commit that REMOVES a leaked key should not keep
+#   failing the build forever after the cleanup.
 SELF = "tests/test_no_private_keys.py"
-_, hist = sh("git", "log", "--all", "-p", "--", ".", ":(exclude)" + SELF)
-hits = [m for m in PRIVATE_MARKERS if m in hist]
+_, hist = sh("git", "log", "--all", "-p", "--format=",
+             "--", ".", ":(exclude)" + SELF)
+added = "\n".join(l for l in hist.splitlines()
+                  if l.startswith("+") and not l.startswith("+++"))
+hits = [m for m in PRIVATE_MARKERS if m in added]
 ok(not hits, "no commit ever introduced private key material %s" % hits)
 
 print("== 3. private-key FILENAMES are git-ignored ==")

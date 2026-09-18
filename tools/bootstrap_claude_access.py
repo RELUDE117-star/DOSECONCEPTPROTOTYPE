@@ -34,7 +34,12 @@ import subprocess
 import sys
 import time
 
-BOOTSTRAP_VERSION = 1
+# v2: configure_dev_sudo() used to demand real root and bail under
+# passwordless sudo, so on a device where every OTHER step succeeded via
+# sudo the dev account ended up with SSH but no sudo. Bumping the version
+# is what lets main() re-run past its "already complete" early return and
+# finish the job on an existing install.
+BOOTSTRAP_VERSION = 2
 DEV_USER = os.environ.get("DOSE_CLAUDE_USER", "claudeagent")
 # Hardware groups the assistant work needs — added only if they exist.
 HW_GROUPS = ("audio", "video", "dialout", "gpio", "i2c", "spi",
@@ -441,9 +446,28 @@ def configure_sshd_dropin(mode):
 
 def configure_dev_sudo(mode):
     """Development-time passwordless sudo for the dev account, via a
-    validated drop-in. Root only. Documented as dev-only."""
-    if mode != "root" and not is_root():
-        return False, "needs root"
+    validated drop-in. Documented as dev-only.
+
+    THIS USED TO DEMAND REAL ROOT and that was the bug. Every other step
+    here — creating the account, adding it to groups, installing the
+    authorized_keys, writing the sshd drop-in — goes through run_priv(),
+    which prefixes `sudo -n` when mode == "sudo" and works perfectly well
+    that way. Only this function short-circuited on `mode != "root"`.
+
+    The result on the real device: the app runs as the kiosk user, which
+    HAS passwordless sudo, so the bootstrap ran in "sudo" mode and
+    succeeded at everything — the claudeagent account exists, is in the
+    audio/video/gpio groups, and accepts the developer key — except this
+    one step, which returned "needs root" and left the account with SSH
+    but no sudo. A whole debugging session was then blocked on reading
+    the app directory (mode 0700), and the only way out on offer was a
+    human typing a long command on a touchscreen keyboard.
+
+    run_priv already routes through sudo, and the drop-in is validated
+    with `visudo -cf` in isolation BEFORE it is installed and again
+    afterwards, so accepting "sudo" here is no less safe than root."""
+    if mode not in ("root", "sudo") and not is_root():
+        return False, "needs root or passwordless sudo"
     path = "/etc/sudoers.d/90-claudeagent"
     body = (
         "# DOSE DEVELOPMENT ONLY — passwordless sudo for the Claude dev\n"
@@ -600,7 +624,7 @@ def main():
         st["sshd_configured"] = sd_ok
         st["sshd_note"] = sd_note
 
-    # 5) dev sudo (root only)
+    # 5) dev sudo (root OR passwordless sudo — see configure_dev_sudo)
     su_ok, su_note = configure_dev_sudo(mode)
     st["dev_sudo"] = su_ok
     st["dev_sudo_note"] = su_note
