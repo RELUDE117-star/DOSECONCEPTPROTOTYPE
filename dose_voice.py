@@ -897,6 +897,11 @@ class DoseVoice:
     state = "idle"
     _native_rate = SAMPLE_RATE
     _ratecv_state = None
+    # Set by the capture reader when its recorder dies, read by the
+    # supervising loop to reopen the microphone. Defaulted here because
+    # the reader thread can outlive the object it was started from.
+    _capture_lost = False
+    _force_reopen = False
 
     def __init__(self, app):
         self.app = app
@@ -4087,25 +4092,85 @@ class DoseVoice:
             self._ratecv_state = None
 
             def reader(proc=p):
+                """Drain the recorder — and CLEAN UP WHEN IT ENDS.
+
+                This loop used to simply `break` and return. That is
+                how the microphone kept dying. arecord exits on an ALSA
+                XRUN (an overrun, which on this board happens whenever
+                something takes the CPU away from the capture for too
+                long); the read returns empty; the loop broke; and then
+                NOTHING happened. The process was never reaped — the
+                device grew "[arecord] <defunct>" — its stdout was
+                never closed, and, worst of all, nobody told the engine
+                the capture had died. The ALSA PCM was left sitting in
+                state SETUP with an owner that no longer existed, which
+                made it unopenable by anyone, including a fresh
+                arecord, until the whole app was restarted.
+
+                Observed directly: state RUNNING, then XRUN, then SETUP
+                for as long as you care to watch.
+
+                So the teardown now lives in a finally: TERM the
+                recorder so it releases the ALSA device properly, reap
+                it, close the pipe, and raise a flag the supervising
+                loop can see so the capture is REOPENED rather than
+                silently lost."""
                 import audioop
-                while (proc.poll() is None
-                       and not self._stop.is_set()):
-                    try:
-                        n = BLOCK_SIZE * 2 * (2 if channels == 2 else 1)
-                        data = proc.stdout.read(n)
-                    except Exception:
-                        break
-                    if not data:
-                        break
-                    if channels == 2:
+                try:
+                    while (proc.poll() is None
+                           and not self._stop.is_set()):
                         try:
-                            left = audioop.tomono(data, 2, 1, 0)
-                            right = audioop.tomono(data, 2, 0, 1)
-                            data = (left if audioop.rms(left, 2)
-                                    >= audioop.rms(right, 2) else right)
+                            n = BLOCK_SIZE * 2 * (2 if channels == 2
+                                                  else 1)
+                            data = proc.stdout.read(n)
+                        except Exception:
+                            break
+                        if not data:
+                            break
+                        if channels == 2:
+                            try:
+                                left = audioop.tomono(data, 2, 1, 0)
+                                right = audioop.tomono(data, 2, 0, 1)
+                                data = (left if audioop.rms(left, 2)
+                                        >= audioop.rms(right, 2)
+                                        else right)
+                            except Exception:
+                                pass
+                        ingest(data)
+                finally:
+                    # TERM, never KILL: a killed recorder does not run
+                    # its cleanup and does not hand the PCM back.
+                    try:
+                        if proc.poll() is None:
+                            proc.terminate()
+                    except Exception:
+                        pass
+                    try:
+                        proc.wait(timeout=3)
+                    except Exception:
+                        try:
+                            proc.kill()
                         except Exception:
                             pass
-                    ingest(data)
+                        try:
+                            proc.wait(timeout=3)
+                        except Exception:
+                            pass
+                    try:
+                        if proc.stdout:
+                            proc.stdout.close()
+                    except Exception:
+                        pass
+                    if not self._stop.is_set():
+                        # Tell the supervisor the microphone is gone so
+                        # it reopens instead of going quietly deaf.
+                        # _force_reopen is the loop's EXISTING, already
+                        # exercised recovery path (it is what a USB
+                        # replug triggers) — a dead recorder deserves
+                        # exactly the same treatment, and reusing it
+                        # beats inventing a second one.
+                        self._capture_lost = True
+                        self._force_reopen = True
             threading.Thread(target=reader, daemon=True).start()
             self.mic_name = name
             return ("pipe", p)
