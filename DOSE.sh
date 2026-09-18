@@ -484,9 +484,45 @@ chmod +x "$HOME/Desktop/DOSE.desktop"
 gio set "$HOME/Desktop/DOSE.desktop" metadata::trusted true 2>/dev/null || true
 dbus-launch gio set "$HOME/Desktop/DOSE.desktop" metadata::trusted true 2>/dev/null || true
 
-# ── Autostart on boot ──
-mkdir -p "$HOME/.config/autostart"
-cat > "$HOME/.config/autostart/dose.desktop" << EOF
+# ── Autostart on boot — ONLY IF SYSTEMD IS NOT DOING IT ──────────────
+#
+# THIS LINE RAN TWO COPIES OF THE APP.
+#
+# It rewrote ~/.config/autostart/dose.desktop on EVERY launch. Once the
+# systemd user unit became the start path, that meant: systemd starts
+# DOSE.sh -> DOSE.sh re-arms the autostart entry -> at the next
+# graphical login the desktop ALSO starts DOSE.sh. Two full instances.
+#
+# Measured on the device, 2026-09-17 21:55:
+#
+#   pid 2543  ppid 1440  1126 MB  cgroup session-1.scope        <- desktop
+#   pid 2549  ppid 2001  1387 MB  cgroup dose-home-station.svc  <- systemd
+#
+# 2.5 GB of a 3.8 GB board, two copies of faster-whisper, Vosk, Silero
+# and Piper, and two processes contending for one USB microphone —
+# which is where the PortAudio failure storm in the log comes from. The
+# station needed physical power cycles twice that evening.
+#
+# The duplicate had been disabled by hand twice (the
+# .disabled-by-claude.* files sitting next to it are the evidence) and
+# this line put it back both times, silently, on the next launch. A
+# fix that the program undoes at boot is not a fix.
+#
+# So: when systemd is managing us, the autostart entry is not just
+# skipped, it is actively retired. systemd is the only start path, and
+# the launcher now enforces that instead of quietly fighting it.
+AUTOSTART="$HOME/.config/autostart/dose.desktop"
+if [ -n "$INVOCATION_ID" ] || \
+   systemctl --user is-enabled dose-home-station.service >/dev/null 2>&1; then
+    if [ -f "$AUTOSTART" ]; then
+        mv -f "$AUTOSTART" "$AUTOSTART.superseded-by-systemd.$(date +%Y%m%d-%H%M%S)" \
+            2>/dev/null || rm -f "$AUTOSTART" 2>/dev/null
+        echo "  Retired the desktop autostart entry: systemd starts this app."
+    fi
+else
+    # No systemd unit: the desktop entry IS the start path, so install it.
+    mkdir -p "$HOME/.config/autostart"
+    cat > "$AUTOSTART" << EOF
 [Desktop Entry]
 Type=Application
 Name=DOSE Home Station
@@ -494,6 +530,7 @@ Exec=/bin/bash $APP_DIR/DOSE.sh
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
+fi
 
 # ── Speech model: finish downloading BEFORE the app opens ──
 # This deliberately sits outside the one-time setup block and runs on
