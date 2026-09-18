@@ -3730,7 +3730,35 @@ class DoseVoice:
         return box.get("r")
 
     def _set_ui_state(self, state, user_text="", reply_text=""):
+        """Tell the screen what the engine is doing.
+
+        DO NOT POST A REPAINT THAT CHANGES NOTHING. This is called from
+        the listening loop for EVERY audio block, and Vosk hands back
+        the same partial over and over while somebody is mid-word or
+        drawing breath — so the overlay was being asked to redraw
+        identical text many times a second.
+
+        Each of those is a root.after(0, ...) onto the Tk event queue,
+        and that same queue is what drives the overlay's own animation.
+        Flooding it with no-op repaints is precisely how a panel ends up
+        feeling sluggish while the machine looks idle, which is the
+        complaint: "none of the words show up fast at all".
+
+        The overlay is a pure function of (state, user text, reply
+        text), so an identical triple has nothing to say. Skipping it
+        also FIXES a small correctness bug for free: the app stamps
+        _voice_last_change on every call and times the panel's minimum
+        visible period from it, so repeats of unchanged text were
+        pushing that moment forward and making the panel linger.
+
+        self.state is still assigned every time — it is read all over
+        the engine and must never lag behind.
+        """
         self.state = state
+        sig = (state, user_text, reply_text)
+        if sig == getattr(self, "_ui_sig", None):
+            return
+        self._ui_sig = sig
         try:
             self.app.root.after(
                 0, self.app._voice_overlay_update, state, user_text,

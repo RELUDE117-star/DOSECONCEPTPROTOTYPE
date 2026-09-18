@@ -366,6 +366,63 @@ check("the sweep skips the one it just tried",
 check("hot-plug clears it, because a card number can be reused",
       "self._arecord_win = {}" in src)
 
+print("\n9. The overlay is not asked to redraw text that has not changed")
+# _set_ui_state runs from the listening loop for EVERY audio block, and
+# Vosk hands back the same partial over and over while somebody is
+# mid-word. Each call was a root.after(0, ...) onto the Tk event queue
+# — the same queue that drives the overlay's own animation. Flooding it
+# with no-op repaints is how a panel feels sluggish while the machine
+# looks idle, which is exactly the complaint that started this work.
+
+
+class _FakeRoot(object):
+    def __init__(self):
+        self.posts = []
+
+    def after(self, _ms, fn, *a):
+        self.posts.append(a)
+
+
+class _FakeApp(object):
+    def __init__(self):
+        self.root = _FakeRoot()
+
+    def _voice_overlay_update(self, *a):
+        pass
+
+
+_ui = object.__new__(dose_voice.DoseVoice)
+_ui.app = _FakeApp()
+for _ in range(50):
+    _ui._set_ui_state("listening", "what time")
+check("fifty identical partials cost ONE repaint",
+      len(_ui.app.root.posts) == 1, len(_ui.app.root.posts))
+_ui._set_ui_state("listening", "what time is")
+check("the moment the text changes, it repaints",
+      len(_ui.app.root.posts) == 2, len(_ui.app.root.posts))
+_ui._set_ui_state("thinking", "what time is")
+check("a state change repaints even with the same text",
+      len(_ui.app.root.posts) == 3, len(_ui.app.root.posts))
+_ui._set_ui_state("speaking", "what time is", "It is ten past six.")
+check("a reply repaints", len(_ui.app.root.posts) == 4)
+_ui._set_ui_state("idle")
+check("going idle repaints, so the panel retires",
+      len(_ui.app.root.posts) == 5)
+_ui._set_ui_state("idle")
+check("...but only once", len(_ui.app.root.posts) == 5)
+check("self.state is still assigned every time, deduped or not",
+      _ui.state == "idle")
+_ui._set_ui_state("listening", "what time")
+check("the same text in a NEW turn repaints (it is a new triple in "
+      "sequence, not a repeat of the last one)",
+      len(_ui.app.root.posts) == 6)
+_broken = object.__new__(dose_voice.DoseVoice)
+_broken.app = None
+_broken._set_ui_state("listening", "x")
+check("no app at all is survivable — the engine must never die for "
+      "want of a screen", _broken.state == "listening")
+
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:
