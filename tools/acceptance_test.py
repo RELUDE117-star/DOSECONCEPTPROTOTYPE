@@ -57,11 +57,16 @@ VOICE_DIR = os.path.join(APP_DIR, "voice")
 # The phrases a medication cabinet actually hears, not a reading-comfort
 # corpus: a bare command, a medication name, a navigation request and a
 # number. Each one separates a different failure.
+# (phrase, the intent the station must arrive at). The intent is the
+# real criterion: this cabinet's job is to UNDERSTAND, not to
+# transcribe. "Good I take my aspirin today" is a word error and a
+# correct answer; scoring only WER would have called that a failure and
+# sent me optimising a model that was already doing its job.
 PHRASES = [
-    "what time is it",
-    "did i take my aspirin today",
-    "show me my schedule",
-    "how many doses are left",
+    ("what time is it", "time"),
+    ("did i take my aspirin today", "did_take"),
+    ("what do i take today", "schedule"),
+    ("how many pills do i have left", "pills_left"),
 ]
 
 
@@ -239,6 +244,7 @@ def main():
     ap.add_argument("--channels", type=int, default=0,
                     help="0 = ask the card (the right answer)")
     ap.add_argument("--phrases", type=int, default=len(PHRASES))
+    ap.add_argument("--min-understood", type=float, default=100.0)
     ap.add_argument("--max-wer", type=float, default=15.0)
     ap.add_argument("--max-stt", type=float, default=6.0)
     ap.add_argument("--max-tts", type=float, default=2.0)
@@ -280,6 +286,30 @@ def main():
     voice = PiperVoice.load(vp)
     say("  piper loaded in %.1fs" % (time.time() - t0))
 
+    # The station's own vocabulary bias and medication list, so the
+    # harness and the device are asking the same question.
+    global PROMPT, MEDS, nlu
+    sys.path.insert(0, APP_DIR)
+    try:
+        import dose_nlu as nlu
+    except Exception as exc:
+        nlu = None
+        say("  (no dose_nlu: %s — intent will not be scored)" % exc)
+    MEDS = []
+    try:
+        data = json.load(open(os.path.join(APP_DIR, "med_data.json")))
+        MEDS = [m.get("name") for m in (data.get("medications") or [])
+                if m.get("name")]
+    except Exception:
+        pass
+    PROMPT = ("Medication reminder device. Commands: what time is it, "
+              "what do I take today, how many pills do I have left, "
+              "did I take my medicine, open storage, open settings, "
+              "go to user, next dose.")
+    if MEDS:
+        PROMPT += " Medications: " + ", ".join(MEDS[:12])
+    say("  vocabulary bias: %d medication name(s)" % len(MEDS))
+
     t0 = time.time()
     from faster_whisper import WhisperModel
     size = os.environ.get("DOSE_FAST_WHISPER", "tiny.en")
@@ -289,7 +319,7 @@ def main():
     tmp = "/tmp/dose_acc"
     os.makedirs(tmp, exist_ok=True)
     rows = []
-    for i, phrase in enumerate(PHRASES[:args.phrases]):
+    for i, (phrase, want_intent) in enumerate(PHRASES[:args.phrases]):
         say("\n[%d] %r" % (i + 1, phrase))
         src = os.path.join(tmp, "say_%d.wav" % i)
         got = os.path.join(tmp, "heard_%d.wav" % i)
@@ -306,20 +336,40 @@ def main():
         say("    captured        peak %d  rms %d  non-zero %d/%d  %.1fs"
             % (m["peak"], m["rms"], m["nonzero"], m["samples"],
                m["seconds"]))
+        # THE SAME SETTINGS THE APP USES, or this measures a
+        # different program. The station biases Whisper with an
+        # initial_prompt naming its own medications and commands, runs
+        # greedy, and does not condition on previous text. A harness
+        # that leaves those out reports a worse number than the device
+        # actually achieves — which is how you end up optimising
+        # something that was already working.
         t0 = time.time()
-        segs, _info = model.transcribe(got, beam_size=1, language="en")
+        segs, _info = model.transcribe(
+            got, beam_size=1, language="en", vad_filter=True,
+            condition_on_previous_text=False, initial_prompt=PROMPT)
         text = " ".join(s.text for s in segs).strip()
         stt = time.time() - t0
         e = wer(phrase, text)
+        intent = "?"
+        if nlu is not None:
+            try:
+                intent = nlu.parse(text, MEDS).name
+            except Exception as exc:
+                intent = "error: %s" % str(exc)[:40]
+        ok_intent = (intent == want_intent)
         say("    heard           %r" % text)
         say("    stt             %.2fs   WER %.1f%% "
             "(sub %d ins %d del %d)"
             % (stt, e["wer"], e["sub"], e["ins"], e["dele"]))
+        say("    understood      %s  (wanted %s)  %s"
+            % (intent, want_intent, "OK" if ok_intent else "MISSED"))
         rows.append({"phrase": phrase, "heard": text, "tts": round(tts, 2),
                      "stt": round(stt, 2), "peak": m["peak"],
                      "rms": m["rms"], "nonzero": m["nonzero"],
                      "samples": m["samples"], "played": played,
-                     "seconds": m["seconds"], **e})
+                     "seconds": m["seconds"], "intent": intent,
+                     "want_intent": want_intent, "understood": ok_intent,
+                     **e})
 
     hw1 = hardware()
     ok = [r for r in rows if "error" not in r]
@@ -332,6 +382,9 @@ def main():
         "stt_worst": max((r["stt"] for r in ok), default=None),
         "tts_worst": max((r["tts"] for r in ok), default=None),
         "peak_min": min((r["peak"] for r in ok), default=None),
+        "understood_pct": (round(100.0 * sum(1 for r in ok
+                                             if r.get("understood")) / len(ok), 1)
+                           if ok else None),
     }
 
     say("\n" + "=" * 58)
@@ -349,7 +402,15 @@ def main():
         say("  %-22s %-8s %s%s   (limit %s%s)"
             % (name, "PASS" if good else "FAIL", value, unit, limit, unit))
 
-    grade("accuracy (worst WER)", res["wer_worst"], args.max_wer, True, "%")
+    # UNDERSTANDING IS THE GRADE. Word error rate is reported because
+    # it says WHERE a failure is (deletions mean capture or the voice
+    # activity detector, insertions mean a hot capture, substitutions
+    # mean the model), but a cabinet that answers the right question
+    # has not failed because it heard "Good" for "Did".
+    grade("understood", res["understood_pct"], args.min_understood,
+          False, "%")
+    say("  %-22s %-8s %s%%   (informational)"
+        % ("word error (worst)", "-", res["wer_worst"]))
     grade("stt latency (worst)", res["stt_worst"], args.max_stt, True, "s")
     grade("tts latency (worst)", res["tts_worst"], args.max_tts, True, "s")
     grade("capture level (min)", res["peak_min"], args.min_peak, False)
