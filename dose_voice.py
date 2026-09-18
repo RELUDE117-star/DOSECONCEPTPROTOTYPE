@@ -593,6 +593,26 @@ CAPTURE_BUFFER_US = int(os.environ.get("DOSE_CAPTURE_BUFFER_US", "5000000"))
 # "ask for nothing and take whatever the driver gives".
 CAPTURE_BUFFER_LADDER = [CAPTURE_BUFFER_US, 2000000, 1000000, 500000, 0]
 
+# AND THE PERIOD, BECAUSE arecord DERIVES IT FROM THE BUFFER.
+#
+# arecord defaults the period to a QUARTER of the buffer. Asking for
+# five seconds therefore asked for 1.25-second periods, and the device
+# said what that costs in its own selection trail:
+#
+#   arecord FORCED card 5,0: opened, peak 0 (rms 0, 0 BLOCKS)
+#     — DIGITALLY SILENT, rejected
+#
+# Zero blocks from a working microphone: the first data was still 1.25 s
+# away when the 1.6-second window closed, and the walk moved on to a
+# PortAudio endpoint that delivers nothing, where it stayed.
+#
+# A period is also latency — nothing can be heard until one fills — and
+# this station is trying to answer inside two seconds. So the period is
+# stated outright, near the engine's own block size, and the buffer is
+# free to be large: depth without delay, which is the whole point of
+# asking for a buffer.
+CAPTURE_PERIOD_US = int(os.environ.get("DOSE_CAPTURE_PERIOD_US", "20000"))
+
 # How long a card's mixer state is trusted before it is forced again.
 #
 # Unmuting a capture card is a fixed-up-front operation: it spawns one
@@ -6083,14 +6103,23 @@ class DoseVoice:
                     argv = ["arecord", "-D", dev, "-f", "S16_LE",
                             "-r", str(rate), "-c", str(ch)]
                     if us:
-                        argv += ["--buffer-time", str(us)]
+                        # Period stated alongside the buffer. Left to
+                        # arecord it is a quarter of the buffer, which
+                        # turns depth into delay and made a five-second
+                        # buffer deliver its first block 1.25 s in.
+                        argv += ["--buffer-time", str(us),
+                                 "--period-time", str(CAPTURE_PERIOD_US)]
+                    # The last rung asks for NOTHING — no buffer, no
+                    # period — so ALSA's own defaults stay reachable
+                    # exactly as they were before any of this.
                     argv += ["-t", "raw", "-"]
                     cap = open_pipe_cmd(
                         argv,
                         "mic arecord %s @%d %dch%s" % (
                             dev, rate, ch,
-                            (" buf%.1fs" % (us / 1e6)) if us
-                            else " default buf"),
+                            (" buf%.1fs/per%dms"
+                             % (us / 1e6, CAPTURE_PERIOD_US // 1000))
+                            if us else " default buf"),
                         native_rate=rate, channels=ch)
                     if cap:
                         bufs[card] = us
@@ -6469,11 +6498,30 @@ class DoseVoice:
                         break
                     if now >= patient_end:
                         break
-                    if now >= floor_end and seen == 0:
-                        # Not quiet — not delivering at all. More time
-                        # will not produce blocks that are not coming,
-                        # and this is the case a dead pipe looks like.
-                        break
+                    # NO EARLY EXIT FOR "NOTHING HAS ARRIVED YET".
+                    #
+                    # I wrote one, reasoning that more time cannot
+                    # produce blocks that are not coming. The device's
+                    # own selection trail, from the build with a
+                    # five-second buffer, says otherwise:
+                    #
+                    #   arecord FORCED card 5,0: opened, peak 0
+                    #     (rms 0, 0 BLOCKS) — DIGITALLY SILENT, rejected
+                    #
+                    # Zero blocks from a microphone that works, because
+                    # arecord sizes its period at a quarter of the
+                    # buffer: a five-second buffer means the first
+                    # data arrives after 1.25 s, and a route asked for
+                    # a second and a half of patience saw none of it.
+                    # The route that had just been given a bigger
+                    # buffer was the route most likely to be condemned
+                    # by the shortcut — the two changes would have
+                    # cancelled out, and the trail would have read the
+                    # same as the bug it replaced.
+                    #
+                    # A route that never delivers costs the patience
+                    # and nothing more, which is bounded and cheap.
+                    # Being wrong about a real microphone is neither.
                     try:
                         data = self._audio_q.get(timeout=0.4)
                     except queue.Empty:

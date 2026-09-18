@@ -238,8 +238,17 @@ check("it ENDS in asking for nothing, so ALSA's own default is always "
 check("every rung is at least the half-second we started with",
       all(us == 0 or us >= 500000
           for us in dose_voice.CAPTURE_BUFFER_LADDER))
-check("a rung of 0 passes no --buffer-time at all",
-      "if us:" in CODE and 'argv += ["--buffer-time", str(us)]' in CODE)
+# Pinned to the exact old call shape, which broke the moment the period
+# was added beside the buffer. Assert the property instead: both flags
+# are appended by one statement guarded by `if us:`, so the rung that
+# appends neither cannot leak one.
+check("a rung of 0 passes no buffer and no period at all",
+      "if us:" in CODE
+      and CODE.count("--buffer-time") == 1
+      and CODE.count("--period-time") == 1
+      and abs(CODE.index("--period-time")
+              - CODE.index("--buffer-time")) < 120,
+      (CODE.count("--buffer-time"), CODE.count("--period-time")))
 check("the accepted size is remembered per card, not re-laddered per "
       "combination",
       "bufs[card] = us" in CODE and "if card in bufs:" in CODE,

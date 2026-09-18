@@ -593,9 +593,66 @@ check("both are environment-overridable on the device",
 check("listening STOPS the moment the route proves itself",
       "if peak >= ROUTE_LIVE_PEAK:" in _code and "break" in _code,
       "otherwise every good route costs the full patience")
-check("a route delivering NO blocks is not given the patience",
-      "if now >= floor_end and seen == 0:" in _code,
-      "more time cannot produce blocks that are not coming")
+# AND NO SHORTCUT FOR "NOTHING HAS ARRIVED YET". I wrote one, reasoning
+# that more time cannot produce blocks that are not coming. The device's
+# own trail, from the five-second-buffer build:
+#
+#   arecord FORCED card 5,0: opened, peak 0 (rms 0, 0 BLOCKS)
+#     — DIGITALLY SILENT, rejected
+#
+# Zero blocks from a microphone that works, because arecord sizes its
+# period at a quarter of the buffer — so the first data was 1.25 s away
+# when a 1.6 s window closed. The route that had just been given a
+# bigger buffer was the one most likely to be condemned by the
+# shortcut: the two changes would have cancelled out and the trail
+# would have read exactly like the bug it replaced.
+check("a route that has delivered nothing YET is still given the "
+      "patience",
+      "if now >= floor_end and seen == 0:" not in _code,
+      "a long buffer means a long first period, and this is that case")
+print("\n── the period is stated, not derived from the buffer ────────")
+check("a period time is passed alongside the buffer",
+      "--period-time" in _code and "CAPTURE_PERIOD_US" in _code)
+check("it is an environment override",
+      "DOSE_CAPTURE_PERIOD_US" in _src)
+check("it is short enough not to be heard as latency (<= 50ms)",
+      dose_voice.CAPTURE_PERIOD_US <= 50000,
+      dose_voice.CAPTURE_PERIOD_US)
+check("...and long enough not to wake the reader pointlessly (>= 5ms)",
+      dose_voice.CAPTURE_PERIOD_US >= 5000,
+      dose_voice.CAPTURE_PERIOD_US)
+check("the period is far smaller than the buffer it sits in",
+      dose_voice.CAPTURE_PERIOD_US * 8 <= min(
+          us for us in dose_voice.CAPTURE_BUFFER_LADDER if us),
+      "depth without delay is the entire point")
+# The claim here was "the default period is LONGER than the floor
+# window". It is not: a quarter of five seconds is 1.25 s and the window
+# is 1.6. The assertion failed and it was right to — the arithmetic was
+# mine, not the code's. What is true, and what the device showed, is
+# that the derived period eats most of the window: 1.25 s of a 1.6 s
+# look leaves 0.35 s for audio to arrive in, and the trail recorded
+# exactly what that produces — "0 blocks".
+check("the period arecord would derive eats most of the floor window",
+      (dose_voice.CAPTURE_BUFFER_US / 4.0) / 1e6
+      > dose_voice.ROUTE_FLOOR_SECONDS / 2.0,
+      "%.2fs derived period against a %.1fs window"
+      % ((dose_voice.CAPTURE_BUFFER_US / 4.0) / 1e6,
+         dose_voice.ROUTE_FLOOR_SECONDS))
+check("...while the stated period leaves the window essentially whole",
+      dose_voice.CAPTURE_PERIOD_US / 1e6
+      < dose_voice.ROUTE_FLOOR_SECONDS / 20.0,
+      dose_voice.CAPTURE_PERIOD_US)
+# This asserted on a COMMENT, in a source with comments stripped, which
+# is the same class of mistake as grepping a file for its own docstring.
+# Assert the structure: both flags are added by one statement, so the
+# rung that adds neither cannot accidentally add one.
+check("buffer and period are set by a single statement, so the "
+      "'ask for nothing' rung really asks for nothing",
+      _code.count("--period-time") == 1
+      and _code.count("--buffer-time") == 1
+      and abs(_code.index("--period-time")
+              - _code.index("--buffer-time")) < 120,
+      (_code.count("--period-time"), _code.count("--buffer-time")))
 check("the walk's deadline is passed in and bounds the patience",
       "def route_floor(seconds=ROUTE_FLOOR_SECONDS," in _code
       and "route_floor(deadline=walk_end)" in _code
@@ -633,6 +690,14 @@ early = [0] * 10 + [29] * 5 + [0] * 400
 pk, secs = floor_sim(early, 1.6, 5.0)
 check("a route that proves itself early is not held for the patience",
       pk >= 3 and secs < 1.0, (pk, secs))
+
+# The case the "nothing yet" shortcut would have condemned: a long
+# buffer means a long first period, so the data starts arriving well
+# after the floor window has closed.
+slow = [0] * 160 + [33] * 4 + [0] * 300          # first signal at ~3.5s
+check("a route whose first period lands after the floor window is "
+      "found, not condemned",
+      floor_sim(slow, 1.6, 5.0)[0] >= 3, floor_sim(slow, 1.6, 5.0))
 
 dead = [0] * 500
 pk, secs = floor_sim(dead, 1.6, 5.0)
