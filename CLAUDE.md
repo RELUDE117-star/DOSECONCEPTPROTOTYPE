@@ -501,11 +501,10 @@ now append through `tee`, rotated at 8 MB. The unit's `StandardOutput` is
 - `arecord -D default` fails with `Host is down` — the PipeWire ALSA plugin is
   not serving this user. Not blocking (the pinned `plughw:5,0` route works),
   but every `default` route in the walk is dead weight until it is fixed.
-- `open_arecord()` probes 48 combinations (4 subdevices × 2 bases × 3 rates ×
-  2 channel counts), each with a 0.3 s sleep — up to ~14 s of blocking, and
-  every failed open is itself a chance to strand the PCM. The PortAudio path
-  now asks the device for its `default_samplerate` first; `open_arecord()`
-  deserves the same treatment.
+- ~~`open_arecord()` probes 48 combinations~~ — **done.** It remembers the
+  winning (subdevice, base, rate, channels) per card and tries it first; the
+  full sweep still runs underneath if that stops working, and hot-plug clears
+  the cache because a card NUMBER can be reused by different hardware.
 - A USB reset needs root: the device node is `crw-rw-r-- root root` with no
   udev ACL for `claudeagent`, and `/sys/.../authorized` is root-owned. With
   sudo now in place this is finally available as a recovery step.
@@ -524,6 +523,20 @@ now append through `tee`, rotated at 8 MB. The unit's `StandardOutput` is
   by a human — never hardcode one, the repo is public.
 - Streaming TTS (synthesize + play in chunks) would cut perceived response
   time far more than optimising Piper itself.
+- **The Piper subprocess worker is DEFAULT-OFF** (`DOSE_PIPER_WORKER=1` to
+  enable). It contains the ONNX abort, but it shipped on and the station
+  needed two physical restarts that evening, so it stays off until a soak
+  measures its RSS against a board running ONE application. See § the ONNX
+  crash above.
+- **`DoseVoice._run` is ~1250 lines**, with `open_capture` (209),
+  `open_pipe_cmd` (164), `ingest` (156), `route_floor` and `close_capture` as
+  nested closures inside it. That is why every fix this week involved hunting
+  line numbers. Splitting it is right and needs a device to soak on after.
+- About 220 lines of verified-unreachable code were found and deliberately
+  LEFT (`_bt_action`, `mixer_summary`, `_engage_bt_mic_pw`, the draft-dose
+  callbacks, the PIL helpers, `_meter_rescan`, `is_pi`). It costs nothing at
+  runtime and some looks like work in progress — Ryan's call, listed in
+  `docs/PI_AUDIT.md` § SESSION 3b.
 - `tests/test_wer.py` now provides a Word Error Rate metric that attributes
   errors by type — deletions mean capture/VAD, insertions mean a hot capture,
   substitutions mean the model. Drop matched `tests/audio/<name>.wav` +

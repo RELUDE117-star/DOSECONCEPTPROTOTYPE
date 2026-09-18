@@ -732,3 +732,171 @@ Endpointing is fine (0.49–0.57 s). The variance is all STT: 0.12 s at
 best, 17.26 s at worst, on local `tiny` models. No amount of spawn
 trimming fixes that — free-tier cloud STT is the path, and it is written,
 tested, and waiting on a credential only Ryan can place.
+
+---
+
+# SESSION 4 — two copies of the app (2026-09-17 evening)
+
+The station needed **physical power cycles twice in one evening**. Ryan
+pulled the plug both times. This section is what it actually was, and —
+because it matters more — how many of my own measurements were wrong
+first.
+
+## The finding
+
+```
+pid 2543  ppid 1440  1126 MB  cgroup session-1.scope         <- desktop autostart
+pid 2549  ppid 2001  1387 MB  cgroup dose-home-station.svc   <- systemd
+```
+
+**Two complete instances of `dose_app.py`.** 2.5 GB of a 3.8 GB board,
+two copies of faster-whisper, Vosk, Silero and Piper, and two processes
+contending for one USB microphone.
+
+That last part explains the pages of
+
+```
+paInvalidSampleRate ... AlsaOpen failed ... PaAlsaStream_Configure failed
+```
+
+in the log, which had looked like a driver problem for days. It was not.
+The other instance was holding the device.
+
+## How it happened
+
+`DOSE.sh` rewrote `~/.config/autostart/dose.desktop` **on every launch**,
+unconditionally. Once the systemd unit became the start path that is a
+loop with a one-boot period:
+
+1. systemd runs `DOSE.sh`
+2. `DOSE.sh` writes the desktop autostart entry
+3. at the next graphical login the desktop starts `DOSE.sh` too
+
+The entry had been disabled **by hand, twice**. The evidence was sitting
+in the same directory the whole time:
+
+```
+dose.desktop                                       Sep 17 21:51
+dose.desktop.disabled-by-claude.20260917-172816
+dose-home-station.desktop.disabled-by-claude.20260917-161454
+```
+
+`CLAUDE.md` has asserted "systemd is the ONLY start path" since that
+work, and the launcher quietly contradicted it every boot. **A fix the
+program undoes at startup is not a fix, and writing it down did not make
+it true.**
+
+Fixed: when systemd is managing us (`INVOCATION_ID` set, or the unit is
+enabled) the autostart entry is **retired**, not merely skipped. With no
+unit present it is still installed, because then it is the start path.
+
+## A self-restart left the microphone behind
+
+Separately, and found only because the previous fix added the field that
+shows it — two selections, both `#1 since start`, 54 seconds apart,
+while systemd reported **zero** service restarts:
+
+```
+22:11:51   took 2.0s    chose card 5,0   peak 9542, 88 blocks
+22:12:45   took 63.8s   chose NOTHING    every route, 0 blocks
+           audio blocks delivered since start: 0
+```
+
+Zero restarts because the *unit* never restarted — the **app** restarted
+itself, `os.execv` after an auto-update.
+
+`os.execv` replaces the process image: no `finally`, no `atexit`, every
+thread ceases. The capture recorder is a child in its own session —
+deliberately, so a stray group signal cannot kill the microphone — and
+that same property carries it straight through `execv` still holding the
+USB device. The replacement process is deaf.
+
+`_restart_app()` already released the **camera**. The microphone was
+never released, and it is the one another process cannot simply reopen.
+`release_audio()` now hands it back: TERM the recorder (never KILL — a
+killed recorder strands the PCM), reap it, close the pipe, stop the
+synthesis worker. Under a millisecond, so it sits in front of `execv`
+without delaying anything.
+
+## The auto-update had no brake
+
+`_do_update_check` runs 2 s after launch, `_apply_update` ends in
+`os.execv`, the relaunched app checks again 2 s later. Nothing counted,
+nothing waited. Six pushes in an evening meant six update-and-restart
+cycles, each reloading four speech models off an SD card; a
+non-converging update would spin forever.
+
+- **`DOSE_FREEZE=1`** — pulls nothing. Set before a demo. Read from the
+  environment, so no restart can clear it.
+- A **persisted** cooldown (15 min) and 3-try limit per remote hash, in
+  `update_state.json` — on disk, because the whole failure mode is that
+  the process restarts. A stuck station that RUNS beats one that reboots.
+
+Ryan suggested this cause unprompted ("maybe it's updating way too
+often"). He was right.
+
+## Verified on the device
+
+| | before | after |
+|---|---|---|
+| app instances | 2 | **1** |
+| available memory | 997 MB | **2193 MB** |
+| app RSS | 1126 + 1387 MB | **1235 MB, flat over 3 min** |
+| temperature | 48–63 °C | **46.2 °C** |
+| selection | 63.8 s, chose NOTHING | **2.0 s, card 5,0, peak 16357** |
+| recorder | cycling | **one, continuous** |
+| restarts / tracebacks / aborts | — | **0 / 0 / 0** |
+
+## FIVE measurement errors — read this before trusting a number
+
+Every one produced a confident wrong diagnosis, on a device that was
+fine:
+
+1. **`pgrep -fc <pattern>` counts the shell running the pgrep.** Reported
+   two Piper workers when there was one; nearly justified a fix for a CPU
+   regression that did not exist. Read `/proc/<pid>/cmdline`, skip the
+   current pid.
+2. **`ps pcpu` is an average over process LIFETIME.** 267 % twenty
+   seconds after a restart is startup work, not load. Take instantaneous
+   CPU from `/proc/<pid>/stat` jiffy deltas over a window.
+3. **`python3 -u` was added to `DOSE.sh`** for unbuffered logging, and
+   every "is the app running" check still grepped the command line
+   *without* `-u`. Every "APP IS GONE" for an hour was false.
+4. **A cleanup loop matched its own command line** and TERMed its own SSH
+   session.
+5. **A test asserted `release_audio()` precedes `os.execv`** and matched
+   `os.execv` in the *comment* explaining the fix. Strip comments before
+   comparing — the injection detector made this same mistake four times.
+
+And one more, upstream of all of them: **`ping raspberrypi.local` failed
+for hours while `ssh dose-pi` worked.** I called the Pi "off the network"
+on the strength of a broken test. SSH is the only reachability check that
+counts; `~/Documents/dose-agent/pi_host.sh` now resolves by cache →
+alias → known IP → subnet sweep.
+
+I told Ryan the lockups were "almost certainly" memory pressure from my
+Piper worker. The device showed no OOM, no undervoltage,
+`throttled=0x0`, 48 °C. Memory pressure was real — from two whole
+applications, not from my change.
+
+**The owner reading his own device beat five of my measurements.** Check
+the instrument before the code.
+
+## Still open
+
+- Free-tier cloud STT is written, tested, and dormant. It needs a Groq
+  key at `~/dose-home-station/groq_key` (0600), placed **by Ryan** — the
+  repo is public and no credential is handled here. This is the remaining
+  step for conversational latency; local `tiny` models on a Pi 4 will not
+  get there.
+- `tests/audio/` has no recordings, so the WER yardstick has nothing to
+  measure.
+- Streaming TTS (synthesise + play in chunks) would cut perceived
+  response time more than optimising Piper.
+- `DoseVoice._run` is ~1250 lines with `open_capture`, `open_pipe_cmd`,
+  `ingest`, `route_floor` and `close_capture` as nested closures. It
+  needs splitting, and it needs a device to soak on afterwards.
+- The Piper subprocess worker is **default-off** pending a soak that
+  measures its RSS against a board running one application.
+- `arecord -D default` still fails with `Host is down`; every `default`
+  route in the walk is dead weight.
