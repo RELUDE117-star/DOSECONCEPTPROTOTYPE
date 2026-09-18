@@ -2574,6 +2574,39 @@ class DoseVoice:
         return found
 
     @staticmethod
+    def _native_channels(card):
+        """How many channels this card actually captures.
+
+        /proc/asound/card<N>/stream0 is the USB descriptor as the
+        kernel read it, so it is the device's own answer rather than a
+        guess. Anything else goes through ALSA's plug layer, and for a
+        channel count that means an AVERAGE — which is how this station
+        went deaf: a two-channel capsule averaged down to one, with a
+        noise floor of one or two LSB, produces exact zeros.
+
+        Defaults to 2 when the file is unreadable or says nothing. That
+        is the safe default, not a neutral one: capturing two channels
+        from a mono device duplicates the channel and ingest() picks
+        the louder of two identical ones, which costs nothing. The
+        reverse — asking for one channel from a stereo device — is the
+        bug.
+        """
+        try:
+            with open("/proc/asound/card%d/stream0" % int(card)) as f:
+                text = f.read()
+        except Exception:
+            return 2
+        best = 0
+        for m in re.finditer(r"Channels:\s*(\d+)", text):
+            try:
+                best = max(best, int(m.group(1)))
+            except Exception:
+                pass
+        if best in (1, 2, 4, 6, 8):
+            return best
+        return 2
+
+    @staticmethod
     def _card_has_playback(card):
         """True if this ALSA card also exposes a PLAYBACK device — i.e.
         it's a speaker/headset (its capture side is likely a phantom
@@ -5264,11 +5297,36 @@ class DoseVoice:
                             break
                         delivered += 1
                         if channels == 2:
+                            # PICK THE LOUDER CHANNEL BY PEAK, AND
+                            # STICK TO IT.
+                            #
+                            # This compared audioop.rms() — the same
+                            # mistake route_floor() and capture_is_live()
+                            # each had, in a third place. In a quiet
+                            # room BOTH channels measure RMS 0 on this
+                            # hardware, so the comparison was always a
+                            # tie and always resolved to left. On a
+                            # capsule wired to the right channel that is
+                            # silence until somebody speaks loudly
+                            # enough to break the tie — and then the
+                            # choice flips mid-word, chopping the
+                            # utterance in half.
+                            #
+                            # Peak separates the channels when RMS
+                            # cannot (29 vs 0, measured), and the
+                            # running maxima decay slowly so the choice
+                            # is made once from accumulated evidence
+                            # rather than re-litigated every 21 ms.
                             try:
                                 left = audioop.tomono(data, 2, 1, 0)
                                 right = audioop.tomono(data, 2, 0, 1)
-                                data = (left if audioop.rms(left, 2)
-                                        >= audioop.rms(right, 2)
+                                lp, _lr = _peak_rms(left)
+                                rp, _rr = _peak_rms(right)
+                                self._ch_l = max(
+                                    lp, getattr(self, "_ch_l", 0) * 0.999)
+                                self._ch_r = max(
+                                    rp, getattr(self, "_ch_r", 0) * 0.999)
+                                data = (left if self._ch_l >= self._ch_r
                                         else right)
                             except Exception:
                                 pass
@@ -5392,10 +5450,41 @@ class DoseVoice:
             for d in (device, 0, 1, 2, 3):
                 if d not in subdevs:
                     subdevs.append(d)
+            # ── ASK THE CARD FOR ITS OWN CHANNEL COUNT, AND USE IT ───
+            #
+            # This list used to be (1, 2) — mono first — and that one
+            # ordering is what made the station deaf in a quiet room.
+            # Measured on the device, app stopped, twelve seconds each,
+            # the SAME card and the SAME rate:
+            #
+            #   plughw:5,0 -c 1   peak 103   non-zero 740 / 570,000
+            #   plughw:5,0 -c 2   peak 294   non-zero 3,308 / 1,152,000
+            #
+            # The AIRHUG's only native mode is 48 kHz S16_LE TWO
+            # channels. Asking for one channel does not give us the
+            # microphone; it asks ALSA's plug layer to AVERAGE the two.
+            # A quiet room's noise floor on this capsule is one or two
+            # LSB, and (1 + 0) / 2 rounds to zero — so averaging does
+            # not attenuate the noise floor, it ANNIHILATES it, and
+            # halves everything else including speech.
+            #
+            # That is the whole of "HEARING: YES, peak 0". The engine's
+            # own raw tap caught 96,256 consecutive samples without a
+            # single non-zero value while, seconds later, a hand
+            # recording of the same device read peak 50. Both were true.
+            # One had been averaged and one had not.
+            #
+            # So: capture at the card's NATIVE channel count and let
+            # ingest() do the downmix, which takes the LOUDER channel
+            # per block rather than the mean — full amplitude for a
+            # capsule wired to one side, and nothing rounded away. The
+            # other counts stay as fallback for hardware that refuses.
+            nat = self._native_channels(card)
+            chans = [nat] + [c for c in (2, 1) if c != nat]
             for sd in subdevs:
                 for base in ("plughw", "hw"):
                     for rate in (48000, 44100, 16000):
-                        for ch in (1, 2):
+                        for ch in chans:
                             if known and (sd, base, rate, ch) == known:
                                 continue     # just tried it
                             cap = attempt(sd, base, rate, ch)
@@ -5883,10 +5972,20 @@ class DoseVoice:
                         % (self.mic_name or "",)[:60])
             if self._force_reopen:
                 self._force_reopen = False
+                # COUNT IT. This path reopens the capture exactly like
+                # the dead-capture watchdog does, but only that other
+                # path incremented the counter — so the heartbeat read
+                # "capture reopens: 0" while the silence ladder had just
+                # torn the stream down three times. A diagnostic that
+                # under-reports is worse than one that is absent,
+                # because it is believed.
+                self._capture_restarts = getattr(
+                    self, "_capture_restarts", 0) + 1
                 close_capture(stream)
                 stream = open_capture()
                 last_audio = time.time()
                 last_reselect = time.time()
+                self._last_live_peak_ts = time.time()
                 if stream is None:
                     time.sleep(3)
                     continue
