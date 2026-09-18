@@ -750,6 +750,157 @@ works and is fast", never "it will understand everyone".
 - **`sudo -n tr ... < /proc/PID/environ` fails**: the redirect is done
   by the *shell*, not by sudo. Use `sudo -n cat ... | tr`.
 
+## "IT CRASHES EVERY TIME" WAS NEVER A CRASH — 2026-09-18
+
+Ryan reported the voice feature crashing on every use. The application
+never fell over: **one instance, zero service restarts, no traceback,
+3.5 h uptime.** The MICROPHONE was being destroyed and rebuilt about
+thirty times a minute, which from the outside is indistinguishable.
+
+Five separate causes, found in this order, each of which hid the next.
+Read them together: three of the five were things I had introduced or
+mis-measured while fixing the one before.
+
+### 1. The reopen loop — `close_capture()` signalling itself
+
+**This was the big one, and py-spy named it in one dump:**
+
+```
+Thread "_run"
+    open_pipe_cmd (dose_voice.py:5820)      <- the settle-sleep
+    attempt       (dose_voice.py:6088)
+    open_arecord  (dose_voice.py:6164)
+    open_capture  (dose_voice.py:6640)
+    _run          (dose_voice.py:6838)
+```
+
+Not stuck, not crashed — opening a microphone it was about to close.
+
+`close_capture()` TERMs the recorder. The reader thread's `finally`
+could not see *who* ended it, so it reported our own `terminate()` as
+the microphone dying and set `_force_reopen`, which brought the
+supervisor straight back to tear down the replacement. **One
+legitimate reopen from anything at all — a selection, a hot-plug, the
+silence ladder — and the station never stops.** Every `Aborted by
+signal Terminated` in that log was the app signalling itself.
+
+Fixed: `close_capture()` leaves the pid in `_closed_on_purpose` before
+it signals; the reader skips the reopen for a recorder it finds there.
+**Keyed by pid, not a flag** — teardowns overlap during a re-selection
+and a flag set by one would silence the other's genuine death report.
+
+The heartbeat now prints **two** numbers, because they mean two
+different things:
+
+```
+capture reopens: 0   closed on purpose: 2
+```
+
+A run of "332 reopens" turned out to be 332 of the second kind.
+
+### 2. Route selection condemned a working microphone on a coin toss
+
+`route_floor()` listened **1.6 s** and rejected anything below
+`ROUTE_LIVE_PEAK`. But only about **1.2% of blocks in this room carry
+a non-zero sample** (38 of 3100 — a number already written down in
+this file, about the silence watchdog). 1.6 s is ~75 blocks, so the
+expected number carrying anything is **0.9**.
+
+So the walk measured the real mic, called it digitally silent, killed
+it and started over — every ~2 s, forever. 94 blocks per recorder,
+which *is* 1.6 s at 47 blocks/sec.
+
+**No threshold separates quiet from dead. Time does.** That sentence
+was already in this file about a different watchdog; this was the
+second place that needed it. A route now gets up to
+`ROUTE_FLOOR_PATIENCE` (5 s) and listening **stops the instant** a
+sample clears the bar, so a live route costs what it always did.
+
+### 3. The winner cache remembered whatever OPENED
+
+`open_arecord()` cached the (subdevice, base, rate, channels) that
+worked, and wrote it the moment arecord **started**. On this hardware
+everything starts — plughw converts anything to anything — so
+`16000/1ch`, the averaging path that annihilates a quiet room, was
+cached as a winner and tried first on every reopen. The only thing
+that evicted it was a failure to *open*, which never came.
+
+Fixed: the tuple is **proposed** on open and **promoted only when the
+walk accepts the route as live**; a rejected route evicts it.
+
+### 4. Undecided is not "left". It is "both".
+
+With capture finally correct at 48 kHz stereo:
+
+```
+HEARING: YES     blocks/sec: 47.7 (nominal 46.9)     live level: peak 0
+```
+
+The downmix picks the louder channel with `>=`, so before either
+channel has shown a sample **the tie resolves to LEFT** — and on a
+capsule wired to the right that is permanent, because the re-check
+looks at ONE block and a quiet block leaves both maxima at 0. With
+~0.3% of samples non-zero, the tie is the normal state.
+
+Fixed: while nothing is proven the channels are **summed**, not
+picked. `peak 0 → peak 9` on the device. Summing is not the averaging
+that started all this: `(1+0)/2` rounds to zero, `1+0` does not — the
+bug and its fix differ by a divide.
+
+### 5. My own buffer "fix" made the station deaf, and the number lied
+
+A decode takes ~4 s and ALSA's default capture buffer is ~0.5 s, so a
+bigger buffer looked right. I asked for five seconds and read this as
+success:
+
+```
+reopens: 168 -> 4     overruns: 0
+```
+
+The next two fields **on the same line** said what had happened:
+
+```
+rec=0     blocks/sec 0.0
+```
+
+No recorder at all. This card will not install a 240,000-frame capture
+buffer and **arecord does not negotiate — it exits**. Every arecord
+route failed to open, the walk fell through to a PortAudio endpoint
+that delivers nothing, and the reopen counter stopped climbing because
+there was nothing left to reopen.
+
+**A zero can mean "fixed" or "gone". Read the whole line.**
+
+Fixed: `CAPTURE_BUFFER_LADDER` — largest first, last rung asks for
+nothing at all. What the card accepts is learned once per card
+(laddering inside the sweep would turn 12 spawns into 60) and
+forgotten if it stops working. This card takes 2 s.
+
+And `--period-time` is now stated outright, because **arecord derives
+the period from the buffer at a quarter of it**: a 5 s buffer meant
+1.25 s periods, so the FORCED route delivered `0 blocks` inside a
+1.6 s window. A period is also latency, and this station is trying to
+answer in under two seconds.
+
+### Measurement traps added this session
+
+- **`pgrep`-style self-matching, eighth instance — and I wrote it into
+  the duplicate-instance check itself.** A job reported `instances: 2`;
+  the second was the check's own `bash -c`, whose command TEXT contains
+  `dose_app.py`. **Match `/proc/<pid>/comm` first** (`python3` for the
+  app, `bash` for a shell), then confirm with the command line.
+- **Four test assertions broke during this work and all four were the
+  test's fault, not the code's**: one sliced a function body as a fixed
+  3000 characters (a docstring paragraph pushed the code out of the
+  window), two pinned the exact text of a call that had gained an
+  argument, and one grepped for a *comment* in comment-stripped source.
+  A fifth asserted arithmetic that is simply false. **Assert the
+  property — flag counts, adjacency, ordering from the line it is about
+  — never the text you happened to write that day.**
+- **The app writes `voice/selection.txt` with "why each reopen
+  happened".** Three jobs went into inferring the reopen loop from
+  external symptoms while that file held the answer. **Read it first.**
+
 ## Known limitations / TODO
 - `arecord -D default` fails with `Host is down` — the PipeWire ALSA plugin is
   not serving this user. Not blocking (the pinned `plughw:5,0` route works),
