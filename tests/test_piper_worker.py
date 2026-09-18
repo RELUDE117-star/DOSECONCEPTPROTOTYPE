@@ -316,6 +316,139 @@ with tempfile.TemporaryDirectory() as tmp:
     p.stdin.close(); p.wait(timeout=10)
 
 
+print("\n5b. Concurrency: one worker, one load, no crossed replies")
+# The FIRST hardware soak looked like it had spawned two workers, and I
+# nearly shipped a fix for a CPU regression that did not exist —
+# `pgrep -fc piper_worker.py` counts any process whose command line
+# merely CONTAINS that string, including the measuring command itself.
+#
+# But the race underneath was real. prewarm_replies() runs on its own
+# thread while the speech path can synthesise at the same time, and
+# _synth_via_worker() writes one request to a pipe and reads one line
+# back. Two threads doing that concurrently can each read the OTHER's
+# reply, so sentence A is told "ok" about sentence B's file. Silent, and
+# very hard to find later.
+#
+# So: count real interpreters, not string matches, and prove the
+# request/response pairing survives sixteen threads at once.
+CONC_FAKE = FAKE_PIPER.replace(
+    'w.writeframes(b"".join(struct.pack("<h", (i % 800) - 400)\n'
+    '                               for i in range(2205)))',
+    '# encode WHICH sentence this is, so a crossed reply is detectable\n'
+    '        n = int(text.split()[-1])\n'
+    '        w.writeframes(struct.pack("<h", n) * 200)')
+
+with tempfile.TemporaryDirectory() as tmp:
+    d = os.path.join(tmp, "fakelib")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "piper.py"), "w") as f:
+        f.write(CONC_FAKE)
+    loads = os.path.join(tmp, "loads")
+    open(loads, "w").close()
+    model = os.path.join(tmp, "v.onnx")
+    with open(model, "wb") as f:
+        f.write(b"\0" * 64)
+
+    import threading
+    import dose_voice as _dv
+    saved_path = os.environ.get("PYTHONPATH", "")
+    os.environ["PYTHONPATH"] = d + os.pathsep + saved_path
+    os.environ["FAKE_LOAD_COUNTER"] = loads
+    try:
+        eng = object.__new__(_dv.DoseVoice)
+        eng._piper_path = model
+        eng._pw_proc = None
+        eng._pw_spawned_at = 0.0
+        eng._tts_events = []
+
+        N = 16
+        res = {}
+        errs = []
+
+        def one(i):
+            w = os.path.join(tmp, "c%d.wav" % i)
+            try:
+                res[i] = (eng._synth_via_worker("sentence number %d" % i, w), w)
+            except Exception as ex:
+                errs.append(repr(ex))
+
+        th = [threading.Thread(target=one, args=(i,)) for i in range(N)]
+        for t in th:
+            t.start()
+        for t in th:
+            t.join(90)
+
+        check("16 concurrent threads all synthesise",
+              sum(1 for v in res.values() if v[0]) == N,
+              "%d/%d ok, errors=%s" % (
+                  sum(1 for v in res.values() if v[0]), N, errs[:2]))
+        n_loads = len(open(loads).read().strip() or "")
+        check("the model is loaded ONCE, not once per thread",
+              n_loads <= 1, "loaded %d times" % n_loads)
+
+        crossed = []
+        for i, (ok, w) in sorted(res.items()):
+            if not ok:
+                continue
+            r = wave.open(w, "rb")
+            frame = r.readframes(1)
+            r.close()
+            import struct as _st
+            got = _st.unpack("<h", frame)[0]
+            if got != i:
+                crossed.append((i, got))
+        check("NO reply is crossed between threads "
+              "(the bug the lock exists for)",
+              not crossed, "crossed: %s" % (crossed[:4],))
+
+        # ASSERT ON *OUR* PID, not a global process count.
+        #
+        # A global count was the first thing written here and it was
+        # wrong twice over. `pgrep -fc piper_worker.py` matches any
+        # command line CONTAINING that string — including the measuring
+        # command itself, which is how a Pi soak appeared to show two
+        # workers and nearly had me ship a fix for a CPU regression that
+        # did not exist. And even counting real interpreters picks up
+        # workers left by earlier sections of this very file, or by a
+        # test running in parallel. The question is "did MY engine keep
+        # exactly one worker", so ask about that one process.
+        pid = eng._pw_proc.pid if eng._pw_proc else None
+        check("the engine holds exactly one worker handle",
+              pid is not None, "no worker handle at all")
+        check("that worker is alive after 16 concurrent requests",
+              pid is not None and eng._pw_proc.poll() is None)
+        # every thread went through the same process
+        check("all 16 threads shared ONE worker (a per-thread spawn "
+              "would have loaded the model 16 times)", n_loads <= 1)
+
+        eng.stop_piper_worker()
+        time.sleep(0.5)
+        gone = True
+        if pid is not None:
+            try:
+                os.kill(pid, 0)
+                gone = False          # still there
+            except OSError:
+                gone = True           # reaped
+        check("stop_piper_worker() leaves no orphan behind", gone,
+              "pid %s is still alive" % pid)
+        check("the handle is cleared, so a later call respawns cleanly",
+              eng._pw_proc is None)
+        check("calling stop twice is safe",
+              (eng.stop_piper_worker(), True)[1])
+    finally:
+        os.environ["PYTHONPATH"] = saved_path
+        os.environ.pop("FAKE_LOAD_COUNTER", None)
+
+check("the lock covers the whole request/response, not just the spawn",
+      "_synth_via_worker_locked" in
+      open(os.path.join(ROOT, "dose_voice.py"), encoding="utf-8").read())
+
+anchor_src = open(os.path.join(ROOT, "dose_voice.py"), encoding="utf-8").read()
+check("the engine reaps the worker on shutdown",
+      "self.stop_piper_worker()" in anchor_src
+      and anchor_src.count("def stop_piper_worker") == 1)
+
 print("\n6. The voice must not change depending on which path ran")
 src = open(os.path.join(ROOT, "dose_voice.py"), encoding="utf-8").read()
 wsrc = open(WORKER, encoding="utf-8").read()

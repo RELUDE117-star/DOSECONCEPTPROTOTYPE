@@ -1098,6 +1098,26 @@ class DoseVoice:
     # frame; keyed on the session so a swapped model re-reads them.
     _vad_input_names = None
     _vad_names_for = None
+    # ONE synthesis at a time, and ONE worker.
+    #
+    # MEASURED ON THE DEVICE, first hardware soak of the Piper worker:
+    # `pgrep -fc piper_worker.py` returned 2, CPU sat at 267-270% (the
+    # baseline is 111%) and the board ran 59.9-63.3 C instead of 45-50.
+    # Two ONNX sessions, because prewarm_replies() runs on its own
+    # thread while the speech path can synthesise at the same time, and
+    # both threads found _pw_proc None and both spawned.
+    #
+    # The wasted session was the visible half. The dangerous half is
+    # that _synth_via_worker() writes a request to one pipe and reads
+    # one line back: two threads doing that concurrently can each read
+    # the OTHER's reply, so sentence A is told "ok" about sentence B's
+    # file. That is silent, and it would have been very hard to find
+    # later.
+    #
+    # The lock therefore covers spawn AND the whole request/response,
+    # not just the spawn. Serialising synthesis costs nothing real —
+    # Piper is CPU-bound and two at once on a Pi 4 only thrash.
+    _pw_lock = threading.Lock()
 
     def __init__(self, app):
         self.app = app
@@ -5502,6 +5522,11 @@ class DoseVoice:
             self._shut_stream(stream, "engine-exit")
         except Exception:
             pass
+        # And take the synthesis worker with us. An orphaned worker
+        # holds an ONNX session and its share of the board for nothing,
+        # and this project already has one hard-won lesson about child
+        # processes outliving their parent and holding a device hostage.
+        self.stop_piper_worker()
 
     def _match_wake(self, text):
         """Return the words after the wake phrase, or None."""
@@ -5943,6 +5968,40 @@ class DoseVoice:
         self._note_tts("piper worker ready")
         return p
 
+    def stop_piper_worker(self):
+        """End the synthesis worker. Safe to call repeatedly.
+
+        TERM first so it can close its own ONNX session, then KILL, and
+        always reap — the same discipline close_capture() had to learn
+        the hard way when unreaped recorders left the microphone
+        unopenable.
+        """
+        p = getattr(self, "_pw_proc", None)
+        self._pw_proc = None
+        if p is None:
+            return
+        try:
+            if p.stdin:
+                p.stdin.close()
+        except Exception:
+            pass
+        try:
+            if p.poll() is None:
+                p.terminate()
+        except Exception:
+            pass
+        try:
+            p.wait(timeout=3)
+        except Exception:
+            try:
+                p.kill()
+            except Exception:
+                pass
+            try:
+                p.wait(timeout=3)
+            except Exception:
+                pass
+
     def _note_tts(self, msg):
         """Record a synthesis event. Bounded, never raises."""
         try:
@@ -5955,7 +6014,15 @@ class DoseVoice:
             pass
 
     def _synth_via_worker(self, text, wav):
-        """True if the worker produced the wav. False to fall back."""
+        """True if the worker produced the wav. False to fall back.
+
+        Serialised on _pw_lock: see that lock's comment for the two bugs
+        this prevents, both of which a hardware soak found immediately.
+        """
+        with self._pw_lock:
+            return self._synth_via_worker_locked(text, wav)
+
+    def _synth_via_worker_locked(self, text, wav):
         p = self._piper_worker()
         if p is None:
             return False
