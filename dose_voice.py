@@ -2855,6 +2855,63 @@ class DoseVoice:
                 found.append((card, dev, name))
         return found
 
+    # ── THE WINNER CACHE IS FED BY ACCEPTANCE, NOT BY OPENING ────────
+    #
+    # open_arecord() remembers the (subdevice, base, rate, channels)
+    # combination that worked for a card so a reopen costs one spawn
+    # instead of a sweep. That is worth having — the sweep is the
+    # better part of half a minute on this board.
+    #
+    # It was written the moment arecord started, and on this hardware
+    # every combination starts: plughw converts anything to anything,
+    # so 16 kHz mono "works" in the only sense that check could see,
+    # while delivering the averaged silence that was root-caused
+    # yesterday. Once cached it was tried first on every reopen and
+    # never re-examined, because the only thing that evicted it was a
+    # failure to OPEN.
+    #
+    # These three keep the cache honest, and they are deliberately
+    # separate from the walk that calls them: the question "did this
+    # route prove itself" is answerable without a microphone, and
+    # tests/test_capture_channels.py answers it that way.
+    def _arecord_propose(self):
+        """Forget any combination proposed by an earlier route, so a
+        rejection can never be attributed to the wrong opener."""
+        self._arecord_pending = None
+
+    def _arecord_confirm(self):
+        """The walk accepted this route as live. NOW it may be cached."""
+        pend = getattr(self, "_arecord_pending", None)
+        if not pend:
+            return None
+        card, combo = pend
+        try:
+            win = getattr(self, "_arecord_win", None)
+            if win is None:
+                win = self._arecord_win = {}
+            win[card] = combo
+        except Exception:
+            return None
+        self._arecord_pending = None
+        return (card, combo)
+
+    def _arecord_reject(self):
+        """The walk measured this route and found nothing. Evict it, so
+        the sweep underneath gets its turn on the next reopen instead
+        of the cache handing back the same silence forever."""
+        pend = getattr(self, "_arecord_pending", None)
+        if not pend:
+            return None
+        card, combo = pend
+        try:
+            win = getattr(self, "_arecord_win", None) or {}
+            if win.get(card) == combo:
+                win.pop(card, None)
+        except Exception:
+            pass
+        self._arecord_pending = None
+        return (card, combo)
+
     @staticmethod
     def _capture_subdevices(card):
         """How many capture subdevices this card REALLY has.
@@ -5968,11 +6025,40 @@ class DoseVoice:
                     "mic arecord %s @%d %dch" % (dev, rate, ch),
                     native_rate=rate, channels=ch)
                 if cap:
-                    # Remember the winner for this card. See below.
-                    try:
-                        self._arecord_win[card] = (sd, base, rate, ch)
-                    except Exception:
-                        pass
+                    # OPENING IS NOT WORKING, AND THE CACHE COULD NOT
+                    # TELL THE DIFFERENCE.
+                    #
+                    # This wrote the winner cache right here, on the
+                    # strength of arecord having started. But every
+                    # combination in the sweep goes through the plug
+                    # layer, so on this card ALL of them open —
+                    # including 16 kHz mono, which is the averaging
+                    # path that annihilates a quiet room's noise floor.
+                    # Cache that once and it is tried FIRST on every
+                    # reopen, forever, and the full sweep underneath it
+                    # never runs again, because the cache is only
+                    # dropped when a combination FAILS TO OPEN, and
+                    # this one always opens.
+                    #
+                    # The device showed the consequence, nine times in
+                    # twenty seconds:
+                    #
+                    #   mic arecord plughw:5,0 @16000 1ch ended after
+                    #   32 blocks: read error: Interrupted system call
+                    #
+                    # 32 blocks is 2.05 s, which is route_floor()'s
+                    # listening window; EINTR is close_capture()'s own
+                    # SIGTERM. Nothing was crashing. The walk opened a
+                    # silent combination, measured peak 0, rejected it,
+                    # closed it, and started again — about every two
+                    # seconds, indefinitely.
+                    #
+                    # So the tuple is only PROPOSED here. It is
+                    # promoted to the cache when the walk accepts the
+                    # route as live, and dropped when the walk rejects
+                    # it. A cache fed by acceptance cannot fill itself
+                    # with a combination nobody can hear.
+                    self._arecord_pending = (card, (sd, base, rate, ch))
                 return cap
 
             # THE COMBINATION THAT WORKED LAST TIME, FIRST.
@@ -6406,6 +6492,10 @@ class DoseVoice:
                         % (CAPTURE_OPEN_BUDGET,
                            len(routes) - len(self.mic_trail)))
                     break
+                # Clear any combination proposed by the PREVIOUS route
+                # before this one opens, so an acceptance or rejection
+                # is only ever credited to the opener that earned it.
+                self._arecord_propose()
                 cap = opener()
                 if not cap:
                     self.mic_trail.append(label + ": could not open")
@@ -6455,8 +6545,24 @@ class DoseVoice:
                     # about two seconds off every selection.
                     self.mic_name = (
                         label + " · selected (speak to test)")
+                    # This route proved itself. Only now is its
+                    # combination worth remembering for the next reopen.
+                    kept = self._arecord_confirm()
+                    if kept:
+                        self.mic_trail.append(
+                            "  remembered %s for card %d (proved live, "
+                            "peak %d)" % (kept[1], kept[0], floor))
                     self._dump_selection(label, True, t_walk)
                     return cap
+                # Measured, and there was nothing there. Evict the
+                # combination rather than letting a cache hand back the
+                # same silence on every reopen for the rest of the
+                # process's life.
+                dropped = self._arecord_reject()
+                if dropped:
+                    self.mic_trail.append(
+                        "  forgot %s for card %d (opened, heard nothing)"
+                        % (dropped[1], dropped[0]))
                 close_capture(cap)
                 if first_openable is None:
                     first_openable = (label, opener)

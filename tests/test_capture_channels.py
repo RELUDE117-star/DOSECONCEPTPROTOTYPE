@@ -205,6 +205,119 @@ seq = [downmix([(0, 0)] * 900 + [(0, 6000)] * 20, st4),
 check("a speaking turn on one channel never switches mid-turn",
       len(set(seq)) == 1, seq)
 
+print("\n── the winner cache is fed by ACCEPTANCE, not by opening ────")
+# The channel fix above was correct and was being bypassed. open_arecord
+# remembers the combination that worked for a card and tries it first on
+# the next reopen — and it wrote that cache the moment arecord STARTED.
+# On this hardware everything starts: plughw converts anything to
+# anything, so 16 kHz mono "worked" by that test while delivering the
+# averaged silence root-caused above. Cached once, tried first forever,
+# and evicted only by a failure to open — which never came.
+#
+# The device, nine times in twenty seconds:
+#   mic arecord plughw:5,0 @16000 1ch ended after 32 blocks (rc=1):
+#     read error: Interrupted system call
+# 32 blocks is 2.05 s, which is route_floor()'s window; EINTR is
+# close_capture()'s own SIGTERM. Open a silent route, measure peak 0,
+# reject it, close it, start again — every two seconds, indefinitely.
+# Not a crash. The same "shopping forever" this station has done before,
+# wearing a new hat.
+
+
+class FakeVoice(object):
+    """Just enough object for the three cache methods, which is the
+    point of splitting them out of the walk: the question 'did this
+    route prove itself' is answerable without a microphone."""
+    _arecord_propose = V._arecord_propose
+    _arecord_confirm = V._arecord_confirm
+    _arecord_reject = V._arecord_reject
+
+
+fv = FakeVoice()
+fv._arecord_win = {}
+fv._arecord_pending = None
+
+check("proposing alone caches nothing",
+      (setattr(fv, "_arecord_pending", (5, (0, "plughw", 16000, 1)))
+       or fv._arecord_win) == {},
+      fv._arecord_win)
+
+check("a rejected combination is never remembered",
+      fv._arecord_reject() == (5, (0, "plughw", 16000, 1))
+      and fv._arecord_win == {},
+      fv._arecord_win)
+check("...and the proposal is cleared, so the next route cannot "
+      "inherit the blame", fv._arecord_pending is None)
+
+fv._arecord_pending = (5, (0, "plughw", 48000, 2))
+check("a route that proved itself IS remembered",
+      fv._arecord_confirm() == (5, (0, "plughw", 48000, 2))
+      and fv._arecord_win == {5: (0, "plughw", 48000, 2)},
+      fv._arecord_win)
+
+# The eviction that matters: a cached combination that later measures
+# silent must be dropped, or the sweep underneath never runs again.
+fv._arecord_pending = (5, (0, "plughw", 48000, 2))
+fv._arecord_reject()
+check("a cached combination that goes silent is EVICTED",
+      fv._arecord_win == {}, fv._arecord_win)
+
+# ...but only its own. A rejection must not clear a different card's
+# good answer, or one dead USB port takes the working microphone with it.
+fv._arecord_win = {5: (0, "plughw", 48000, 2)}
+fv._arecord_pending = (4, (0, "plughw", 16000, 1))
+fv._arecord_reject()
+check("rejecting card 4 leaves card 5's proven combination alone",
+      fv._arecord_win == {5: (0, "plughw", 48000, 2)}, fv._arecord_win)
+
+# And a rejection carrying a STALE tuple must not evict the entry that
+# replaced it.
+fv._arecord_win = {5: (0, "plughw", 48000, 2)}
+fv._arecord_pending = (5, (0, "hw", 44100, 2))
+fv._arecord_reject()
+check("a stale proposal cannot evict the combination that replaced it",
+      fv._arecord_win == {5: (0, "plughw", 48000, 2)}, fv._arecord_win)
+
+fv._arecord_pending = None
+check("confirming with nothing proposed is a no-op",
+      fv._arecord_confirm() is None and fv._arecord_win ==
+      {5: (0, "plughw", 48000, 2)})
+check("rejecting with nothing proposed is a no-op",
+      fv._arecord_reject() is None and fv._arecord_win ==
+      {5: (0, "plughw", 48000, 2)})
+check("propose() clears a leftover proposal",
+      (fv._arecord_propose() or fv._arecord_pending) is None)
+
+check("open_arecord only PROPOSES; it no longer writes the cache",
+      "self._arecord_pending = (card, (sd, base, rate, ch))" in CODE
+      and "self._arecord_win[card] = (sd, base, rate, ch)" not in CODE,
+      "caching on open is what made a deaf combination permanent")
+check("the walk clears the proposal before each opener",
+      "self._arecord_propose()" in CODE and "cap = opener()" in CODE
+      and CODE.index("self._arecord_propose()") < CODE.index("cap = opener()"))
+# ORDERING IS MEASURED FROM THE LINE IT IS ABOUT, not from the first
+# occurrence in the file. My first two attempts here compared against
+# CODE.index("close_capture(cap)"), which finds a DIFFERENT, earlier
+# call site and made both checks meaningless — they failed against code
+# that is correct. Same family as the self-matching greps: anchor to the
+# thing, then search forward from it.
+_i_conf = CODE.find("kept = self._arecord_confirm()")
+_i_rej = CODE.find("dropped = self._arecord_reject()")
+check("the walk confirms on the live-route path, before it returns "
+      "the stream",
+      _i_conf > 0 and 0 < CODE.find("return cap", _i_conf)
+      < CODE.find("close_capture(cap)", _i_conf),
+      (_i_conf, CODE.find("return cap", _i_conf)))
+check("the walk evicts a rejected route BEFORE it closes it",
+      _i_rej > 0 and CODE.find("close_capture(cap)", _i_rej) > _i_rej,
+      _i_rej)
+check("acceptance is handled before rejection, so a live route never "
+      "falls through to the evicting branch",
+      0 < _i_conf < _i_rej, (_i_conf, _i_rej))
+check("the cache is still consulted first on a reopen",
+      "known = win.get(card)" in CODE and "cap = attempt(*known)" in CODE,
+      "evicting is right; throwing the optimisation away is not")
+
 print("\n── a reopen is counted wherever it happens ──────────────────")
 check("the forced-reopen path increments the counter too",
       CODE.count("self._capture_restarts = getattr(") >= 2,
