@@ -3883,6 +3883,35 @@ class DoseVoice:
         # stop signal, it is a fuse.
         self._stop.clear()
         threading.Thread(target=self._run, daemon=True).start()
+        # THE HEARTBEAT GETS ITS OWN THREAD.
+        #
+        # It used to be written from the top of the supervising loop,
+        # which means it stopped being written for the whole of a turn:
+        # _listen_command() does not return until the person has
+        # finished speaking and the answer has been worked out. So
+        # live.txt froze at "state: idle" for twenty seconds at exactly
+        # the moment somebody would be reading it to find out whether
+        # the station was listening.
+        #
+        # It cost me a measurement run — the harness waited for the
+        # heartbeat to say "listening", the turns happened, and the file
+        # never said so — and it would cost anyone else the same, in the
+        # one file written specifically so that nobody has to guess.
+        #
+        # Its own thread, one write a second, whatever the engine is
+        # doing. Still inside a bare except, still an atomic replace,
+        # still unable to touch the audio path.
+        threading.Thread(target=self._heartbeat_loop, daemon=True,
+                         name="heartbeat").start()
+
+    def _heartbeat_loop(self):
+        """Write voice/live.txt once a second, for as long as we run."""
+        while not self._stop.is_set():
+            try:
+                self._heartbeat()
+            except Exception:
+                pass
+            self._stop.wait(1.0)
 
     def stop(self):
         self._stop.set()
@@ -6132,10 +6161,9 @@ class DoseVoice:
         last_reselect = time.time()
         dev_sig = None
         while not self._stop.is_set():
-            # One heartbeat per second, always current. See _heartbeat().
-            if time.time() - getattr(self, "_hb_at", 0) >= 1.0:
-                self._hb_at = time.time()
-                self._heartbeat()
+            # (The heartbeat has its own thread now — see start(). It
+            # used to be written from here, and therefore stopped being
+            # written for the whole of every turn.)
             # Pause: the full self-test needs exclusive access to every
             # capture device, so it closes our stream and idles here
             # until the test is done, then reopens.

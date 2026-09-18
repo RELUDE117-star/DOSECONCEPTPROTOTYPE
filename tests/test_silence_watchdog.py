@@ -446,6 +446,58 @@ finally:
     dose_voice.VOICE_DIR = _orig_vd
     shutil.rmtree(_hb_tmp, ignore_errors=True)
 
+print("\n── the heartbeat keeps writing DURING a turn ────────────────")
+# It used to be written from the top of the supervising loop, so it
+# stopped being written for the whole of a turn: _listen_command() does
+# not return until the person has finished and the answer is worked
+# out. live.txt froze at "state: idle" for twenty seconds at exactly
+# the moment somebody would read it to find out whether the station was
+# listening. It cost a measurement run — the harness waited for the
+# file to say "listening", the turns happened, and it never did.
+import threading as _hbt                                     # noqa: E402
+
+_hb_dir = tempfile.mkdtemp(prefix="dose-hbl-")
+_ovd = dose_voice.VOICE_DIR
+dose_voice.VOICE_DIR = _hb_dir
+try:
+    b = object.__new__(dose_voice.DoseVoice)
+    b._stop = _hbt.Event()
+    b.state = "listening"          # i.e. mid-turn, loop not running
+    b._muted = False
+    b.mic_name = "A28"
+    b._blocks_in = 10
+    b._last_block_ts = time.time()
+    b.mic_rms = 0
+    th = _hbt.Thread(target=b._heartbeat_loop, daemon=True)
+    th.start()
+    time.sleep(2.2)
+    hbf = os.path.join(_hb_dir, "live.txt")
+    check("the file is written while the engine is mid-turn",
+          os.path.exists(hbf))
+    body = open(hbf, encoding="utf-8").read() if os.path.exists(hbf) else ""
+    check("...and it says so", "state:          listening" in body, body[:80])
+    first = os.path.getmtime(hbf) if os.path.exists(hbf) else 0
+    time.sleep(1.3)
+    check("...and keeps being rewritten", os.path.getmtime(hbf) > first)
+    b._stop.set()
+    time.sleep(1.4)
+    check("the thread ends when the engine stops", not th.is_alive())
+finally:
+    dose_voice.VOICE_DIR = _ovd
+    shutil.rmtree(_hb_dir, ignore_errors=True)
+
+_HBSRC = open(os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "dose_voice.py"), encoding="utf-8").read()
+check("the heartbeat runs on its own thread",
+      "def _heartbeat_loop" in _HBSRC and 'name="heartbeat"' in _HBSRC)
+check("...started by start(), so it lives exactly as long as the engine",
+      _HBSRC.index("threading.Thread(target=self._run")
+      < _HBSRC.index("target=self._heartbeat_loop"))
+check("the supervising loop no longer writes it",
+      "self._hb_at = time.time()" not in _HBSRC)
+check("it waits on the stop event rather than sleeping blindly",
+      "self._stop.wait(1.0)" in _HBSRC)
+
 print("\n── it is actually wired in ──────────────────────────────────")
 
 SRC = open(os.path.join(os.path.dirname(os.path.dirname(
