@@ -238,6 +238,36 @@ check("the worker still starts before playback, so it overlaps the "
 check("there is still exactly one worker",
       SRC.count('name="tts-stream"') == 1)
 
+print("\n── nothing decodes speech while the station is answering ───")
+# render_to_cache timing it own parts settled where the remaining
+# second went, and it was none of my four guesses:
+#
+#   tts: {'cache': 0.0002, 'hit': 0, 'synth': 1.22, 'write': 0.0002}
+#   tts: {'cache': 0.001,  'hit': 0, 'synth': 4.37, 'write': 0.0002}
+#
+# The cache lookup and the write are microseconds. It is all
+# synthesis — and the same sentence measured 0.72 s standalone with
+# the app running but IDLE, which is the flaw in that comparison.
+#
+# During a turn the listening loop decodes every 21 ms block through
+# Vosk, right through the transcription and the reply, on the same
+# four cores Piper renders on. In this room 54% of blocks now carry
+# signal, so it is decoding hard. Vosk's output after endpointing is
+# thrown away.
+check("Vosk is not fed while the station is thinking or speaking",
+      'if self.state in ("thinking", "speaking"):' in SRC,
+      "its output is discarded then, and Piper needs the cores")
+check("...and that guard sits before the decode, not after",
+      SRC.index('if self.state in ("thinking", "speaking"):')
+      < SRC.index("got_final = rec.AcceptWaveform(data)"))
+check("the idle guard is still there too",
+      'if self.state == "idle" and not WAKE_WORD:' in SRC)
+check("barge-in does not depend on that queue, so nothing is lost",
+      "_detect_barge_in(data)" in SRC
+      and SRC.index("_detect_barge_in(data)")
+      < SRC.index("got_final = rec.AcceptWaveform(data)"),
+      "barge-in runs in ingest() and returns before the queue")
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:

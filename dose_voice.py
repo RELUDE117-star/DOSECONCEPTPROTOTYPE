@@ -7344,6 +7344,35 @@ class DoseVoice:
             if self.state == "idle" and not WAKE_WORD:
                 continue
 
+            # AND NOT WHILE WE ARE ANSWERING.
+            #
+            # Vosk exists to put words on screen while somebody is
+            # SPEAKING. Once endpointing has fired, the words are
+            # already captured and its output is thrown away — but it
+            # kept decoding every 21 ms block right through the
+            # transcription and the reply, on the same four cores
+            # Piper renders on.
+            #
+            # The device made the cost visible once render_to_cache
+            # timed its own parts:
+            #
+            #   tts: {'cache': 0.0002, 'hit': 0, 'synth': 1.22, ...}
+            #   tts: {'cache': 0.001,  'hit': 0, 'synth': 4.37, ...}
+            #
+            # The lookup and the write are microseconds; it is all
+            # synthesis. And the same sentence measured 0.72 s
+            # standalone with the app running — but IDLE, which is the
+            # flaw in that comparison. During a turn this loop is
+            # decoding continuously, and in this room 54% of blocks now
+            # carry signal, so it is decoding hard.
+            #
+            # Nothing is lost: a block arriving while the station is
+            # thinking or talking is not part of the question that was
+            # asked, and barge-in does not use Vosk — it runs its own
+            # detector in ingest() and never reaches this queue.
+            if self.state in ("thinking", "speaking"):
+                continue
+
             got_final = rec.AcceptWaveform(data)
             if got_final:
                 text = json.loads(rec.Result()).get("text", "").strip()
