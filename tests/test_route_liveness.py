@@ -29,6 +29,7 @@ Run:  python3 tests/test_route_liveness.py
 """
 import os
 import sys
+import ast
 import wave
 import struct
 import tempfile
@@ -154,8 +155,8 @@ for fn in ("def route_floor", "def capture_is_live"):
         continue
     # the body, to the next def at the same or lower indent
     body = src[i:i + 3000]
-    check("%s() computes audioop.max" % fn.split()[-1],
-          "audioop.max(" in body)
+    check("%s() measures peak via _peak_rms()" % fn.split()[-1],
+          "_peak_rms(" in body)
     check("%s() does not return an RMS as its verdict"
           % fn.split()[-1],
           "return audioop.rms(" not in body
@@ -169,7 +170,72 @@ check("it aborts rather than drains",
       '"abort"' in src)
 
 
-print("\n6. A real WAV round-trip, end to end")
+print("\n6. No audioop is not permission to skip the measurement")
+# Python 3.13 removed audioop from the stdlib — which is what the
+# station runs. Every measurement site used to guard the import with a
+# fallback that assumed success (route_floor returned 999, meaning
+# "accept any route"; capture_is_live returned True). A station without
+# audioop did not select a microphone, it took the first thing that
+# opened. _peak_rms() has to give the same answer either way.
+import builtins                                              # noqa: E402
+_real_import = builtins.__import__
+
+
+def _no_audioop(name, *a, **k):
+    if name == "audioop":
+        raise ImportError("removed in 3.13")
+    return _real_import(name, *a, **k)
+
+
+for label, data in (("real mic", real), ("dead endpoint", dead),
+                    ("speech", speech())):
+    with_c = dose_voice._peak_rms(data)
+    builtins.__import__ = _no_audioop
+    try:
+        without_c = dose_voice._peak_rms(data)
+    finally:
+        builtins.__import__ = _real_import
+    check("%s measures identically with and without audioop" % label,
+          with_c == without_c, "%r vs %r" % (with_c, without_c))
+
+check("_peak_rms survives empty input", dose_voice._peak_rms(b"") == (0, 0))
+check("_peak_rms survives a truncated sample",
+      isinstance(dose_voice._peak_rms(b"\x01\x02\x03"), tuple))
+
+# "return 999" appears once more in this file, inside the _peak_rms
+# docstring that explains why it used to be there. Strip docstrings
+# before asserting, so the explanation cannot be mistaken for the fault.
+def _code_only(text):
+    tree = ast.parse(text)
+    spans = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.FunctionDef,
+                                 ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        body = getattr(node, "body", None)
+        if not body:
+            continue
+        first = body[0]
+        if (isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            spans.append((first.lineno, first.end_lineno))
+    lines = text.splitlines()
+    for a, b in spans:
+        for i in range(a - 1, min(b, len(lines))):
+            lines[i] = ""
+    return "\n".join(lines)
+
+
+code = _code_only(src)
+check("no measurement site still returns a fake 999",
+      "return 999" not in code,
+      "still present outside docstrings")
+check("no measurement site still short-circuits to True on ImportError",
+      "except Exception:\n                return True" not in code)
+
+
+print("\n7. A real WAV round-trip, end to end")
 with tempfile.TemporaryDirectory() as td:
     for label, data, expect_live in (("real", real, True),
                                      ("dead", dead, False)):

@@ -381,6 +381,91 @@ CAPTURE_REOPEN_MIN_GAP = float(
 CAPTURE_REOPEN_MAX_GAP = float(
     os.environ.get("DOSE_CAPTURE_REOPEN_MAX_GAP", "60"))
 
+# ---------------------------------------------------------------------
+# DEADLINES ON DEVICE SELECTION.
+#
+# WHY THESE EXIST — a py-spy dump of the live station, 2026-09-18:
+#
+#     Thread 76603 (idle): "Thread-5 (_run)"
+#         stop (sounddevice.py:1143)
+#         _probe_device (dose_voice.py:1946)
+#         _pick_input_device (dose_voice.py:2339)
+#         open_portaudio (dose_voice.py:4111)
+#         open_capture (dose_voice.py:4568)
+#         _run (dose_voice.py:4658)
+#
+# The voice engine was not listening. It was not crashed, not
+# restarting, not out of CPU. It was parked inside PortAudio's
+# Pa_StopStream, seven minutes into a device probe, holding the ALSA
+# PCM in SETUP, and it was never coming back. Every symptom that has
+# been called "the microphone is flaky" for months is downstream of
+# this: the station was still deciding which microphone to use.
+#
+# Nothing in device selection is allowed to be unbounded any more.
+# Selection is a best-effort search, and a search that cannot finish
+# must lose, loudly, rather than hang the product forever.
+PROBE_RATE_SECONDS = float(       # audio captured per rate, per device
+    os.environ.get("DOSE_PROBE_RATE_SECONDS", "0.6"))
+PROBE_CLOSE_TIMEOUT = float(      # how long a stream close may take
+    os.environ.get("DOSE_PROBE_CLOSE_TIMEOUT", "2.0"))
+PROBE_DEVICE_BUDGET = float(      # whole probe of ONE device
+    os.environ.get("DOSE_PROBE_DEVICE_BUDGET", "4.0"))
+PROBE_PICK_BUDGET = float(        # scanning EVERY PortAudio device
+    os.environ.get("DOSE_PROBE_PICK_BUDGET", "12.0"))
+CAPTURE_OPEN_BUDGET = float(      # the entire route walk in open_capture
+    os.environ.get("DOSE_CAPTURE_OPEN_BUDGET", "45.0"))
+
+# PEAK sample value at or above which a capture route counts as a real,
+# connected microphone rather than a dead endpoint. Measured on this
+# station in a quiet room: the working AIRHUG peaks at 29-107, the dead
+# "USB Composite Device" on card 4 peaks at exactly 0. Anything above a
+# couple of counts is an analog noise floor, which is something only a
+# real microphone has. See route_floor() for why this must be peak and
+# never RMS - in the same recordings, RMS was 0 for BOTH.
+ROUTE_LIVE_PEAK = int(os.environ.get("DOSE_ROUTE_LIVE_PEAK", "3"))
+
+
+def _peak_rms(data):
+    """(peak, rms) of signed 16-bit mono PCM. Never raises.
+
+    audioop was REMOVED from the standard library in Python 3.13, which
+    is what this station runs. Every measurement site in this file
+    guarded its import with a fallback, and the fallbacks were all some
+    flavour of "assume it is fine":
+
+        try:    import audioop
+        except: return 999        # route_floor: accept ANY route
+        except: return True       # capture_is_live: it's live, honest
+
+    A station with no audioop therefore did not select a microphone at
+    all. It took the first route that opened, whether or not anything
+    was on the other end, and reported a confident 999. That is worse
+    than failing, because it looks like it worked.
+
+    There is no need for any of it. Peak and RMS over int16 are four
+    lines of `array`, which is stdlib and always present. audioop is
+    used when it exists because it is C and faster; the answer is the
+    same either way, and this is the only place that has to know.
+    """
+    if not data:
+        return 0, 0
+    try:
+        import audioop
+        return audioop.max(data, 2), audioop.rms(data, 2)
+    except Exception:
+        pass
+    try:
+        import array
+        a = array.array("h")
+        a.frombytes(data[:len(data) - (len(data) % 2)])
+        if not a:
+            return 0, 0
+        peak = max(abs(int(s)) for s in a)
+        rms = int((sum(int(s) * int(s) for s in a) / len(a)) ** 0.5)
+        return peak, rms
+    except Exception:
+        return 0, 0
+
 
 def _parse_mic_pin():
     """DOSE_MIC_CARD="5" or "5,0" — pin capture to ONE ALSA device.
@@ -951,6 +1036,15 @@ class DoseVoice:
     # the reader thread can outlive the object it was started from.
     _capture_lost = False
     _force_reopen = False
+    # Devices whose stream refused to close, and how many times device
+    # selection ran out of its budget. Both are FAULTS, not trivia: a
+    # wedged close is the exact failure that made this station deaf, and
+    # if it starts happening again the mic report has to say so instead
+    # of leaving the next person to guess. Class-level so the probe can
+    # never AttributeError on a half-built engine.
+    _probe_wedged = []
+    _probe_timeouts = 0
+    _select_timeouts = 0
 
     def __init__(self, app):
         self.app = app
@@ -1006,6 +1100,10 @@ class DoseVoice:
         self._closed = threading.Event()
         self._level_probe = None
         self._force_reopen = False
+        # Own list, not the shared class-level one.
+        self._probe_wedged = []
+        self._probe_timeouts = 0
+        self._select_timeouts = 0
         self._ptt_requested = False   # push-to-talk (hold Dose logo)
         self._pause_capture = False   # full self-test holds the devices
         self._paused_ack = False      # capture loop released the device
@@ -1924,14 +2022,67 @@ class DoseVoice:
             return best
         return vosk_text
 
-    def _probe_device(self, index, native_rate):
+    @staticmethod
+    def _shut_stream(st, tag="probe"):
+        """Close a PortAudio stream WITHOUT ever blocking the caller.
+
+        sounddevice's Stream.stop() calls Pa_StopStream(), which waits
+        for the device to drain before it returns. On this station that
+        call was observed never returning — see the DEADLINES comment at
+        the top of this file for the py-spy dump that caught it. The
+        engine sat in it for seven minutes holding the ALSA PCM in
+        SETUP, and would have sat in it until the process was killed.
+
+        Two changes make that impossible:
+
+          * abort() (Pa_AbortStream) DISCARDS buffered audio instead of
+            draining it. For an input probe there is nothing worth
+            draining — we already have the frames we measured — so this
+            is both faster and the correct semantic.
+
+          * it still runs on a daemon thread that is only joined for
+            PROBE_CLOSE_TIMEOUT. abort() is a call into C and a wedged
+            USB device can hang anything. A leaked stream costs one file
+            descriptor and one thread; a wedged engine costs a deaf
+            station, which is what we actually had.
+
+        Returns True if the close completed, False if it was abandoned.
+        A False here is a real fault and callers treat the device as bad.
+        """
+        done = threading.Event()
+
+        def shut():
+            for fn in ("abort", "close"):
+                try:
+                    getattr(st, fn)()
+                except Exception:
+                    pass
+            done.set()
+
+        threading.Thread(target=shut, name="pa-shut-" + str(tag),
+                         daemon=True).start()
+        return done.wait(PROBE_CLOSE_TIMEOUT)
+
+    def _probe_device(self, index, native_rate, deadline=None):
         """Open a device briefly and measure real signal (RMS).
-        Returns (rms, usable_rate) or None if it can't open."""
+
+        Returns (rms, usable_rate), or None if it can't open, runs out
+        of time, or wedges on close. Bounded absolutely: no single
+        device may cost more than PROBE_DEVICE_BUDGET, and `deadline`
+        (a time.time() value) caps the caller's whole scan on top of
+        that. Running out of time returns None — a device we could not
+        finish measuring is not a device we are willing to select.
+        """
+        own = time.time() + PROBE_DEVICE_BUDGET
+        if deadline is not None:
+            own = min(own, deadline)
         rates = []
         for r in (SAMPLE_RATE, native_rate, 48000, 44100, 24000, 8000):
             if r and r not in rates:
                 rates.append(r)
         for rate in rates:
+            if time.time() >= own:
+                break
             frames = []
 
             def cb(indata, f, t, s):
@@ -1942,11 +2093,25 @@ class DoseVoice:
                     blocksize=max(256, int(0.2 * rate)),
                     dtype="int16", channels=1, callback=cb)
                 st.start()
-                time.sleep(0.9)
-                st.stop()
-                st.close()
             except Exception:
                 continue
+            # Listen for the shorter of the per-rate sample and whatever
+            # is left of this device's budget — never longer.
+            time.sleep(max(0.15, min(PROBE_RATE_SECONDS,
+                                     own - time.time())))
+            clean = self._shut_stream(st, "%s@%s" % (index, rate))
+            if not clean:
+                # The close did not come back. The device is wedged; the
+                # old code would be sitting in it right now. Record it,
+                # abandon this device entirely, and let selection move on.
+                try:
+                    self._probe_wedged.append(
+                        "device %s @ %s Hz: close did not return"
+                        % (index, rate))
+                    del self._probe_wedged[:-10]
+                except Exception:
+                    pass
+                return None
             data = b"".join(frames)
             if not data:
                 continue
@@ -2335,8 +2500,17 @@ class DoseVoice:
                 continue
         cands.sort()
         best_silent = None
+        # One budget for the WHOLE scan. Without it, selection cost grows
+        # with however many capture devices the Pi happens to enumerate —
+        # and this station enumerates enough of them that a full scan was
+        # taking longer than a user is willing to wait for a first word.
+        deadline = time.time() + PROBE_PICK_BUDGET
         for pri, i, name, native in cands:
-            got = self._probe_device(i, native)
+            if time.time() >= deadline:
+                self._probe_timeouts = getattr(
+                    self, "_probe_timeouts", 0) + 1
+                break
+            got = self._probe_device(i, native, deadline=deadline)
             if got is None:
                 continue
             rms, rate = got
@@ -2901,6 +3075,22 @@ class DoseVoice:
             lines.extend("  " + e for e in errs)
         else:
             lines.append("  (none — the recorder has not complained)")
+        # DEVICE SELECTION HEALTH. A wedged stream close is the fault
+        # that made this station deaf for months: the engine parked in
+        # PortAudio's Pa_StopStream mid-probe and never came out, so it
+        # never finished choosing a microphone. It cannot hang any more,
+        # but if it starts wedging again that has to be visible here
+        # rather than inferred from a py-spy dump months later.
+        wedged = getattr(self, "_probe_wedged", [])
+        lines.append("probe closes that never returned: %d" % len(wedged))
+        for w in wedged:
+            lines.append("  " + w)
+        lines.append("device scans that hit the %.0fs budget: %d"
+                     % (PROBE_PICK_BUDGET,
+                        getattr(self, "_probe_timeouts", 0)))
+        lines.append("route walks that hit the %.0fs budget: %d"
+                     % (CAPTURE_OPEN_BUDGET,
+                        getattr(self, "_select_timeouts", 0)))
         lines.append("")
         try:
             for i, d in enumerate(self._sd.query_devices()):
@@ -3046,10 +3236,13 @@ class DoseVoice:
                 blocksize=1024, dtype="int16", channels=1, callback=cb)
             st.start()
             time.sleep(seconds)
-            st.stop()
-            st.close()
+            # Same non-blocking teardown as the probe — this runs on the
+            # UI's thread when the Settings mic test is tapped, and a
+            # Pa_StopStream that never returns would freeze the whole
+            # touchscreen, not just the microphone.
+            self._shut_stream(st, "mic_level")
             data = b"".join(frames)
-            return audioop.rms(data, 2) if data else 0
+            return audioop.max(data, 2) if data else 0
         except Exception:
             return -1
 
@@ -4353,21 +4546,28 @@ class DoseVoice:
             return None
 
         def capture_is_live(seconds=1.4):
-            """Drain the queue for a moment and measure real signal."""
-            try:
-                import audioop
-            except Exception:
-                return True
+            """Drain the queue for a moment and measure real signal.
+
+            PEAK, not RMS — the same bug route_floor() had, in a second
+            place, with a harsher threshold. It asked for RMS > 5 from a
+            silent room; the working microphone on this station measures
+            RMS 0 and peak 29 under exactly those conditions, so a
+            perfectly good capture was reported not live. See
+            route_floor() for the measurements.
+            """
             end = time.time() + seconds
             peak = 0
+            rms = 0
             while time.time() < end:
                 try:
                     data = self._audio_q.get(timeout=0.3)
-                    peak = max(peak, audioop.rms(data, 2))
                 except queue.Empty:
                     continue
-            self.mic_rms = peak
-            return peak > 5
+                p, r = _peak_rms(data)
+                peak = max(peak, p)
+                rms = max(rms, r)
+            self.mic_rms = rms
+            return peak >= ROUTE_LIVE_PEAK
 
         def close_capture(cap):
             """Tear a capture down COMPLETELY.
@@ -4388,18 +4588,30 @@ class DoseVoice:
 
             So: TERM first so the recorder can release the device,
             KILL only as a fallback, always reap, always close the
-            pipe the reader thread is holding."""
+            pipe the reader thread is holding.
+
+            AND THE PORTAUDIO BRANCH DOES NOT GET TO BLOCK. It called
+            stop() then close(), and stop() is Pa_StopStream, which
+            waits for the device to drain. Caught live on the station
+            by py-spy immediately after the probe was fixed — the
+            engine had stopped hanging in device SELECTION and started
+            hanging here instead, one frame further on:
+
+                Thread 81104 (idle): "Thread-5 (_run)"
+                    stop (sounddevice.py:1143)
+                    close_capture (dose_voice.py:4400)
+                    open_capture (dose_voice.py:4621)
+                    _run (dose_voice.py:4649)
+
+            close_capture() is called once per route during selection,
+            so this is not a rare path — it is the hot one. Same
+            treatment as everywhere else: abort, on a thread, joined
+            briefly."""
             if not cap:
                 return
             kind, h = cap
             if kind == "portaudio":
-                for step in (getattr(h, "stop", None),
-                             getattr(h, "close", None)):
-                    try:
-                        if step:
-                            step()
-                    except Exception:
-                        pass
+                self._shut_stream(h, "close_capture")
                 return
             # Pipe recorder: let it close the ALSA device itself.
             try:
@@ -4484,14 +4696,42 @@ class DoseVoice:
             return None
 
         def route_floor(seconds=1.6):
-            """Peak level from the just-opened route. A real
-            microphone ALWAYS has an analog noise floor above zero;
-            a wrong or dead route delivers perfect digital silence.
-            This tells them apart with nobody speaking."""
-            try:
-                import audioop
-            except Exception:
-                return 999
+            """PEAK level from the just-opened route. A real microphone
+            ALWAYS has an analog noise floor above zero; a wrong or dead
+            route delivers perfect digital silence. This tells them
+            apart with nobody speaking.
+
+            IT MUST BE PEAK, NOT RMS, AND THIS IS NOT A DETAIL.
+
+            The docstring above has always said peak. The code measured
+            audioop.rms(). In a quiet room those two numbers are not
+            close — they are on opposite sides of the decision. Measured
+            on this station, 2026-09-18, three seconds per route with
+            nobody speaking:
+
+                card 5 (AIRHUG, the real mic) @16k   RMS 0   PEAK  29
+                card 5 (AIRHUG, the real mic) @48k   RMS 0   PEAK  33
+                card 5 via sysdefault                RMS 0   PEAK 107
+                card 4 (dead "USB Composite")        RMS 0   PEAK   0
+
+            RMS separates none of them. PEAK separates them perfectly.
+
+            So every working route was scoring floor 0, failing the
+            `floor > 1` test that means "this one is live", and being
+            rejected. The walk then continued through every remaining
+            route to the end of the list — where PortAudio device
+            probing sat down inside Pa_StopStream and never got up.
+
+            That is the entire "the microphone frequently hears
+            nothing" fault, start to finish: a quiet room, a statistic
+            that cannot see a noise floor, and an unbounded fallback at
+            the end of the queue. Not the model, not the USB stack, not
+            the recorder. One wrong function call.
+
+            RMS is still computed and returned alongside, because it is
+            the right measure for SPEECH once a route is chosen — it
+            just cannot be the test for whether a device is connected.
+            """
             try:
                 while True:
                     self._audio_q.get_nowait()
@@ -4499,12 +4739,16 @@ class DoseVoice:
                 pass
             end = time.time() + seconds
             peak = 0
+            rms = 0
             while time.time() < end:
                 try:
                     data = self._audio_q.get(timeout=0.4)
-                    peak = max(peak, audioop.rms(data, 2))
                 except queue.Empty:
                     continue
+                p, r = _peak_rms(data)
+                peak = max(peak, p)
+                rms = max(rms, r)
+            self._last_route_rms = rms
             return peak
 
         def open_capture():
@@ -4612,7 +4856,23 @@ class DoseVoice:
             live = None          # best real-signal route (non-speaker)
             live_speaker = None  # live but looks like a speaker's endpoint
             first_openable = None
+            # A DEADLINE ON THE WHOLE WALK. There are a dozen-plus routes
+            # here and each costs an open, route_floor() seconds of
+            # listening, and a close. Unbounded, a bad day means the
+            # engine spends half a minute per reopen deciding — which is
+            # precisely the "capture cycling" a soak of this station
+            # showed, misread at the time as the recorder crash-looping.
+            # It was not crashing. It was shopping.
+            walk_end = time.time() + CAPTURE_OPEN_BUDGET
             for label, opener, speakerish in routes:
+                if time.time() >= walk_end:
+                    self._select_timeouts = getattr(
+                        self, "_select_timeouts", 0) + 1
+                    self.mic_trail.append(
+                        "... budget of %.0fs spent; %d route(s) not tried"
+                        % (CAPTURE_OPEN_BUDGET,
+                           len(routes) - len(self.mic_trail)))
+                    break
                 cap = opener()
                 if not cap:
                     self.mic_trail.append(label + ": could not open")
@@ -4620,12 +4880,15 @@ class DoseVoice:
                 floor = route_floor()
                 close_capture(cap)
                 self.mic_trail.append(
-                    "%s: opened, floor %d%s" % (
+                    "%s: opened, peak %d (rms %d)%s%s" % (
                         label, floor,
+                        getattr(self, "_last_route_rms", 0),
+                        "" if floor >= ROUTE_LIVE_PEAK
+                        else " — DIGITALLY SILENT, rejected",
                         " (output device?)" if speakerish else ""))
                 if first_openable is None:
                     first_openable = (label, opener)
-                if floor > 1:
+                if floor >= ROUTE_LIVE_PEAK:
                     if speakerish:
                         if live_speaker is None:
                             live_speaker = (label, opener)
@@ -4887,9 +5150,13 @@ class DoseVoice:
                     self._set_ui_state("idle")
             self._drain(rec)
 
+        # Non-blocking teardown, for the same reason as everywhere else
+        # in this file: a Pa_StopStream that does not return here leaves
+        # this thread unable to exit, systemd's stop times out, the app
+        # is SIGKILLed, and a SIGKILLed capture strands the ALSA PCM —
+        # which is the fault that started this whole audit.
         try:
-            stream.stop()
-            stream.close()
+            self._shut_stream(stream, "engine-exit")
         except Exception:
             pass
 
