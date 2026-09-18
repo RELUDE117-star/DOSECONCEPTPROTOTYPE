@@ -335,12 +335,29 @@ def live_turns(items, app_dir, pad=0.6):
                row.get("slow", 0), row.get("think", 0),
                row.get("speak", 0), row.get("total", 0),
                row.get("understood")))
+        fw = row.get("fw") or {}
+        if fw:
+            say("        fast pass breakdown: wav %.2f  prompt %.2f  "
+                "call %.2f  decode %.2f  total %.2f  (audio %.2fs)"
+                % (fw.get("wav", 0), fw.get("prompt", 0),
+                   fw.get("call", 0), fw.get("decode", 0),
+                   fw.get("total", 0), fw.get("audio", 0)))
+        if row.get("spec_hit") is not None:
+            say("        speculation: %s hit / %s missed"
+                % (row.get("spec_hit"), row.get("spec_miss")))
         if row.get("stt_note"):
             say("        note: %s" % row["stt_note"])
         row["phrase"] = phrase
         row["live"] = True
         rows.append(row)
-        time.sleep(2.0)
+        # WAIT FOR THE STATION TO FINISH TALKING before arming the next
+        # turn. Run 160 recorded turn 3 as having heard turn 2's phrase:
+        # the rows were arriving late and being matched to the wrong
+        # question. A reply takes as long as it takes, so ask the
+        # heartbeat rather than sleeping a guessed two seconds.
+        if not wait_state(app_dir, "idle", 30.0):
+            say("        (engine still busy after 30s)")
+        time.sleep(1.5)
     return rows
 
 

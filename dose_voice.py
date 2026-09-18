@@ -1905,13 +1905,37 @@ class DoseVoice:
         if not audio_bytes or model is None:
             return ""
         path = None
+        # WHERE THE SECONDS ACTUALLY GO.
+        #
+        # turns.jsonl recorded "fast": 31.79 on 3.3 seconds of audio,
+        # while the same model on the same board, measured standalone,
+        # takes 2.1 s. Thirty seconds is not compute — it is waiting
+        # for something — and a single total tells you nothing about
+        # which something. Each stage is timed separately and carried
+        # into the turn row: the wav write, the prompt (which reads the
+        # medication list), the decode itself, and collecting the
+        # segments (faster-whisper's generator is LAZY, so list() is
+        # where the inference really happens).
+        t_all = time.time()
         try:
+            t0 = time.time()
             path = self._write_wav(audio_bytes)
+            self._t_fw_wav = time.time() - t0
+            t0 = time.time()
+            prompt = self._whisper_prompt()
+            self._t_fw_prompt = time.time() - t0
+            t0 = time.time()
             segs, _info = model.transcribe(
                 path, language="en", beam_size=beam_size,
                 vad_filter=vad, condition_on_previous_text=False,
-                initial_prompt=self._whisper_prompt())
+                initial_prompt=prompt)
+            self._t_fw_call = time.time() - t0
+            t0 = time.time()
             segs = list(segs)
+            self._t_fw_decode = time.time() - t0
+            self._t_fw_total = time.time() - t_all
+            self._t_fw_audio = round(
+                len(audio_bytes) / 2.0 / float(SAMPLE_RATE), 2)
             # worst (lowest) segment confidence — one weak segment is
             # enough to want the stronger model to check it
             lps = [getattr(s, "avg_logprob", 0.0) for s in segs]
@@ -8110,6 +8134,13 @@ class DoseVoice:
                 # speculation or redo it. Record the decision next to
                 # its price.
                 "stt_note": getattr(self, "_stt_note", ""),
+                # Where the fast pass spent its time, so a 31-second
+                # one can be explained instead of guessed at.
+                "fw": {k: round(getattr(self, "_t_fw_" + k, 0.0), 2)
+                       for k in ("wav", "prompt", "call", "decode",
+                                 "total", "audio")},
+                "spec_hit": getattr(self, "_spec_hits", 0),
+                "spec_miss": getattr(self, "_spec_misses", 0),
                 "spec_wait": round(getattr(self, "_t_spec_wait", 0.0), 2),
                 "budget": STT_TURN_BUDGET,
             }
