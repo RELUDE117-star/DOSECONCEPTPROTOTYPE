@@ -3624,6 +3624,87 @@ class DoseApp:
         url = RAW_URL + "/" + fname + "?nocache=%d" % int(time.time())
         return urlopen(url, timeout=timeout).read()
 
+    # ── what an update is allowed to touch ────────────────────────────
+    # Files the DEVICE owns. An update must never overwrite these, even
+    # if a file of the same name turns up in the repo: they are this
+    # station's own state, not the project's source.
+    UPDATE_SKIP_NAMES = (
+        "github_token", "med_data.json", "adherence_log.json",
+        "calibration.json", "learning.json", "turns.jsonl",
+        "claude-bootstrap-status.json", "error.log", "faulthandler.log",
+        "audit-latest.txt", ".installed", ".ready",
+    )
+    UPDATE_SKIP_DIRS = ("voice/", ".git/", "__pycache__/", "diagnostics/")
+    UPDATE_EXTS = (".py", ".sh", ".md", ".png", ".json", ".txt", ".html")
+    UPDATE_MAX_BYTES = 2 * 1024 * 1024
+
+    @staticmethod
+    def _git_blob_sha(data):
+        """The SHA git itself would give this content, so the updater can
+        tell 'already current' from 'changed' without downloading."""
+        import hashlib
+        h = hashlib.sha1()
+        h.update(b"blob %d\0" % len(data))
+        h.update(data)
+        return h.hexdigest()
+
+    @classmethod
+    def _repo_file_list(cls, timeout=20):
+        """EVERY file on the monitored branch, with its blob SHA.
+
+        The updater used to fetch six hardcoded names — dose_app.py, two
+        companion modules, DOSE.sh and two images. Anything else added to
+        the repo simply never reached a device: voice_diagnostics.py,
+        dose_cloud_stt.py and everything under tools/ all had to be
+        hand-delivered. That is how a station ends up running a mix of
+        versions nobody can reason about, which on a medication dispenser
+        is not acceptable.
+
+        This asks GitHub for the whole tree instead, so 'update' means
+        what people assume it means: everything. Returns [(path, sha)].
+
+        Two API calls total, not one per file: the ref lookup and the
+        recursive tree. The SHAs then let the caller skip downloading
+        anything the device already has, which keeps a repeat update to
+        those same two calls and stays well clear of the unauthenticated
+        rate limit.
+        """
+        from urllib.request import Request
+        base = ("https://api.github.com/repos/relude117-star/"
+                "doseconceptprototype")
+        hdrs = {"Accept": "application/vnd.github+json",
+                "User-Agent": "dose-home-station"}
+
+        # refs/heads/<branch> is used rather than the branch name on its
+        # own because this branch name CONTAINS A SLASH
+        # (claude/quirky-brown-vkHwi) and would otherwise be ambiguous
+        # against the API's own path segments.
+        ref = Request(base + "/git/ref/heads/claude/quirky-brown-vkHwi",
+                      headers=hdrs)
+        sha = json.loads(urlopen(ref, timeout=timeout).read()
+                         .decode("utf-8"))["object"]["sha"]
+        tr = Request(base + "/git/trees/%s?recursive=1" % sha, headers=hdrs)
+        tree = json.loads(urlopen(tr, timeout=timeout).read()
+                          .decode("utf-8"))
+
+        out = []
+        for ent in tree.get("tree", []):
+            if ent.get("type") != "blob":
+                continue
+            p = ent.get("path") or ""
+            if not p or p.startswith("/") or ".." in p.split("/"):
+                continue                      # never escape APP_DIR
+            if ent.get("size", 0) > cls.UPDATE_MAX_BYTES:
+                continue
+            if any(p.startswith(d) for d in cls.UPDATE_SKIP_DIRS):
+                continue
+            if os.path.basename(p) in cls.UPDATE_SKIP_NAMES:
+                continue
+            if not p.endswith(cls.UPDATE_EXTS):
+                continue
+            out.append((p, ent.get("sha") or ""))
+        return out
+
     def _dev_access_note(self):
         """One line on whether direct SSH is ready, read from the
         bootstrap's SANITIZED status. Never exposes a key or token."""
@@ -3816,13 +3897,41 @@ class DoseApp:
                         raise ValueError("%s is not valid python (%s)"
                                          % (name, e))
 
-                # 3) optional extras — never block the update
+                # 3) extras — EVERYTHING else on the branch, so "update"
+                #    means everything and not six hardcoded names.
+                #    Never blocks the update: any file that fails to
+                #    fetch or fails to compile is simply left alone.
                 extras = {}
-                for fname in ("DOSE.sh", "dose_logo.png", "demo_qr.png"):
+                try:
+                    listing = self._repo_file_list()
+                except Exception:
+                    listing = []          # API unreachable / rate limited
+                if not listing:
+                    # Fall back to the historical fixed set so an update
+                    # still works with no network access to the tree API.
+                    listing = [(n, "") for n in
+                               ("DOSE.sh", "dose_logo.png", "demo_qr.png")]
+                for fname, sha in listing:
+                    if fname == "dose_app.py" or fname in self.COMPANION_MODULES:
+                        continue          # handled as required payload
+                    dest = os.path.join(APP_DIR, fname)
+                    # Skip what the device already has, byte for byte.
+                    # Keeps a repeat update to two API calls total.
+                    if sha:
+                        try:
+                            with open(dest, "rb") as f:
+                                if self._git_blob_sha(f.read()) == sha:
+                                    continue
+                        except Exception:
+                            pass
                     try:
                         d = self._fetch_repo_file(fname)
-                        if d:
-                            extras[fname] = d
+                        if not d:
+                            continue
+                        if fname.endswith(".py"):
+                            # A broken extra must not land on the device.
+                            compile(d.decode("utf-8"), fname, "exec")
+                        extras[fname] = d
                     except Exception:
                         pass
 
@@ -3838,7 +3947,15 @@ class DoseApp:
                             f.write(data)
                         os.replace(tmp, os.path.join(d, name))
                 for name, data in extras.items():
-                    fpath = os.path.join(APP_DIR, name)
+                    fpath = os.path.abspath(os.path.join(APP_DIR, name))
+                    # Belt and braces against a crafted path: an extra
+                    # may only ever land inside APP_DIR.
+                    if not fpath.startswith(os.path.abspath(APP_DIR) + os.sep):
+                        continue
+                    try:
+                        os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                    except Exception:
+                        pass
                     tmp = fpath + ".tmp"
                     with open(tmp, "wb") as f:
                         f.write(data)

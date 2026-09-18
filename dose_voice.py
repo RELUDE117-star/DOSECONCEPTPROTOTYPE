@@ -871,6 +871,33 @@ class DoseVoice:
     """The assistant. Owns the microphone thread; talks to the app only
     through thread-safe bridges."""
 
+    # CLASS-LEVEL DEFAULTS FOR EVERYTHING THE AUDIO CALLBACK TOUCHES.
+    #
+    # The PortAudio callback runs on PortAudio's own thread and can fire
+    # at any moment — including while __init__ is still running, and
+    # during teardown when instance attributes are going away. The device
+    # log showed exactly that:
+    #
+    #   File ".../dose_voice.py", line 3795, in ingest
+    #       if self._muted:
+    #   AttributeError: 'DoseVoice' object has no attribute '_muted'
+    #
+    # cffi swallows exceptions raised inside a callback ("Exception
+    # ignored from cffi callback"), so this is invisible at runtime and
+    # simply drops the audio block. Silently losing capture blocks in a
+    # voice assistant is the worst kind of bug: it degrades recognition
+    # without ever announcing itself.
+    #
+    # __init__ already sets these early and deliberately. These
+    # class-level values are the belt to that braces: an instance that is
+    # half-built, or half-torn-down, reads a sane default instead of
+    # raising. They are never mutated on the class — every write path
+    # assigns to the instance.
+    _muted = False
+    state = "idle"
+    _native_rate = SAMPLE_RATE
+    _ratecv_state = None
+
     def __init__(self, app):
         self.app = app
         self.available = False
@@ -3956,7 +3983,35 @@ class DoseVoice:
                 return ("portaudio", s)
             except Exception:
                 pass
-            for r in (SAMPLE_RATE, 48000, 44100, 24000, 8000):
+            # ASK THE DEVICE WHAT IT SUPPORTS BEFORE GUESSING.
+            #
+            # This used to try SAMPLE_RATE (16 kHz) first and walk down a
+            # fixed list. The mic on this station — like most cheap USB
+            # capsules — supports exactly ONE mode: 48 kHz stereo. So the
+            # first probe always failed, and the device log filled with
+            #
+            #   Expression 'paInvalidSampleRate' failed ... line 2048
+            #   Expression 'AlsaOpen(...)' failed ... line 1904
+            #
+            # dozens of times per launch. Every one of those is a failed
+            # device open, and a failed open on a USB capture device is
+            # exactly the operation that was stranding the PCM.
+            #
+            # So: try what the device REPORTS first, then 48 kHz (near
+            # universal on USB audio), and only then our preferred rate.
+            rates = []
+            try:
+                info = self._sd.query_devices(
+                    getattr(self, "mic_index", None), "input")
+                dsr = int(round(float(info.get("default_samplerate") or 0)))
+                if dsr > 0:
+                    rates.append(dsr)
+            except Exception:
+                pass
+            for r in (48000, 44100, SAMPLE_RATE, 24000, 8000):
+                if r not in rates:
+                    rates.append(r)
+            for r in rates:
                 try:
                     s = self._sd.RawInputStream(
                         samplerate=r,
