@@ -381,6 +381,37 @@ CAPTURE_REOPEN_MIN_GAP = float(
 CAPTURE_REOPEN_MAX_GAP = float(
     os.environ.get("DOSE_CAPTURE_REOPEN_MAX_GAP", "60"))
 
+# ── DIGITAL SILENCE ───────────────────────────────────────────────────
+# The watchdog above answers "did the device stop delivering blocks".
+# On 2026-09-18 this station failed a DIFFERENT way, and nothing in the
+# program noticed it for hours:
+#
+#     HEARING: YES    blocks/sec: 46.4    live level: peak 0  rms 0
+#
+# 46.4 blocks/sec is exactly 48000/1024 — the capture was perfect. The
+# kernel's hw_ptr advanced 144,385 frames in 3 s, arecord's wchar
+# climbed at 96,000 B/s, the app's rchar climbed in step, and a
+# standalone `arecord -D plughw:5,0` at the same moment read peak 8917.
+# Every byte the ENGINE received was zero.
+#
+# CAPTURE_DEAD_AFTER cannot see that: blocks were arriving, on time,
+# for ever. The station was deaf and every liveness check said YES. It
+# stayed that way until a person noticed and said so — which, for a
+# medication cabinet somebody relies on, is not a recovery story.
+#
+# So: blocks arriving AND peak at the dead-endpoint floor for this long,
+# while idle, is itself a fault. A real microphone in a silent room
+# peaks at 29-107 (see ROUTE_LIVE_PEAK); only a dead endpoint reads 0.
+# Sixty seconds is long enough that no ordinary quiet can trip it and
+# short enough that the station heals itself well inside a conversation.
+SILENT_CAPTURE_AFTER = float(
+    os.environ.get("DOSE_SILENT_CAPTURE_AFTER", "60"))
+# Minimum gap between rungs of the recovery ladder. Each rung costs a
+# device reopen at most; giving the previous one time to prove itself
+# matters more than climbing fast, and a mic that has just been reopened
+# needs a few seconds of blocks before its peak means anything.
+SILENCE_STEP_GAP = float(os.environ.get("DOSE_SILENCE_STEP_GAP", "25"))
+
 # ---------------------------------------------------------------------
 # DEADLINES ON DEVICE SELECTION.
 #
@@ -3239,6 +3270,19 @@ class DoseVoice:
                 "",
                 "capture reopens: %d" % getattr(
                     self, "_capture_restarts", 0),
+                # The fault this station actually had: blocks arriving
+                # on time, every sample zero. "HEARING: YES" above is
+                # about the DEVICE; this line is about the SIGNAL.
+                "signal:         %s" % (
+                    "live"
+                    if getattr(self, "_hb_peak", 0) > ROUTE_LIVE_PEAK
+                    else "SILENT for %.0fs (acts at %.0fs)" % (
+                        now - (getattr(self, "_last_live_peak_ts", 0)
+                               or now),
+                        SILENT_CAPTURE_AFTER)),
+                "silence recoveries: %d   next rung: %d" % (
+                    getattr(self, "_silence_recoveries", 0),
+                    getattr(self, "_silence_step", 0)),
                 "written:        %s" % time.strftime("%H:%M:%S"),
             ]
             os.makedirs(VOICE_DIR, exist_ok=True)
@@ -3968,6 +4012,189 @@ class DoseVoice:
         self._reopen_streak = streak + 1
         self._capture_restarts = getattr(self, "_capture_restarts", 0) + 1
         return True
+
+    # ── DIGITAL-SILENCE WATCHDOG ─────────────────────────────────────
+    #
+    # Split into a pure decision and an impure action on purpose. The
+    # decision is the part that can be wrong in a way nobody notices
+    # for hours, so it is testable without a microphone, a device, or
+    # the 1250-line loop it runs inside.
+
+    def _silence_note_level(self, peak, now=None):
+        """Stamp the last time the capture carried a live signal.
+
+        Called once per supervising pass from the value ingest() already
+        maintains, so it costs one comparison and never touches the
+        audio path."""
+        now = time.time() if now is None else now
+        if peak > ROUTE_LIVE_PEAK:
+            self._last_live_peak_ts = now
+            # A live signal is proof the current rung works. Clear the
+            # ladder so a later, unrelated fault starts from the cheap
+            # end again instead of jumping straight to "drop the pin".
+            if getattr(self, "_silence_step", 0):
+                self._silence_step = 0
+                self._note_reopen("capture is live again (peak %d) — "
+                                  "silence ladder reset" % peak)
+        elif not getattr(self, "_last_live_peak_ts", 0.0):
+            # First pass of this process: start the clock now rather
+            # than at the epoch, or the watchdog fires immediately on
+            # a station that is merely still starting up.
+            self._last_live_peak_ts = now
+
+    def _silence_due(self, now=None):
+        """Is the capture delivering blocks that are all silence?
+
+        Returns None when there is nothing to do, or the ladder rung to
+        climb next (0-based). Every condition here is a reason NOT to
+        act, because a false positive tears down a working microphone:
+
+        - blocks must actually be ARRIVING. If they stopped, this is
+          CAPTURE_DEAD_AFTER's fault to handle and two watchdogs
+          fighting over one stream is its own class of bug.
+        - the engine must be IDLE. Mid-turn is the worst possible
+          moment to reopen a device, and our own speech is loud enough
+          to reset the clock anyway.
+        - not muted, not paused: both are somebody asking us to leave
+          the microphone alone, and both are indistinguishable from
+          this fault when read off a level meter.
+        - a minimum number of blocks, so a station three seconds into
+          its first capture is never judged.
+        """
+        now = time.time() if now is None else now
+        if getattr(self, "state", "idle") != "idle":
+            return None
+        if getattr(self, "_muted", False) or getattr(
+                self, "_pause_capture", False):
+            return None
+        if getattr(self, "_measuring_route", False):
+            return None
+        last_block = getattr(self, "_last_block_ts", 0.0)
+        if not last_block or now - last_block > 3.0:
+            return None            # not arriving — the other watchdog
+        if getattr(self, "_blocks_in", 0) < 200:
+            return None            # ~4 s of audio; too early to judge
+        live = getattr(self, "_last_live_peak_ts", 0.0)
+        if not live or now - live < SILENT_CAPTURE_AFTER:
+            return None
+        if now - getattr(self, "_silence_step_ts", 0.0) < SILENCE_STEP_GAP:
+            return None
+        return int(getattr(self, "_silence_step", 0))
+
+    def _silence_recover(self, step, now=None):
+        """Climb one rung of the recovery ladder. Returns what it did.
+
+        CHEAPEST FIRST, and each rung is a different hypothesis about
+        why the bytes are zero:
+
+        0. The mixer muted itself or the capture level was driven to
+           nothing. Costs no teardown at all — force the unmute and the
+           level and let the next pass measure. This is also the rung
+           most likely to be right: the level is persisted by ALSA
+           across reboots, so a bad value survives everything else.
+        1. The remembered arecord combination is wrong for whatever is
+           on that card now. Forget it and re-select.
+        2. THE PIN IS POINTING AT THE WRONG HARDWARE. Card 5 has been
+           observed as both "A28 [AIRHUG 28]" (mixer range 0-8191) and
+           "Device_1 [USB PnP Sound Device]" (range 0-16) on this same
+           board — USB re-enumeration can swap 4 and 5, which makes
+           DOSE_MIC_CARD=5,0 name the dead composite device, and that
+           device measures exactly the peak 0 we are looking at. So
+           try the other recordable card explicitly.
+        3. Give up on pinning entirely and let auto-selection walk
+           every route, which at least measures each one for liveness
+           before committing.
+
+        Past the end of the ladder it wraps to 0: a station that keeps
+        trying is better than one that stops, and SILENCE_STEP_GAP plus
+        _capture_restart_allowed() bound how hard it can try.
+        """
+        now = time.time() if now is None else now
+        self._silence_step_ts = now
+        self._silence_step = (step + 1) % 4
+        self._silence_recoveries = getattr(
+            self, "_silence_recoveries", 0) + 1
+        did = "?"
+        try:
+            if step == 0:
+                card = None
+                forced = getattr(self, "_forced_card", None)
+                if forced:
+                    card = forced[0]
+                self._mixer_cache_clear()
+                self._unmute_alsa_inputs(force=True)
+                if card is not None:
+                    self._max_capture(card, force=True)
+                did = ("silent capture: forced mixer unmute + level"
+                       "%s" % ("" if card is None else " on card %d" % card))
+            elif step == 1:
+                try:
+                    self._arecord_win = {}
+                except Exception:
+                    pass
+                self._mixer_cache_clear()
+                self._force_reopen = True
+                did = "silent capture: forgot device cache, re-selecting"
+            elif step == 2:
+                other = self._other_capture_card()
+                if other is None:
+                    did = ("silent capture: no alternative capture card "
+                           "to try")
+                else:
+                    self._forced_card = other
+                    try:
+                        self._arecord_win = {}
+                    except Exception:
+                        pass
+                    self._mixer_cache_clear()
+                    self._force_reopen = True
+                    did = ("silent capture: switching to card %d,%d "
+                           "(the pin may name the wrong hardware)"
+                           % other)
+            else:
+                self._forced_card = None
+                try:
+                    self._arecord_win = {}
+                except Exception:
+                    pass
+                self._mixer_cache_clear()
+                self._force_reopen = True
+                did = ("silent capture: dropped the card pin, "
+                       "full re-selection")
+        except Exception as e:
+            did = "silent capture: recovery step %d failed (%s)" % (
+                step, e)
+        # Give the new state a full window before judging it again,
+        # otherwise the ladder climbs itself on stale measurements.
+        self._last_live_peak_ts = now
+        self._note_reopen(did)
+        return did
+
+    def _other_capture_card(self):
+        """A recordable (card, device) that is NOT the one we are on.
+
+        Prefers a card whose description looks like a microphone, since
+        the whole point is to get off a dead endpoint rather than onto
+        another one. Returns None when there is no alternative, which is
+        the normal case on a board with one mic — the caller then says
+        so instead of silently doing nothing."""
+        try:
+            cur = getattr(self, "_forced_card", None)
+            cards = self._alsa_capture_cards() or []
+            options = [(c, d, desc) for (c, d, desc) in cards
+                       if not cur or (c, d) != (cur[0], cur[1])]
+            if not options:
+                return None
+            for c, d, desc in options:
+                try:
+                    if (self._looks_like_mic(desc)
+                            and not self._card_has_playback(c)):
+                        return (int(c), int(d))
+                except Exception:
+                    pass
+            return (int(options[0][0]), int(options[0][1]))
+        except Exception:
+            return None
 
     def trim_capture_if_clipping(self):
         """Keep the microphone at a usable level — turning it DOWN when
@@ -5634,9 +5861,19 @@ class DoseVoice:
                 stream = open_capture()
                 last_audio = time.time()
                 self._last_block_ts = time.time()
+                self._last_live_peak_ts = time.time()
                 if stream is None:
                     time.sleep(3)
                     continue
+            # DIGITAL-SILENCE WATCHDOG — "the device is delivering, and
+            # every sample is zero". Completely different fault from the
+            # one above, invisible to it, and the reason this station
+            # spent an evening reporting HEARING: YES while deaf. See
+            # SILENT_CAPTURE_AFTER.
+            self._silence_note_level(getattr(self, "_hb_peak", 0))
+            _sstep = self._silence_due()
+            if _sstep is not None:
+                self._silence_recover(_sstep)
             try:
                 data = self._audio_q.get(timeout=0.5)
                 last_audio = time.time()

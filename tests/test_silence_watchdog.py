@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""The station can be perfectly healthy and completely deaf.
+
+WHY THIS TEST EXISTS
+--------------------
+On 2026-09-18 the device's own heartbeat read:
+
+    HEARING:        YES
+    blocks/sec:     46.4
+    live level:     peak 0  rms 0
+
+46.4 blocks/sec is exactly 48000/1024 — the capture was flawless. At
+that same moment the kernel's hw_ptr advanced 144,385 frames in three
+seconds, arecord's wchar climbed at 96,000 B/s, the app's rchar climbed
+in step, and a standalone `arecord -D plughw:5,0` read peak 8917.
+
+Every byte reaching the engine was zero.
+
+The existing capture watchdog (CAPTURE_DEAD_AFTER) could not see this.
+It asks "did the device stop delivering blocks", and the answer was no —
+blocks arrived on time, for ever. So the station sat there reporting
+HEARING: YES, hearing nothing, until a person noticed and said so. For
+a medication cabinet somebody relies on, "deaf until a human complains"
+is not a recovery story.
+
+These tests cover the watchdog that fixes that: blocks arriving AND the
+level pinned at the dead-endpoint floor is itself a fault, and it
+escalates cheapest-first until the signal comes back.
+
+They also cover every reason NOT to act, which is the more dangerous
+half — a false positive tears down a microphone that was working.
+
+Run:  python3 tests/test_silence_watchdog.py
+"""
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import dose_voice                                            # noqa: E402
+
+FAILURES = []
+CHECKS = [0]
+
+
+def check(label, cond, detail=""):
+    CHECKS[0] += 1
+    if cond:
+        print("  ok   %s" % label)
+    else:
+        print("  FAIL %s %s" % (label, detail))
+        FAILURES.append(label)
+
+
+def engine(**kw):
+    """A DoseVoice with no __init__ — the watchdog is deliberately
+    written against getattr() defaults so it can be judged without a
+    microphone, a device, or the 1250-line loop it lives in."""
+    e = object.__new__(dose_voice.DoseVoice)
+    now = kw.pop("now", 1000.0)
+    e.state = kw.pop("state", "idle")
+    e._muted = kw.pop("muted", False)
+    e._pause_capture = kw.pop("pause", False)
+    e._measuring_route = kw.pop("measuring", False)
+    e._blocks_in = kw.pop("blocks", 5000)
+    e._last_block_ts = kw.pop("last_block", now)
+    e._last_live_peak_ts = kw.pop("last_live", now - 300)
+    e._silence_step = kw.pop("step", 0)
+    e._silence_step_ts = kw.pop("step_ts", 0.0)
+    e._forced_card = kw.pop("card", (5, 0))
+    e._reopen_why = []
+    for k, v in kw.items():
+        setattr(e, k, v)
+    return e
+
+
+NOW = 1000.0
+LIVE = dose_voice.ROUTE_LIVE_PEAK
+
+print("\n── the fault itself ─────────────────────────────────────────")
+
+e = engine()
+check("blocks arriving + peak 0 for 300s IS a fault",
+      e._silence_due(NOW) == 0, repr(e._silence_due(NOW)))
+
+e = engine(last_live=NOW - dose_voice.SILENT_CAPTURE_AFTER + 5)
+check("just under the threshold is left alone", e._silence_due(NOW) is None)
+
+e = engine(last_live=NOW - dose_voice.SILENT_CAPTURE_AFTER - 1)
+check("just over the threshold acts", e._silence_due(NOW) == 0)
+
+print("\n── every reason NOT to act (a false positive breaks a good mic) ──")
+
+check("mid-turn is never touched",
+      engine(state="listening")._silence_due(NOW) is None)
+check("thinking is never touched",
+      engine(state="thinking")._silence_due(NOW) is None)
+check("speaking is never touched",
+      engine(state="speaking")._silence_due(NOW) is None)
+check("a muted mic is somebody asking us to leave it alone",
+      engine(muted=True)._silence_due(NOW) is None)
+check("a paused capture (self-test holds the device) is left alone",
+      engine(pause=True)._silence_due(NOW) is None)
+check("route measurement in progress is left alone",
+      engine(measuring=True)._silence_due(NOW) is None)
+check("blocks that STOPPED belong to the other watchdog, not this one",
+      engine(last_block=NOW - 9)._silence_due(NOW) is None)
+check("a station 4s into its first capture is not judged",
+      engine(blocks=50)._silence_due(NOW) is None)
+check("no block ever seen is not judged",
+      engine(last_block=0.0)._silence_due(NOW) is None)
+check("two watchdogs never fight over one stream",
+      engine(last_block=NOW - dose_voice.CAPTURE_DEAD_AFTER - 1)
+      ._silence_due(NOW) is None)
+
+print("\n── the level stamp ──────────────────────────────────────────")
+
+e = engine(last_live=0.0)
+e._silence_note_level(0, NOW)
+check("first pass starts the clock NOW, not at the epoch",
+      e._last_live_peak_ts == NOW)
+check("...so a starting station cannot trip it immediately",
+      e._silence_due(NOW) is None)
+
+e = engine()
+e._silence_note_level(LIVE, NOW)
+check("peak exactly at the floor is NOT live", e._last_live_peak_ts != NOW)
+e._silence_note_level(LIVE + 1, NOW)
+check("one count above the floor IS live", e._last_live_peak_ts == NOW)
+
+e = engine(last_live=NOW - 400, step=2)
+e._silence_note_level(9542, NOW)
+check("a live signal clears the ladder", e._silence_step == 0)
+check("...and is recorded, so a flapping mic is visible",
+      any("live again" in w for w in e._reopen_why))
+check("...and stops the watchdog firing", e._silence_due(NOW) is None)
+
+e = engine(step=1)
+e._silence_note_level(0, NOW)
+check("silence does not touch the ladder", e._silence_step == 1)
+
+print("\n── the gap between rungs ────────────────────────────────────")
+
+e = engine(step_ts=NOW - dose_voice.SILENCE_STEP_GAP + 1)
+check("a rung climbed a moment ago is given time to prove itself",
+      e._silence_due(NOW) is None)
+e = engine(step_ts=NOW - dose_voice.SILENCE_STEP_GAP - 1)
+check("past the gap it climbs again", e._silence_due(NOW) == 0)
+
+print("\n── the ladder, cheapest first ───────────────────────────────")
+
+
+class Recorder(object):
+    """Stands in for every side effect, so each rung is judged by what
+    it DID rather than by what its docstring claims."""
+
+    def __init__(self, cards=None):
+        self.calls = []
+        self.cards = cards if cards is not None else [
+            (5, 0, "A28 [AIRHUG 28] USB Audio"),
+            (4, 0, "Device [USB Composite Device] USB Audio"),
+        ]
+
+    def bind(self, e):
+        e._mixer_cache_clear = lambda: self.calls.append("cache_clear")
+        e._unmute_alsa_inputs = lambda force=False: self.calls.append(
+            "unmute force=%s" % force)
+        e._max_capture = lambda c, force=False: self.calls.append(
+            "max_capture %s force=%s" % (c, force))
+        e._alsa_capture_cards = lambda: list(self.cards)
+        e._looks_like_mic = staticmethod(lambda d: "AIRHUG" in d)
+        e._card_has_playback = staticmethod(lambda c: False)
+        return e
+
+
+r = Recorder()
+e = r.bind(engine())
+did = e._silence_recover(0, NOW)
+check("rung 0 forces the mixer unmute", "unmute force=True" in r.calls)
+check("rung 0 forces the capture level on the card we are on",
+      "max_capture 5 force=True" in r.calls)
+check("rung 0 bypasses the mixer cache (the cache is the stale value)",
+      "cache_clear" in r.calls)
+check("rung 0 does NOT tear down the stream",
+      not getattr(e, "_force_reopen", False))
+check("rung 0 says what it did", "mixer" in did.lower(), did)
+check("rung 0 records it in the reopen trail",
+      any("mixer" in w for w in e._reopen_why))
+
+r = Recorder()
+e = r.bind(engine(step=1, _arecord_win={5: ("sd", "b", 48000, 2)}))
+did = e._silence_recover(1, NOW)
+check("rung 1 forgets the remembered arecord combination",
+      e._arecord_win == {})
+check("rung 1 asks for a reopen", e._force_reopen is True)
+check("rung 1 keeps the pin (the card may still be right)",
+      e._forced_card == (5, 0))
+
+r = Recorder()
+e = r.bind(engine(step=2))
+did = e._silence_recover(2, NOW)
+check("rung 2 moves off the pinned card", e._forced_card != (5, 0))
+check("rung 2 picks the other recordable card", e._forced_card == (4, 0))
+check("rung 2 asks for a reopen", e._force_reopen is True)
+check("rung 2 explains that the pin may name the wrong hardware",
+      "pin" in did.lower(), did)
+
+# The re-enumeration case this rung exists for: card 5 is now the dead
+# composite device and the real mic has become card 4.
+r = Recorder(cards=[(4, 0, "A28 [AIRHUG 28] USB Audio"),
+                    (5, 0, "Device_1 [USB PnP Sound Device]")])
+e = r.bind(engine(step=2))
+e._silence_recover(2, NOW)
+check("rung 2 prefers a card that LOOKS like a microphone",
+      e._forced_card == (4, 0))
+
+r = Recorder(cards=[(5, 0, "A28 [AIRHUG 28] USB Audio")])
+e = r.bind(engine(step=2))
+did = e._silence_recover(2, NOW)
+check("with one capture card, rung 2 says so instead of doing nothing",
+      "no alternative" in did, did)
+check("...and does not blank the pin on a board with one mic",
+      e._forced_card == (5, 0))
+
+r = Recorder()
+e = r.bind(engine(step=3))
+did = e._silence_recover(3, NOW)
+check("rung 3 drops the pin entirely", e._forced_card is None)
+check("rung 3 asks for a full re-selection", e._force_reopen is True)
+check("rung 3 says so", "pin" in did.lower(), did)
+
+print("\n── the ladder is bounded and wraps ──────────────────────────")
+
+r = Recorder()
+e = r.bind(engine())
+seen = []
+for i in range(9):
+    s = int(getattr(e, "_silence_step", 0))
+    seen.append(s)
+    e._silence_recover(s, NOW + i * 100)
+check("it climbs 0,1,2,3 then wraps to 0",
+      seen[:8] == [0, 1, 2, 3, 0, 1, 2, 3], seen)
+check("a station that cannot recover keeps trying rather than stopping",
+      seen[8] == 0)
+check("every attempt is counted", e._silence_recoveries == 9)
+check("the reopen trail is bounded (20 entries)",
+      len(e._reopen_why) <= 20)
+
+print("\n── recovery resets the clock ────────────────────────────────")
+
+r = Recorder()
+e = r.bind(engine())
+e._silence_recover(0, NOW)
+check("a fresh window follows a recovery", e._last_live_peak_ts == NOW)
+check("...so the next rung cannot climb on a stale measurement",
+      e._silence_due(NOW + 1) is None)
+_later = NOW + dose_voice.SILENT_CAPTURE_AFTER + 1
+e._last_block_ts = _later          # blocks are still arriving, on time
+check("...but it does climb once the window has passed",
+      e._silence_due(_later) == 1, repr(e._silence_due(_later)))
+
+print("\n── it can never break the audio path ────────────────────────")
+
+
+class Exploding(object):
+    def __getattr__(self, k):
+        raise RuntimeError("boom")
+
+
+e = engine()
+e._mixer_cache_clear = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+did = e._silence_recover(0, NOW)
+check("a throwing side effect is contained", "failed" in did, did)
+check("...and the ladder still advances, so it is not stuck",
+      e._silence_step == 1)
+
+e = engine()
+e._alsa_capture_cards = lambda: (_ for _ in ()).throw(OSError("no alsa"))
+check("_other_capture_card survives a broken ALSA",
+      e._other_capture_card() is None)
+
+e = object.__new__(dose_voice.DoseVoice)
+check("a bare engine with no attributes at all does not act",
+      e._silence_due(NOW) is None)
+
+print("\n── it is actually wired in ──────────────────────────────────")
+
+SRC = open(os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "dose_voice.py"), encoding="utf-8").read()
+# Compare CODE, not the prose that explains it. Matching a comment is
+# the exact mistake that made the injection detector wrong four times.
+CODE = "\n".join(ln for ln in SRC.splitlines()
+                 if not ln.lstrip().startswith("#"))
+
+check("the supervising loop stamps the level",
+      "self._silence_note_level(" in CODE)
+check("the supervising loop asks whether to act",
+      "self._silence_due()" in CODE)
+check("the supervising loop acts",
+      "self._silence_recover(" in CODE)
+check("the silence check runs AFTER the dead-capture watchdog",
+      CODE.index("CAPTURE_DEAD_AFTER\n") if False else
+      CODE.index("_silence_note_level(") > CODE.index(
+          "def _silence_note_level"))
+check("a reopen resets the silence clock too, so the ladder does not "
+      "climb on a stream that was just replaced",
+      "_last_live_peak_ts = time.time()" in CODE)
+check("the heartbeat reports the SIGNAL, not just the device",
+      "signal:" in SRC)
+check("the heartbeat reports how long it has been silent",
+      "SILENT for" in SRC)
+check("the heartbeat reports the ladder position",
+      "next rung" in SRC)
+check("the threshold is an environment override, not a magic number",
+      "DOSE_SILENT_CAPTURE_AFTER" in SRC)
+check("the step gap is an environment override too",
+      "DOSE_SILENCE_STEP_GAP" in SRC)
+check("the threshold leaves room for a quiet room (>= 30s)",
+      dose_voice.SILENT_CAPTURE_AFTER >= 30,
+      dose_voice.SILENT_CAPTURE_AFTER)
+check("...and still heals inside a few minutes (<= 180s)",
+      dose_voice.SILENT_CAPTURE_AFTER <= 180)
+check("liveness is judged against the PEAK floor, never RMS",
+      "peak > ROUTE_LIVE_PEAK" in CODE)
+
+print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
+if FAILURES:
+    for f in FAILURES:
+        print("  - " + f)
+    sys.exit(1)
+print("silence watchdog OK")
