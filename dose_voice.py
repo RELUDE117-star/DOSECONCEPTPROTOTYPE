@@ -2886,6 +2886,22 @@ class DoseVoice:
                      % (self.mic_name, self.mic_rms))
         for tline in getattr(self, "mic_trail", []):
             lines.append("route: " + tline)
+        # HOW OFTEN HAS THE MICROPHONE HAD TO BE REOPENED, AND WHY.
+        # A station quietly restarting its capture dozens of times an
+        # hour is a fault, and it is invisible unless somebody counts.
+        # The recorder's own stderr is kept alongside it — that is the
+        # only place that says "overrun!!!" or "Device or resource
+        # busy", and it used to go to /dev/null.
+        lines.append("")
+        lines.append("capture reopens since start: %d"
+                     % getattr(self, "_capture_restarts", 0))
+        errs = getattr(self, "_capture_errs", [])
+        lines.append("recorder stderr (last %d lines):" % len(errs))
+        if errs:
+            lines.extend("  " + e for e in errs)
+        else:
+            lines.append("  (none — the recorder has not complained)")
+        lines.append("")
         try:
             for i, d in enumerate(self._sd.query_devices()):
                 if d.get("max_input_channels", 0) > 0:
@@ -4172,12 +4188,44 @@ class DoseVoice:
             from; channels=2 means the reader downmixes stereo to mono
             by taking the LOUDER channel per block, so a USB mic wired
             to only one channel is still captured at full level."""
+            # KEEP THE RECORDER'S STDERR. It was DEVNULL, which threw
+            # away the only thing that says WHY the microphone died.
+            #
+            # A soak on the device showed the capture cycling — present
+            # in 14 of 20 samples, absent in 6, with hw_ptr resetting
+            # each time, so arecord was exiting and being reopened over
+            # and over. arecord says why it exits ("overrun!!!",
+            # "Device or resource busy", a broken pipe) on stderr, and
+            # every one of those messages was being discarded.
+            #
+            # Bounded to the last few KB in memory: this must never grow
+            # without limit or block the recorder by filling a pipe
+            # nobody drains.
             try:
                 p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                     stderr=subprocess.DEVNULL,
+                                     stderr=subprocess.PIPE,
                                      env=self._audio_env())
             except Exception:
                 return None
+
+            def _drain_err(proc=p, label=name):
+                """Read the recorder's complaints so they are visible
+                and so a full stderr pipe can never stall it."""
+                try:
+                    for raw in iter(proc.stderr.readline, b""):
+                        line = raw.decode("utf-8", "ignore").strip()
+                        if not line:
+                            continue
+                        buf = getattr(self, "_capture_errs", None)
+                        if buf is None:
+                            buf = self._capture_errs = []
+                        buf.append("%s  %s: %s" % (
+                            time.strftime("%H:%M:%S"), label, line[:160]))
+                        del buf[:-40]        # keep the last 40 only
+                except Exception:
+                    pass
+            threading.Thread(target=_drain_err, daemon=True,
+                             name="capture-stderr").start()
             time.sleep(0.3)
             if p.poll() is not None:
                 return None
