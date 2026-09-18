@@ -454,6 +454,62 @@ check("_restart_app releases audio BEFORE os.execv",
 check("the live recorder is tracked so it can be released",
       "self._cap_proc = p" in src)
 
+print("\nThe sweep is bounded, and does not ask for devices that "
+      "cannot exist")
+# From the device, at startup:
+#
+#     took: 64.0s (budget 45s)
+#     chose: NOTHING — no route opened
+#     route walks that hit their budget: 1
+#
+# and the log full of
+#
+#     arecord -D plughw:5,2 ...: audio open error: No such file
+#
+# Card 5 has subdevices_count: 1. Three quarters of the sweep was
+# asking the kernel for devices that cannot exist, and the budget was
+# consulted only BETWEEN routes, so one route could overrun it by
+# twenty seconds while the report said the budget had been respected.
+
+_src = src if "src" in dir() else open(os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "dose_voice.py"), encoding="utf-8").read()
+_code = "\n".join(ln for ln in _src.splitlines()
+                   if not ln.lstrip().startswith("#"))
+
+check("the subdevice list comes from the kernel",
+      "def _capture_subdevices" in _code
+      and "subdevices_count:" in _src)
+check("it falls back to [0], never to a guess at more",
+      "return [0]" in _code)
+check("a card that does not exist yields exactly one subdevice",
+      dose_voice.DoseVoice._capture_subdevices(9999) == [0])
+check("a nonsense card number is survivable",
+      dose_voice.DoseVoice._capture_subdevices(-3) == [0])
+check("the sweep iterates only real subdevices",
+      "real = self._capture_subdevices(card)" in _code
+      and "for d in [device] + real:" in _code)
+check("the old 0,1,2,3 guess is gone",
+      "for d in (device, 0, 1, 2, 3):" not in _code)
+
+check("open_arecord takes a deadline", "def open_arecord(card, device=0, "
+      "deadline=None):" in _code)
+check("...and checks it INSIDE the sweep, not after it",
+      "if deadline and time.time() > deadline:" in _code)
+check("...and says so when it bails",
+      "arecord sweep on card" in _src and "deadline" in _src)
+check("the walk's deadline exists before the openers are built",
+      _code.index("_walk_box = [") < _code.index("open_arecord(c, d, deadline="))
+check("both arecord routes are given it",
+      _code.count("open_arecord(c, d, deadline=walk_deadline())") == 2)
+check("the walk clock is re-stamped when the walk actually starts",
+      "_walk_box[0] = walk_end = t_walk + CAPTURE_OPEN_BUDGET" in _code)
+
+# The arithmetic the fix rests on.
+_combos = 2 * 3 * 2          # bases x rates x channels
+check("one real subdevice means %d attempts, not %d"
+      % (_combos, _combos * 4), _combos * 1 == 12)
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:

@@ -2669,6 +2669,41 @@ class DoseVoice:
         return found
 
     @staticmethod
+    def _capture_subdevices(card):
+        """How many capture subdevices this card REALLY has.
+
+        The sweep used to try subdevices 0, 1, 2 and 3 on every card,
+        because some cheap USB mics put the working capture on
+        subdevice 1. Card 5 on this station has exactly ONE
+        (`subdevices_count: 1` in /proc/asound/card5/pcm0c/info), so
+        three quarters of the sweep was asking the kernel for devices
+        that cannot exist — and each refusal costs a process spawn and
+        a wait.
+
+        Measured consequence: a startup selection that took 64.0s
+        against a 45s budget and ended in "chose: NOTHING", while the
+        log filled with
+
+            arecord -D plughw:5,2 ...: audio open error:
+                No such file or directory
+
+        Asking the kernel how many there are turns 48 attempts into 12.
+        Falls back to [0] — never to a guess at more.
+        """
+        n = 0
+        try:
+            with open("/proc/asound/card%d/pcm0c/info" % int(card)) as f:
+                for line in f:
+                    if line.startswith("subdevices_count:"):
+                        n = int(line.split(":", 1)[1].strip())
+                        break
+        except Exception:
+            n = 0
+        if n < 1 or n > 8:
+            return [0]
+        return list(range(n))
+
+    @staticmethod
     def _native_channels(card):
         """How many channels this card actually captures.
 
@@ -5536,7 +5571,7 @@ class DoseVoice:
             self.mic_name = name
             return ("pipe", p)
 
-        def open_arecord(card, device=0):
+        def open_arecord(card, device=0, deadline=None):
             """Record straight off an ALSA capture device with arecord.
             Tries, in order, every combination that fixes the common
             'records silence' cases on cheap USB mics (C-Media CM108,
@@ -5597,10 +5632,16 @@ class DoseVoice:
             # Try the requested SUBDEVICE first, then the card's other
             # capture subdevices — some USB mics put the working capture
             # on subdevice 1, not 0, so plughw:card,0 records silence.
+            # ONLY THE SUBDEVICES THAT EXIST. See _capture_subdevices:
+            # this card has one, and the other three were 36 doomed
+            # process spawns per sweep.
+            real = self._capture_subdevices(card)
             subdevs = []
-            for d in (device, 0, 1, 2, 3):
-                if d not in subdevs:
+            for d in [device] + real:
+                if d in real and d not in subdevs:
                     subdevs.append(d)
+            if not subdevs:
+                subdevs = [0]
             # ── ASK THE CARD FOR ITS OWN CHANNEL COUNT, AND USE IT ───
             #
             # This list used to be (1, 2) — mono first — and that one
@@ -5632,10 +5673,24 @@ class DoseVoice:
             # other counts stay as fallback for hardware that refuses.
             nat = self._native_channels(card)
             chans = [nat] + [c for c in (2, 1) if c != nat]
+            # AND A DEADLINE THE SWEEP ITSELF RESPECTS.
+            #
+            # CAPTURE_OPEN_BUDGET bounded the ROUTE WALK, checked
+            # between routes — so a single route could sit inside this
+            # loop for as long as it liked. It did: 64.0s against a 45s
+            # budget, and the report said "route walks that hit their
+            # budget: 1" while the walk had already overrun by twenty
+            # seconds. A budget that is only consulted after the
+            # expensive thing has finished is not a budget.
             for sd in subdevs:
                 for base in ("plughw", "hw"):
                     for rate in (48000, 44100, 16000):
                         for ch in chans:
+                            if deadline and time.time() > deadline:
+                                self._note_reopen(
+                                    "arecord sweep on card %d hit its "
+                                    "deadline" % card)
+                                return None
                             if known and (sd, base, rate, ch) == known:
                                 continue     # just tried it
                             cap = attempt(sd, base, rate, ch)
@@ -5854,6 +5909,17 @@ class DoseVoice:
             # as the Jieli UAC demo) may also expose a dead capture
             # endpoint — it is deprioritized so a real microphone on
             # another card always wins the tie.
+            # THE WALK'S DEADLINE, DECIDED BEFORE THE WALK STARTS, so
+            # each opener can be told about it. It used to be computed
+            # after the route list was built and consulted only BETWEEN
+            # routes, which let one route sit inside its own sweep for
+            # as long as it liked — 64.0s against a 45s budget, with
+            # the report still saying the budget had been respected.
+            _walk_box = [time.time() + CAPTURE_OPEN_BUDGET]
+
+            def walk_deadline():
+                return _walk_box[0]
+
             routes = []
             cap_cards = self._alsa_capture_cards()
             # The full self-test may have found the exact card that
@@ -5865,7 +5931,8 @@ class DoseVoice:
                           for c in cap_cards):
                 routes.append(
                     ("arecord FORCED card %d,%d" % (fc[0], fc[1]),
-                     (lambda c=fc[0], d=fc[1]: open_arecord(c, d)),
+                     (lambda c=fc[0], d=fc[1]:
+                      open_arecord(c, d, deadline=walk_deadline())),
                      False))
             else:
                 # The pinned/forced card is not in the capture list
@@ -5881,7 +5948,8 @@ class DoseVoice:
                 tag = "card %d,%d %s" % (card_num, dev_num, short)
                 routes.append(
                     ("arecord %s" % tag.strip(),
-                     (lambda c=card_num, d=dev_num: open_arecord(c, d)),
+                     (lambda c=card_num, d=dev_num:
+                      open_arecord(c, d, deadline=walk_deadline())),
                      self._looks_like_speaker(desc)))
             # TRUE SYSTEM DEFAULTS — route through whatever the Pi is
             # configured to use (these go via ALSA's 'default'/PipeWire
@@ -5951,7 +6019,10 @@ class DoseVoice:
             # showed, misread at the time as the recorder crash-looping.
             # It was not crashing. It was shopping.
             t_walk = time.time()
-            walk_end = t_walk + CAPTURE_OPEN_BUDGET
+            # Re-stamp: building the route list costs an `arecord -l`
+            # and a few /proc reads, and the walk's clock should start
+            # when the walk does.
+            _walk_box[0] = walk_end = t_walk + CAPTURE_OPEN_BUDGET
             for label, opener, speakerish in routes:
                 if time.time() >= walk_end:
                     self._select_timeouts = getattr(
