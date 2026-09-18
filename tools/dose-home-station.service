@@ -74,8 +74,17 @@ KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=20
 
-StandardOutput=append:%h/dose-home-station/logs/dose.log
-StandardError=append:%h/dose-home-station/logs/dose.log
+# DOSE.sh itself tees both streams into logs/dose.log (appending, with
+# rotation). If this unit ALSO appended to that file we would get every
+# line twice. So the unit's copy goes to the journal instead: two views
+# of the same run, no duplication, and `journalctl --user -u
+# dose-home-station` works whether or not the file survived.
+#
+# It used to be append: to that same path, and on 2026-09-18 a live
+# check found no such file after seven minutes of running — that is why
+# the launcher now owns the log rather than trusting this line.
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=graphical-session.target

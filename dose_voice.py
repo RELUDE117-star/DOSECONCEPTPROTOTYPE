@@ -3048,6 +3048,99 @@ class DoseVoice:
             return self._play_wav(
                 "/usr/share/sounds/alsa/Front_Center.wav")
 
+    def _note_reopen(self, why):
+        """Record WHY the capture is about to be torn down and reopened.
+
+        There are four separate things in the supervising loop that can
+        trigger a reopen, and until now all four looked identical from
+        the outside: the reopen counter went up. Knowing that a station
+        re-selected twelve times in ten minutes is not actionable.
+        Knowing that all twelve said "mic_name says no signal" is.
+        """
+        try:
+            lst = getattr(self, "_reopen_why", None)
+            if lst is None:
+                lst = self._reopen_why = []
+            lst.append("%s  %s" % (time.strftime("%H:%M:%S"), why))
+            del lst[:-20]
+        except Exception:
+            pass
+
+    def _dump_selection(self, chosen, is_live, started):
+        """Write what device selection just decided, to disk, every time.
+
+        WHY THIS EXISTS. mic_report() is excellent and is only ever
+        called when somebody taps a button on the touchscreen. This
+        station runs unattended, and on 2026-09-18 the report on its
+        disk was three days old while the engine had reopened its
+        microphone dozens of times in the previous ten minutes. Every
+        question about which route it chose, and why it did not keep it,
+        had to be answered by attaching py-spy to a live process and
+        reading C stack frames.
+
+        That is an absurd way to find out something the program already
+        knows. It knows the answer at exactly this moment — it has just
+        finished deciding — so it writes it down. One small file,
+        rewritten per selection, with a counter so a station that is
+        re-selecting in a loop says so on the first line instead of
+        looking identical to one that settled immediately.
+
+        Deliberately cheap and deliberately total: no exception from
+        here may ever reach the capture path. A diagnostic that can
+        break the thing it is diagnosing is worse than no diagnostic.
+        """
+        try:
+            self._sel_count = getattr(self, "_sel_count", 0) + 1
+            took = time.time() - (started or time.time())
+            lines = [
+                "DOSE capture selection",
+                time.ctime(),
+                "",
+                "selection #%d since start" % self._sel_count,
+                "took: %.1fs (budget %.0fs)" % (took, CAPTURE_OPEN_BUDGET),
+                "chose: %s" % (chosen or "NOTHING — no route opened"),
+                "verdict: %s" % (
+                    "a route showed a real noise floor"
+                    if is_live else
+                    "NO route showed signal; fell back to the first that "
+                    "merely opened"),
+                "threshold: peak >= %d" % ROUTE_LIVE_PEAK,
+                "",
+                "every route tried, in order:",
+            ]
+            for t in getattr(self, "mic_trail", []) or ["(none)"]:
+                lines.append("  " + str(t))
+            lines += [
+                "",
+                "capture reopens since start: %d"
+                % getattr(self, "_capture_restarts", 0),
+                "probe closes that never returned: %d"
+                % len(getattr(self, "_probe_wedged", [])),
+                "device scans that hit their budget: %d"
+                % getattr(self, "_probe_timeouts", 0),
+                "route walks that hit their budget: %d"
+                % getattr(self, "_select_timeouts", 0),
+                "",
+                "why each reopen happened (most recent last):",
+            ]
+            why = getattr(self, "_reopen_why", []) or []
+            lines.extend("  " + str(w) for w in why[-20:])
+            if not why:
+                lines.append("  (no reopen yet — this is the first "
+                             "selection)")
+            lines += ["", "recorder stderr (last lines):"]
+            errs = getattr(self, "_capture_errs", []) or []
+            lines.extend("  " + str(e) for e in errs[-20:])
+            if not errs:
+                lines.append("  (none)")
+            os.makedirs(VOICE_DIR, exist_ok=True)
+            tmp = os.path.join(VOICE_DIR, "selection.txt.tmp")
+            with open(tmp, "w") as f:
+                f.write("\n".join(lines) + "\n")
+            os.replace(tmp, os.path.join(VOICE_DIR, "selection.txt"))
+        except Exception:
+            pass
+
     def mic_report(self):
         """Write a full microphone diagnostic to voice/mic_report.txt
         and return a one-line human verdict. Called when a mic test
@@ -4863,7 +4956,8 @@ class DoseVoice:
             # precisely the "capture cycling" a soak of this station
             # showed, misread at the time as the recorder crash-looping.
             # It was not crashing. It was shopping.
-            walk_end = time.time() + CAPTURE_OPEN_BUDGET
+            t_walk = time.time()
+            walk_end = t_walk + CAPTURE_OPEN_BUDGET
             for label, opener, speakerish in routes:
                 if time.time() >= walk_end:
                     self._select_timeouts = getattr(
@@ -4899,6 +4993,7 @@ class DoseVoice:
             is_live = bool(live or live_speaker)
             if not choice:
                 self.mic_trail.append("no capture route opened at all")
+                self._dump_selection(None, False, t_walk)
                 return None
             cap = choice[1]()
             if cap:
@@ -4907,6 +5002,8 @@ class DoseVoice:
                 # never claim 'hearing OK' from selection; the meter's
                 # Loudest value is the sole verdict.
                 self.mic_name = choice[0] + " · selected (speak to test)"
+            self._dump_selection(choice[0] if cap else None,
+                                 is_live, t_walk)
             return cap
 
         stream = open_capture()
@@ -4955,6 +5052,8 @@ class DoseVoice:
                     # card that was chosen by inference last time.
                     self._forced_card = MIC_CARD_PIN
                     self._force_reopen = True
+                    self._note_reopen(
+                        "audio device fingerprint changed (hot-plug)")
                 if sig is not None:
                     dev_sig = sig
                 # a silent mic: keep re-trying — the live one may
@@ -4963,6 +5062,9 @@ class DoseVoice:
                         for k in ("(no signal", "SILENT"))
                         and now - last_reselect > 20):
                     self._force_reopen = True
+                    self._note_reopen(
+                        "mic_name says no signal (%r) — re-selecting"
+                        % (self.mic_name or "",)[:60])
             if self._force_reopen:
                 self._force_reopen = False
                 close_capture(stream)
@@ -5073,6 +5175,17 @@ class DoseVoice:
             if (time.time() - lb > CAPTURE_DEAD_AFTER
                     and self.state == "idle"
                     and self._capture_restart_allowed()):
+                # SAY WHY. A reopen counter tells you a station is
+                # cycling; it does not tell you what tore the capture
+                # down, and there are four different things that can.
+                # Without the reason, the only way to tell "the device
+                # stopped delivering blocks" from "a hot-plug was
+                # detected" from "the self-test asked for the device"
+                # is to instrument a live process, which is how this
+                # afternoon was spent.
+                self._note_reopen("no audio block for %.1fs "
+                                  "(threshold %.0fs)"
+                                  % (time.time() - lb, CAPTURE_DEAD_AFTER))
                 close_capture(stream)
                 stream = open_capture()
                 last_audio = time.time()

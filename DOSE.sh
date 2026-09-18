@@ -720,18 +720,125 @@ else
     echo "  Everything is in place."
 fi
 
+# ── AUDIO CLEANUP BEFORE LAUNCH ──────────────────────────────────────
+# A crash does not tidy up after itself. When the app aborts — and it
+# has, inside ONNX Runtime during TTS — its `arecord` child is orphaned
+# onto init, still holding the ALSA capture device. The NEXT instance
+# then finds the microphone busy and goes deaf, which is precisely the
+# fault that took this station out twice.
+#
+# Found on the device: `arecord -D plughw:4,0` parented to PID 1, left
+# by a previous instance, on the WRONG card at that.
+#
+# So every launch starts from a known-clean audio state: terminate any
+# recorder or player left by a previous run, then — if the capture
+# device is STILL busy, which means the kernel is holding a stranded
+# PCM whose owner is gone — reset the USB device, the only thing that
+# reliably clears it.
+cleanup_audio() {
+    local stale
+    stale=$(pgrep -x arecord; pgrep -x aplay; pgrep -x pw-record) 2>/dev/null
+    if [ -n "$stale" ]; then
+        echo "  Clearing $(echo "$stale" | grep -c .) leftover audio process(es)"
+        # TERM, never KILL: a killed recorder does not release the
+        # device, which is the whole problem being cleaned up here.
+        echo "$stale" | xargs -r kill -TERM 2>/dev/null
+        sleep 2
+        echo "$stale" | xargs -r kill -KILL 2>/dev/null
+        sleep 1
+    fi
+
+    # Is the microphone actually openable?
+    local card="${DOSE_MIC_CARD%%[,:]*}"
+    [ -n "$card" ] || return 0
+    if arecord -D "plughw:${card},0" -f S16_LE -r 48000 -c 2 -d 1 \
+            /dev/null >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "  Microphone still busy — resetting the USB device"
+    local devpath
+    devpath=$(python3 - <<'PY' 2>/dev/null
+import re, subprocess
+try:
+    out = subprocess.run(["lsusb"], capture_output=True, text=True,
+                         timeout=5).stdout
+except Exception:
+    raise SystemExit
+for line in out.splitlines():
+    if "airhug" in line.lower():
+        m = re.match(r"Bus (\d+) Device (\d+)", line)
+        if m:
+            print("/dev/bus/usb/%s/%s" % (m.group(1), m.group(2)))
+            break
+PY
+)
+    [ -n "$devpath" ] || return 0
+    sudo -n python3 - "$devpath" <<'PY' 2>/dev/null || true
+import fcntl, os, sys
+USBDEVFS_RESET = ord('U') << 8 | 20
+try:
+    fd = os.open(sys.argv[1], os.O_WRONLY)
+    fcntl.ioctl(fd, USBDEVFS_RESET, 0)
+    os.close(fd)
+    print("    USB reset sent")
+except Exception as e:
+    print("    reset unavailable: %s" % e)
+PY
+    sleep 3
+}
+cleanup_audio
+
 # ── Launch ──
 echo "  Starting DOSE..."
 echo "  Press Esc to exit."
 echo ""
 export DISPLAY=:0
-python3 "$APP_DIR/dose_app.py" 2>"$APP_DIR/error.log"
-EXIT_CODE=$?
+
+# ── WHERE THE LOGS GO ────────────────────────────────────────────────
+# This used to be:  python3 dose_app.py 2>"$APP_DIR/error.log"
+#
+# Three things were wrong with it, and together they meant this station
+# has never kept a usable record of anything it did.
+#
+#   1. `2>` TRUNCATES. Every restart destroyed the log of the run that
+#      caused the restart. The one thing you always want after a crash
+#      is the last thing the crashed process said, and it was deleted
+#      by the process that replaced it. `>>` appends.
+#
+#   2. Only stderr was kept. Everything the app printed deliberately
+#      went to stdout, which under systemd goes to StandardOutput and
+#      under a terminal went to the screen and then nowhere.
+#
+#   3. The file was not there at all. A live check on 2026-09-18 found
+#      no error.log, no logs/dose.log, and an empty journal, while the
+#      app had been running for seven minutes. Every traceback this
+#      station has ever produced has gone to a file nobody could find.
+#
+# Both streams now append to one timestamped log, and the log is
+# rotated by size so it cannot fill the SD card. tee keeps stdout
+# flowing to systemd as well, so `journalctl --user -u dose-home-station`
+# still works and the two views agree.
+LOG_DIR="$APP_DIR/logs"
+mkdir -p "$LOG_DIR" 2>/dev/null
+APP_LOG="$LOG_DIR/dose.log"
+# Rotate at 8 MB, keep one previous. Cheap, and bounded forever.
+if [ -f "$APP_LOG" ] && [ "$(wc -c < "$APP_LOG" 2>/dev/null || echo 0)" -gt 8388608 ]; then
+    mv -f "$APP_LOG" "$APP_LOG.1" 2>/dev/null || true
+fi
+{
+    echo ""
+    echo "=== DOSE start $(date '+%Y-%m-%d %H:%M:%S') pid=$$ ==="
+} >> "$APP_LOG" 2>/dev/null
+
+python3 -u "$APP_DIR/dose_app.py" 2>&1 | tee -a "$APP_LOG"
+EXIT_CODE=${PIPESTATUS[0]}
 if [ $EXIT_CODE -ne 0 ]; then
     echo ""
-    echo "  DOSE crashed. Error details:"
+    echo "  DOSE crashed (exit $EXIT_CODE). Last 40 lines:"
     echo ""
-    cat "$APP_DIR/error.log"
+    tail -40 "$APP_LOG" 2>/dev/null || echo "  (no log)"
+    echo ""
+    echo "  Full log: $APP_LOG"
     echo ""
     echo "  Press any key to close..."
     # Never block forever: the station autostarts with Terminal=false,
