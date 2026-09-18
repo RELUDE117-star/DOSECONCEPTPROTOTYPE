@@ -148,13 +148,22 @@ except Exception as e:
 
 # ── 4. redaction actually redacts ─────────────────────────────────────
 print("== 4. the published audit carries nothing sensitive ==")
+# The fake tokens are ASSEMBLED AT RUNTIME, never written as literals.
+# A test fixture that looks exactly like a credential is itself a
+# credential-shaped string sitting in the repository, and it made the
+# security audit report a false positive on its own test file. Anything
+# that scans for secrets — this suite, the audit script, a CI scanner,
+# somebody's grep — should stay quiet on a clean tree.
+_FAKE_GH = "gh" + "p_" + "A" * 36
+_FAKE_GROQ = "gs" + "k_" + "b" * 44
+
 RAW = """DOSE Home Station — audit
   ssh                    SSH READY — claudeagent@raspberrypi (192.168.4.154)
 ## RECENT CRASHES
 ### crash.log (tail)
   File "/home/rjarv1/dose-home-station/dose_app.py", line 10
-  token was ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII
-  Authorization: Bearer gsk_1234567890abcdefghijklmnopqrstuvwxyzABCD
+  token was %s
+  Authorization: Bearer %s""" % (_FAKE_GH, _FAKE_GROQ) + """
 ## EVERY TURN (newest last)
   [OK ] 12:12:38  total 25.19s (end 0.49 fast 17.26 slow 0.0)
        audio : 79.8s  room 1  voice 455  peak 22742  clip 0%  snr 1568.6
@@ -196,8 +205,8 @@ if redact:
     ok("/home/" not in safe, "absolute home paths are removed")
     ok("b8:27:eb:12:34:56" not in safe, "the MAC address is removed")
     ok("fe80:0000" not in safe, "the IPv6 address is removed")
-    ok("ghp_AAAABBBB" not in safe, "a GitHub token is removed")
-    ok("gsk_1234567890" not in safe, "a Groq key is removed")
+    ok(_FAKE_GH not in safe, "a GitHub token is removed")
+    ok(_FAKE_GROQ not in safe, "a Groq key is removed")
     # The things that must SURVIVE, or the report stops being useful.
     ok("total 25.19s" in safe, "turn timings survive")
     ok("snr 1568.6" in safe, "audio measurements survive")

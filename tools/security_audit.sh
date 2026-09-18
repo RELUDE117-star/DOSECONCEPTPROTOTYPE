@@ -74,7 +74,17 @@ fi
 # ── B. can the Pi reach back? ─────────────────────────────────────────
 hdr "B. Can the Pi command the Mac?  (it must not)"
 
-INJ=$(grep -rlE 'eval|\$\(ssh|`ssh|bash <\(|sh <\(|source .*out/' \
+# PRECISION MATTERS HERE. The first version of this check flagged
+# `OUT=$(ssh ... )` — capturing a command's output into a variable and
+# then COMPARING it. That is not execution and it is what every job in
+# this project does. Four false positives on the first run.
+#
+# A security check that cries wolf gets switched off, so this looks only
+# for constructs that actually RUN remote output:
+#     eval …                 bash <(…)      sh <(…)      . <(…)
+#     … | bash               … | sh         source <(…)
+#     $(ssh …) in command position (start of line, after ; or &&)
+INJ=$(grep -rlE 'eval[[:space:]]|(bash|sh|source|\.)[[:space:]]+<\(|\|[[:space:]]*(bash|sh)([[:space:]]|$)|(^|;|&&|\|\|)[[:space:]]*[`$]\(?ssh' \
         "$AG/queue" "$AG/done" 2>/dev/null)
 if [ -n "$INJ" ]; then
     bad "a job EXECUTES data that came from the Pi — this is the one way a compromised Pi could run code here:"
@@ -134,9 +144,15 @@ fi
 
 # ── D. what the code talks to ─────────────────────────────────────────
 hdr "D. Egress allowlist and repository secrets"
+# macOS ships no `timeout`. Use it when present (Linux, or coreutils via
+# brew), otherwise run plainly — these suites finish in seconds.
+if command -v timeout >/dev/null 2>&1; then TO="timeout 180"
+elif command -v gtimeout >/dev/null 2>&1; then TO="gtimeout 180"
+else TO=""; fi
+
 if [ -d "$REPO" ]; then
     for t in test_egress test_no_private_keys; do
-        OUT=$(cd "$REPO" && timeout 180 python3 "tests/$t.py" 2>&1 | tail -3)
+        OUT=$(cd "$REPO" && $TO python3 "tests/$t.py" 2>&1 | tail -3)
         if echo "$OUT" | grep -q '0 failed'; then
             ok "$t: $(echo "$OUT" | grep -oE '[0-9]+ passed, [0-9]+ failed')"
         else
