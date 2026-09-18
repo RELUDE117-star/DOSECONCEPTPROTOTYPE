@@ -17,6 +17,24 @@ github_token
 *.token
 audit-*.txt
 
+# Cloud STT credentials. These live on the DEVICE and are read from
+# ~/dose-home-station/ at runtime — never from this repository, which is
+# public. tests/test_egress.py fails the build if any of these stop
+# being ignored, because a committed key is a revoked key and a leaked
+# one is somebody else spending your free tier.
+groq_key
+hf_token
+*_key
+*_token
+*_token.txt
+.env
+.env.*
+
+# Per-device runtime state, not source. cloud_budget.json is the record
+# of how much free quota this station has used; it is meaningless
+# anywhere else and would cause a device to inherit another's count.
+cloud_budget.json
+
 # Claude dev access: NEVER commit private keys or the sanitized status.
 # The PUBLIC key file tools/claude_dev_authorized_keys IS committed on
 # purpose (public keys are safe); everything below stays local.

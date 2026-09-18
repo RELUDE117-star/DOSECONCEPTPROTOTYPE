@@ -24,9 +24,171 @@ Shared by the live assistant (dose_voice) and the diagnostic tool
 (voice_diagnostics) so the exact same code is measured and shipped.
 """
 
+import json
 import os
 import socket
+import tempfile
 import time
+import wave
+
+# ── keeping the free tier FREE ────────────────────────────────────────
+# A free tier stops being free the moment something calls it in a loop.
+# These are the guards, all env-tunable, all deliberately conservative.
+#
+# The single biggest saving is not a limit at all — it is not uploading
+# six times more audio than Whisper can use. See _prepare_upload().
+CLOUD_MIN_SECS = float(os.environ.get("DOSE_CLOUD_MIN_SECS", "0.4"))
+CLOUD_MAX_SECS = float(os.environ.get("DOSE_CLOUD_MAX_SECS", "20"))
+CLOUD_MAX_PER_MIN = int(os.environ.get("DOSE_CLOUD_MAX_PER_MIN", "12"))
+CLOUD_MAX_PER_DAY = int(os.environ.get("DOSE_CLOUD_MAX_PER_DAY", "600"))
+# After a 429 the polite thing — and the thing that keeps an account in
+# good standing — is to stop asking for a while, not to retry harder.
+CLOUD_COOLDOWN = float(os.environ.get("DOSE_CLOUD_COOLDOWN", "600"))
+BUDGET_PATH = os.path.expanduser(
+    os.environ.get("DOSE_CLOUD_BUDGET",
+                   "~/dose-home-station/voice/cloud_budget.json"))
+
+
+def _today():
+    return time.strftime("%Y-%m-%d", time.gmtime())
+
+
+class Budget:
+    """Rate and volume guard for the free cloud tiers.
+
+    Persisted, because an app that restarts often would otherwise reset
+    its daily count every launch and quietly blow through a quota it
+    believed it was respecting. State is tiny and a corrupt or missing
+    file simply starts fresh — this must never be a reason a turn fails.
+    """
+
+    def __init__(self, path=BUDGET_PATH):
+        self.path = path
+        self.state = {"day": _today(), "day_count": 0,
+                      "recent": [], "cooldown_until": 0.0}
+        self._load()
+
+    def _load(self):
+        try:
+            with open(self.path) as f:
+                s = json.load(f)
+            if isinstance(s, dict):
+                self.state.update(s)
+        except Exception:
+            pass
+        if self.state.get("day") != _today():      # new UTC day
+            self.state["day"] = _today()
+            self.state["day_count"] = 0
+
+    def _save(self):
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.state, f)
+            os.replace(tmp, self.path)
+        except Exception:
+            pass                                   # never fail a turn
+
+    def allow(self, now=None):
+        """(ok, reason). reason is for logs, not for the user."""
+        now = now or time.time()
+        if now < self.state.get("cooldown_until", 0):
+            left = int(self.state["cooldown_until"] - now)
+            return False, "cooling down after a rate-limit (%ds left)" % left
+        if self.state.get("day") != _today():
+            self.state["day"] = _today()
+            self.state["day_count"] = 0
+        if self.state.get("day_count", 0) >= CLOUD_MAX_PER_DAY:
+            return False, "daily cap reached (%d)" % CLOUD_MAX_PER_DAY
+        recent = [t for t in self.state.get("recent", []) if now - t < 60]
+        self.state["recent"] = recent
+        if len(recent) >= CLOUD_MAX_PER_MIN:
+            return False, "per-minute cap reached (%d)" % CLOUD_MAX_PER_MIN
+        return True, ""
+
+    def record(self, now=None):
+        now = now or time.time()
+        self.state.setdefault("recent", []).append(now)
+        self.state["recent"] = [t for t in self.state["recent"]
+                                if now - t < 60]
+        self.state["day_count"] = self.state.get("day_count", 0) + 1
+        self._save()
+
+    def note_rate_limited(self, now=None):
+        now = now or time.time()
+        self.state["cooldown_until"] = now + CLOUD_COOLDOWN
+        self._save()
+
+    def snapshot(self):
+        return {"day": self.state.get("day"),
+                "today": self.state.get("day_count", 0),
+                "last_minute": len([t for t in self.state.get("recent", [])
+                                    if time.time() - t < 60]),
+                "cooling_down": time.time() < self.state.get(
+                    "cooldown_until", 0)}
+
+
+_BUDGET = None
+
+
+def budget():
+    global _BUDGET
+    if _BUDGET is None:
+        _BUDGET = Budget()
+    return _BUDGET
+
+
+def wav_duration(path):
+    try:
+        with wave.open(path) as w:
+            return w.getnframes() / float(w.getframerate() or 1)
+    except Exception:
+        return 0.0
+
+
+def _prepare_upload(path):
+    """Downmix and downsample to 16 kHz MONO before uploading.
+
+    THE BIGGEST SAVING HERE, and it costs nothing in accuracy. This
+    station's microphone only does 48 kHz stereo, and Whisper resamples
+    everything to 16 kHz mono on arrival anyway — so uploading the raw
+    capture means sending SIX TIMES the bytes for a result that is
+    identical. On a domestic uplink that is also six times the wait
+    before the answer starts coming back, which is the part a person
+    actually feels.
+
+    Returns (path_to_send, is_temp). Any failure returns the original
+    file untouched: a tuning step must never be able to lose a turn.
+    """
+    try:
+        with wave.open(path) as w:
+            ch, sw, sr = w.getnchannels(), w.getsampwidth(), w.getframerate()
+            if ch == 1 and sr == 16000 and sw == 2:
+                return path, False            # already ideal
+            frames = w.readframes(w.getnframes())
+        if not frames:
+            return path, False
+        import audioop
+        if sw != 2:
+            frames = audioop.lin2lin(frames, sw, 2)
+            sw = 2
+        if ch == 2:
+            frames = audioop.tomono(frames, 2, 0.5, 0.5)
+            ch = 1
+        if sr != 16000:
+            frames, _ = audioop.ratecv(frames, 2, 1, sr, 16000, None)
+            sr = 16000
+        fd, out = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        with wave.open(out, "wb") as w2:
+            w2.setnchannels(1)
+            w2.setsampwidth(2)
+            w2.setframerate(16000)
+            w2.writeframes(frames)
+        return out, True
+    except Exception:
+        return path, False
 
 
 # ── credentials (never committed; read from env or the device) ────────
@@ -128,7 +290,12 @@ def transcribe_groq(wav_path, api_key=None, model=None, language="en",
         return Result("groq", error="requests missing: %s" % e)
     try:
         with open(wav_path, "rb") as f:
-            files = {"file": (os.path.basename(wav_path), f, "audio/wav")}
+            # A FIXED, MEANINGLESS FILENAME. The real basename is a
+            # temp name today, but it is the kind of thing that grows a
+            # timestamp or a device id later and quietly starts
+            # travelling. Nothing about this station needs to reach a
+            # third party — they get audio, and that is all.
+            files = {"file": ("audio.wav", f, "audio/wav")}
             data = {"model": model or GROQ_MODEL,
                     "response_format": "json",
                     "temperature": "0"}
@@ -358,18 +525,54 @@ def cloud_transcribe(wav_path, order=None, language="en",
     order = order or available_providers()
     results = []
     winner = None
-    for name in order:
-        if name == "groq":
-            res = transcribe_groq(wav_path, language=language)
-        elif name == "hf":
-            res = transcribe_hf_space(wav_path, space=hf_space)
-        else:
-            res = Result(name, error="unknown provider")
-        results.append(res)
-        if res.ok and winner is None:
-            winner = res
-            if not want_all:
-                break
+
+    # ── GUARDS, before a single byte leaves the device ───────────────
+    # want_all is the A/B diagnostic, which is run deliberately by a
+    # human and must not be silently skipped.
+    if not want_all:
+        secs = wav_duration(wav_path)
+        if secs and secs < CLOUD_MIN_SECS:
+            # A fragment this short is a cough, a chair, or the tail of
+            # a door. It cannot contain a command, and spending a
+            # request on it is how a free tier evaporates.
+            return (Result("cloud", error="too short for cloud (%.2fs)"
+                           % secs), [])
+        if secs > CLOUD_MAX_SECS:
+            return (Result("cloud",
+                           error="too long for cloud (%.1fs > %.0fs)"
+                           % (secs, CLOUD_MAX_SECS)), [])
+        ok, why = budget().allow()
+        if not ok:
+            # Not an error the user should ever see — the local model
+            # answers instead. It IS worth logging.
+            return (Result("cloud", error="budget: " + why), [])
+
+    send_path, is_temp = _prepare_upload(wav_path)
+    try:
+        for name in order:
+            if name == "groq":
+                res = transcribe_groq(send_path, language=language)
+            elif name == "hf":
+                res = transcribe_hf_space(send_path, space=hf_space)
+            else:
+                res = Result(name, error="unknown provider")
+            results.append(res)
+            if getattr(res, "rate_limited", False):
+                # Back off account-wide, not just for this provider —
+                # retrying harder is how a free key gets suspended.
+                budget().note_rate_limited()
+            elif not want_all:
+                budget().record()
+            if res.ok and winner is None:
+                winner = res
+                if not want_all:
+                    break
+    finally:
+        if is_temp:
+            try:
+                os.unlink(send_path)
+            except Exception:
+                pass
     if winner is None:
         winner = results[-1] if results else Result(
             "cloud", error="no cloud provider configured")

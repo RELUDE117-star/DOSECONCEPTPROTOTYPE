@@ -6179,6 +6179,68 @@ class DoseApp:
         "~/.dose_github_token",
     )
 
+    # Anything that looks like a credential, wherever it turns up. The
+    # audit scrapes crash logs and free-text notes, so a token could
+    # arrive here by a route nobody planned.
+    _SECRET_SHAPES = (
+        r"gh[pousr]_[A-Za-z0-9]{20,}",
+        r"github_pat_[A-Za-z0-9_]{20,}",
+        r"gsk_[A-Za-z0-9]{20,}",
+        r"hf_[A-Za-z0-9]{20,}",
+        r"sk-[A-Za-z0-9]{20,}",
+        r"AKIA[0-9A-Z]{16}",
+        r"Bearer\s+[A-Za-z0-9._\-]{16,}",
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    )
+
+    @classmethod
+    def redact_for_publication(cls, text):
+        """Strip everything that must not leave this device.
+
+        The audit is posted as an issue on a PUBLIC repository. Read in
+        full, the raw report contains things that have no business being
+        public:
+
+          * WHAT PEOPLE SAID. The per-turn log holds verbatim
+            transcripts — on a medication dispenser that is health
+            information about a named person, and it is the single most
+            sensitive thing this device holds. It is withheld entirely;
+            the timings and audio measurements that make the log useful
+            for debugging are kept.
+          * The LAN address, hostname and SSH account, which together
+            describe how to reach the machine.
+          * Absolute paths, which carry the operating-system username.
+          * MAC addresses and Wi-Fi network names.
+          * Anything credential-shaped that reached the report by an
+            unplanned route, such as a crash log tail.
+
+        The FULL report is still written to disk unredacted — it is the
+        owner's own device and that is where the debugging value is.
+        Only the copy that leaves is reduced.
+        """
+        import re as _re
+        if not text:
+            return text
+        out = text
+        for shape in cls._SECRET_SHAPES:
+            out = _re.sub(shape, "<redacted>", out)
+        # Transcripts: keep the label and the shape of the line, drop
+        # the words. These lines are `       live  : 'what was said'`.
+        out = _re.sub(r"(?m)^(\s+(?:live|fast|slow|USED)\s+:\s*).*$",
+                      r"\1<transcript withheld>", out)
+        # Network identity.
+        out = _re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "<ip>", out)
+        out = _re.sub(r"\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b",
+                      "<mac>", out)
+        out = _re.sub(r"\b[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){7}\b",
+                      "<ipv6>", out)
+        # user@host — keep the shape, lose the identifiers.
+        out = _re.sub(r"\b[A-Za-z_][A-Za-z0-9_.-]*@[A-Za-z0-9_.-]+",
+                      "<user>@<host>", out)
+        # Absolute home paths carry the username.
+        out = _re.sub(r"/(?:home|Users)/[^/\s\"']+", "~", out)
+        return out
+
     def audit_report_text(self):
         """The audit as plain text — what gets saved and posted."""
         from datetime import datetime as _dt
@@ -6401,10 +6463,17 @@ class DoseApp:
                 return
             try:
                 import urllib.request
+                # REDACT BEFORE IT LEAVES. The file on disk keeps the
+                # full report; the copy posted to a PUBLIC issue does
+                # not carry transcripts, the LAN address, the SSH
+                # account, absolute paths or anything credential-shaped.
+                safe = self.redact_for_publication(text)
                 body = json.dumps({
                     "title": "Audit — build %s"
                              % getattr(self, "_build_id", "?"),
-                    "body": "```\n" + text[:60000] + "\n```",
+                    "body": ("_Transcripts, network addresses and paths "
+                             "are withheld; the full report stays on the "
+                             "device._\n\n```\n" + safe[:60000] + "\n```"),
                 }).encode()
                 req = urllib.request.Request(
                     "https://api.github.com/repos/%s/issues" % REPO,

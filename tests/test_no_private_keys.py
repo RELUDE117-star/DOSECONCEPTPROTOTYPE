@@ -132,9 +132,22 @@ for f in ("tools/bootstrap_claude_access.py", "dose_app.py"):
         src = open(os.path.join(ROOT, f), errors="ignore").read()
     except Exception:
         continue
-    # the bootstrap may reference the PUBLIC key file only
-    ok("id_rsa" not in src and "PRIVATE KEY" not in src,
+    # A REDACTION DENYLIST IS NOT A LEAK. dose_app.py names
+    # "BEGIN ... PRIVATE KEY" inside _SECRET_SHAPES precisely so the
+    # audit redactor can STRIP one that reached a crash log by some
+    # route nobody planned. Flagging that is backwards: it would push
+    # someone to delete the scrubber to make the test green, which is
+    # the exact opposite of what this suite exists to enforce.
+    #
+    # The same exemption check 1 already makes for PRIVATE_MARKERS.
+    scrubber = ("_SECRET_SHAPES" in src or "PRIVATE_MARKERS" in src)
+    ok("id_rsa" not in src and ("PRIVATE KEY" not in src or scrubber),
        "%s never touches private key material" % f)
+    if scrubber:
+        # If a file claims to be a scrubber, it had better actually
+        # redact — otherwise the exemption above becomes a loophole.
+        ok("redact" in src.lower(),
+           "%s names key material only to redact it" % f)
 
 print()
 print("private-key guard: %d passed, %d failed" % (PASSED, FAILED))
