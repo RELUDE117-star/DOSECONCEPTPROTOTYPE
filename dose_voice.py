@@ -7987,8 +7987,15 @@ class DoseVoice:
                 rc = p.poll()
             except Exception:
                 rc = None
+            last = ""
+            try:
+                buf = getattr(self, "_pw_errs", None) or []
+                if buf:
+                    last = "  | said: " + buf[-1].split("  ", 1)[-1][:90]
+            except Exception:
+                pass
             self._note_tts("piper worker died (rc=%s, death #%d) — "
-                           "respawning" % (rc, self._pw_deaths))
+                           "respawning%s" % (rc, self._pw_deaths, last))
             try:
                 if p.stdin:
                     p.stdin.close()
@@ -8012,13 +8019,50 @@ class DoseVoice:
                 [sys.executable, script, self._piper_path,
                  str(INFER_THREADS)],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, text=True,
+                # KEEP ITS STDERR. It was DEVNULL, and the worker is
+                # the one experiment that would settle where the last
+                # two seconds of every reply go — so the one thing it
+                # must be able to do is say why it failed.
+                #
+                # Enabled on the device, it spawned at 138 MB, never
+                # answered a single request, and every render reported
+                # by=in-process. TWO children were alive at once, which
+                # means one died and another replaced it. The fallback
+                # worked exactly as designed, so nothing broke and
+                # nothing was learned.
+                #
+                # This is the same blind spot as `-q` on arecord, which
+                # cost a day: the recorder was dying thirty times a
+                # minute and the log said "unknown" because the flag
+                # that would have explained it was suppressing the
+                # explanation. Bounded to the last 40 lines in memory,
+                # drained on a thread so a full pipe can never stall
+                # the child.
+                stderr=subprocess.PIPE, text=True,
                 # Its own session: a signal aimed at our process group
                 # must not take the synthesiser with it.
                 start_new_session=True)
         except Exception as e:
             self._note_tts("piper worker would not start: %r" % (e,))
             return None
+
+        def _drain_worker_err(proc=p):
+            try:
+                for raw in iter(proc.stderr.readline, ""):
+                    line = (raw or "").strip()
+                    if not line:
+                        continue
+                    buf = getattr(self, "_pw_errs", None)
+                    if buf is None:
+                        buf = self._pw_errs = []
+                    buf.append("%s  %s" % (time.strftime("%H:%M:%S"),
+                                           line[:160]))
+                    del buf[:-40]
+            except Exception:
+                pass
+
+        threading.Thread(target=_drain_worker_err, daemon=True,
+                         name="piper-worker-stderr").start()
         # Wait for READY, so the first real sentence does not pay the
         # model load inside its own timeout budget.
         try:
@@ -8026,7 +8070,14 @@ class DoseVoice:
         except Exception:
             pass
         if p.poll() is not None:
-            self._note_tts("piper worker exited during load")
+            last = ""
+            try:
+                buf = getattr(self, "_pw_errs", None) or []
+                if buf:
+                    last = ": " + buf[-1].split("  ", 1)[-1][:110]
+            except Exception:
+                pass
+            self._note_tts("piper worker exited during load%s" % last)
             return None
         self._pw_proc = p
         self._note_tts("piper worker ready")
