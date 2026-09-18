@@ -164,6 +164,45 @@ for k in ("hits", "misses", "timeouts", "paired", "down_for",
     check("stats() reports %s" % k, k in s, sorted(s))
 check("a healthy paired server reads as healthy", s["healthy"] is True)
 
+print("\n── and the turn actually REACHES the Mac ───────────────────")
+# Everything above was true on the device and the Mac still answered
+# nothing. Paired, healthy, 71 ms away:
+#
+#   Mac speech server: MAC   turns answered by Mac: 0
+#   heard='what do i take today'      engine=whisper-tiny.en
+#   heard='how many pills do i have'  fast=8.40  total=12.55
+#
+# Four real turns, every one heard correctly, every one transcribed on
+# the Pi in eight to twelve seconds, with an M1 Pro doing nothing.
+#
+# finish() reuses the local SPECULATION whenever it is not "going
+# cloud" — and that test only ever asked about the cloud. With no
+# cloud credential it was always False, so the speculation was
+# returned and _better_transcribe, the only place the Mac is asked,
+# was never reached at all. The parachute won the race by starting
+# first.
+DV = open(os.path.join(ROOT, "dose_voice.py"), encoding="utf-8").read()
+DVC = "\n".join(l for l in DV.splitlines()
+                if not l.lstrip().startswith("#"))
+
+check("the speculation short-circuit asks about the MAC, not only "
+      "the cloud",
+      "going_remote = (self._remote_ready()" in DVC,
+      "with no cloud credential this was always False, and the local "
+      "speculation was returned every single turn")
+check("the old cloud-only name is gone", "going_cloud" not in DVC)
+check("...and the short-circuit is the thing guarded by it",
+      "if not going_remote and spec" in DVC)
+check("the Mac is still tried before the local models",
+      DVC.index("_remote_stt.available()")
+      < DVC.index("fast, feng = self._fast_transcribe(audio_bytes)"))
+check("a Mac answer is labelled as one in the turn log",
+      'self._last_engine = "mac"' in DVC,
+      "'engine=whisper-tiny.en' on every row is how this was found")
+check("the speculative pass never calls the Mac",
+      "allow_cloud=False" in DVC,
+      "one turn, one remote request")
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:

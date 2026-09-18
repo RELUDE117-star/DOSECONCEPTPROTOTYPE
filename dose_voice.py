@@ -7584,8 +7584,30 @@ class DoseVoice:
                 self._last_engine = "vosk (live)"
                 self._stt_note = "answered from the live transcript"
                 return quick
-            going_cloud = self._cloud_enabled() and self._is_online()
-            if not going_cloud and spec \
+            # THE MAC COUNTS AS "SOMEWHERE BETTER TO ASK".
+            #
+            # This asked only about the cloud, so with no cloud
+            # credential it was always False — and the branch below
+            # then RETURNED the local speculation, which is
+            # whisper-tiny.en running on the Pi. _better_transcribe,
+            # where the Mac is asked, was never reached.
+            #
+            # That is why the device read, after pairing, health at
+            # 71 ms and everything green:
+            #
+            #   Mac speech server: MAC   turns answered by Mac: 0
+            #   ...
+            #   heard='what do i take today'  engine=whisper-tiny.en
+            #   heard='how many pills do i have'  fast=8.40 total=12.55
+            #
+            # Four real turns, every one correct, every one transcribed
+            # on the Pi in eight to twelve seconds, with an M1 Pro
+            # seventy-one milliseconds away doing nothing. The
+            # speculation is the parachute; it is not supposed to win
+            # the race by starting first.
+            going_remote = (self._remote_ready()
+                            or (self._cloud_enabled() and self._is_online()))
+            if not going_remote and spec \
                     and spec.get("voice_ts") == self._last_voice_ts:
                 # WAIT THE TURN BUDGET, NOT A ROUND NUMBER.
                 #
