@@ -1107,16 +1107,51 @@ application, which also holds faster-whisper, Vosk, Silero, picamera2
 and Tkinter at ~1.55 GB on a 4 GB board. Same model, same options,
 same machine, same silent room, 3x apart.
 
-**The obvious test of that is `tools/piper_worker.py`, and it does not
-work.** Enabling `DOSE_PIPER_WORKER=1` spawns the child (138 MB against
-the app's 1,550 MB) but every render still logs
-`{'worker': 0.0, ..., 'by': 'in-process'}` — the attempt returns
-immediately and the parent falls back, exactly as designed. TWO worker
-processes were alive, which is the tell: one died and another spawned.
-So the process hypothesis is **untested, not disproved**, and the next
-step is to find out why the worker never answers — start with whether
-`_piper_worker()` is hitting `PIPER_WORKER_MIN_GAP` after a death, and
-read the child's stderr, which is currently `DEVNULL`.
+**The obvious test of that is `tools/piper_worker.py`. It had never run
+once, on either side of the pipe.**
+
+Two bugs, mirror images, each half "fixed" to match the wrong
+neighbour — and BOTH hidden by the same broad `except`, which turns
+any worker failure into a silent fall-back to in-process synthesis. So
+the station always sounded right and the feature never ran:
+
+| | |
+|---|---|
+| the child | passed a PATH to piper, which wants an open wave → `AttributeError: 'str' object has no attribute 'setframerate'` |
+| the parent | passed an OPEN WAVE to the worker, which sends a filename to another process → `TypeError: expected str, bytes or os.PathLike object, not Wave_write` |
+
+Both were invisible until the child's stderr stopped going to
+`DEVNULL` and the parent's exception was put in the turn row. **That is
+the third time in this project that a discarded error message cost a
+day** — after `-q` on arecord and `stderr=DEVNULL` on this same worker.
+
+`tests/test_piper_worker.py` passed all 42 checks throughout, because
+its fake piper accepted whatever it was handed. **A test double more
+permissive than the thing it stands in for tests the double.** The fake
+now raises the same `AttributeError`, and the suite asserts the
+contract from BOTH sides (47 checks).
+
+### And with it finally working: the worker is SLOWER
+
+```
+15:29:07  The time is 3:29 PM.   speak 2.41   by in-process
+15:43:45  The time is 3:43 PM.   speak 6.71   by worker
+```
+
+Same sentence, same board, fourteen minutes apart. Rendering in a
+138 MB child is **2.7x slower** than rendering inside the 1.6 GB app.
+
+So the process hypothesis is **disproved**, not merely untested, and
+`DOSE_PIPER_WORKER` stays OFF. It keeps its original value — an ONNX
+abort in the child costs a respawn instead of the application — so the
+code and the switch stay. It is simply not a latency fix, and that is
+now a number rather than a suspicion.
+
+**Nine explanations, nine measurements, nine misses.** The 0.77 s
+standalone / 2.4 s in-app gap is still open. What has NOT been tried:
+timing `voice.synthesize_wav` from inside the live app process against
+a fresh voice loaded in that same process — every comparison so far
+has changed the process and the voice object together.
 
 ### The reply cache: 32 clips on disk, and no hit ever observed
 
