@@ -1259,6 +1259,55 @@ fast, not that it will understand everyone.
 - **`sudo -n tr … < /proc/PID/environ`** fails: the redirect is the
   shell's, not sudo's.
 
+## Verified final state (device, 2026-09-18)
+
+Acceptance run, three times in a row, all PASS:
+
+| | result | limit |
+|---|---|---|
+| understood | **4 / 4 (100 %)** | 100 % |
+| STT latency (worst) | **2.35 s** | 6 s |
+| TTS render (worst) | **0.61 s** | 2 s |
+| capture peak (min) | **15,733** | 300 |
+| temperature | **59.4 °C** | 75 °C |
+| throttling | **0x0** | 0x0 |
+
+Five-minute soak afterwards, untouched:
+
+| | |
+|---|---|
+| silence recoveries | **0** |
+| capture reopens | **0** |
+| app instances | **1** |
+| service restarts | **0** |
+| recorder | `arecord -D plughw:5,0 -r 48000 -c 2` (one, continuous) |
+| blocks with signal | 237 of 14,573 — a quiet room, correctly ignored |
+| temperature | 46.7–66.7 °C, `throttled 0x0` throughout |
+| memory available | ~2.0 GB, flat |
+| build on disk | unchanged across two restarts |
+
+### The recogniser, measured rather than assumed
+
+Same recording, three passes each, median:
+
+| | 1 thread | 2 | 3 | 4 |
+|---|---|---|---|---|
+| tiny.en | 4.87 s | 2.84 s | **2.27 s** | 2.12 s |
+| base.en | | | 4.51 s | 3.98 s |
+
+base.en is **1.9x** tiny.en here, not the 3x the escalation budget
+assumed — the station had been refusing escalations it had time for.
+Threads stay at cores-1: four is 0.15 s faster and takes the last core,
+and this device's whole history is CPU starvation turning into dropped
+audio.
+
+**Under a second, end to end, is not reachable with local models on a
+Pi 4.** tiny.en is 2.1–2.3 s on a three-second phrase and that is the
+floor. The speculative pass hides most of it when it lands (`"fast":
+0.12` in the log is a speculation hit), and free-tier cloud STT —
+already written, dormant without a credential — is the only path to a
+consistently sub-second turn.
+
 ## Still open
 
 - **GitHub is behind the device.** `git` on the Mac is the Xcode
