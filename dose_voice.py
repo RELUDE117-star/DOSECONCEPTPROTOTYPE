@@ -3185,6 +3185,64 @@ class DoseVoice:
             return self._play_wav(
                 "/usr/share/sounds/alsa/Front_Center.wav")
 
+    def _heartbeat(self):
+        """Write what the engine is doing RIGHT NOW, every second.
+
+        WHY THIS EXISTS. voice/selection.txt is written once per device
+        selection, and I spent an evening reading it as if it were live:
+        quoting "audio blocks delivered since start: 0" from a file
+        written at startup while the microphone was, at that moment,
+        streaming perfectly — arecord's wchar climbing at exactly
+        96000 B/s and the app's rchar climbing with it.
+
+        A snapshot read as a live value is worse than no value. This
+        file is always current, so "is it hearing me" is answerable in
+        one second, by anyone, without attaching a profiler.
+
+        Cheap on purpose: a handful of integers, one atomic replace,
+        once a second, inside a bare except. It must never be able to
+        affect the audio path it reports on.
+        """
+        try:
+            now = time.time()
+            blocks = getattr(self, "_blocks_in", 0)
+            prev_b, prev_t = getattr(self, "_hb_prev", (0, now))
+            dt = max(0.001, now - prev_t)
+            rate = (blocks - prev_b) / dt
+            self._hb_prev = (blocks, now)
+            last = getattr(self, "_last_block_ts", 0.0)
+            lines = [
+                "state:          %s" % getattr(self, "state", "?"),
+                "muted:          %s" % getattr(self, "_muted", "?"),
+                "mic:            %s" % (self.mic_name or "?"),
+                "",
+                "HEARING:        %s" % (
+                    "YES" if rate > 0.5 else "NO — no audio arriving"),
+                "blocks/sec:     %.1f" % rate,
+                "blocks total:   %d" % blocks,
+                "last block:     %.1fs ago" % (
+                    (now - last) if last else -1),
+                "live level:     peak %d  rms %d" % (
+                    getattr(self, "_hb_peak", 0),
+                    getattr(self, "mic_rms", 0)),
+                "",
+                "heard so far:   %r" % (
+                    str(getattr(self, "_partial", ""))[:80]),
+                "last reply:     %r" % (
+                    str(getattr(self, "_last_reply", ""))[:80]),
+                "",
+                "capture reopens: %d" % getattr(
+                    self, "_capture_restarts", 0),
+                "written:        %s" % time.strftime("%H:%M:%S"),
+            ]
+            os.makedirs(VOICE_DIR, exist_ok=True)
+            tmp = os.path.join(VOICE_DIR, "live.txt.tmp")
+            with open(tmp, "w") as f:
+                f.write("\n".join(lines) + "\n")
+            os.replace(tmp, os.path.join(VOICE_DIR, "live.txt"))
+        except Exception:
+            pass
+
     def _note_reopen(self, why):
         """Record WHY the capture is about to be torn down and reopened.
 
@@ -4437,6 +4495,14 @@ class DoseVoice:
             # seconds of quiet. See the watchdog in the main loop.
             self._last_block_ts = time.time()
             self._blocks_in = getattr(self, "_blocks_in", 0) + 1
+            try:
+                pk, _rm = _peak_rms(data)
+                # decay, so the number reflects NOW rather than the
+                # loudest thing since boot
+                self._hb_peak = max(pk, int(getattr(self, "_hb_peak", 0)
+                                            * 0.95))
+            except Exception:
+                pass
             # MEASUREMENT BEATS MUTE AND BARGE-IN.
             #
             # route_floor() decides whether a capture device is real by
@@ -5341,6 +5407,10 @@ class DoseVoice:
         last_reselect = time.time()
         dev_sig = None
         while not self._stop.is_set():
+            # One heartbeat per second, always current. See _heartbeat().
+            if time.time() - getattr(self, "_hb_at", 0) >= 1.0:
+                self._hb_at = time.time()
+                self._heartbeat()
             # Pause: the full self-test needs exclusive access to every
             # capture device, so it closes our stream and idles here
             # until the test is done, then reopens.
