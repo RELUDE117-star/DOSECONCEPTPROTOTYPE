@@ -608,3 +608,127 @@ released the PCM.
   placed at `~/dose-home-station/groq_key` (mode 0600) **by Ryan** —
   no credential is handled or hardcoded here.
 - One `[aplay] <defunct>` at startup, source still unidentified.
+
+---
+
+# SESSION 3b — efficiency pass (2026-09-18)
+
+Brief: find work that takes far too long and condense it, without
+breaking anything. On a Pi 4 the dominant cost in the audio paths turned
+out not to be computation but **process spawns** — roughly 5–15 ms each,
+being done dozens of times per capture open and several times per spoken
+sentence, to re-establish facts that were already true.
+
+Measured with a fake `subprocess` in `tests/test_hot_path_cost.py`, so
+these are counted, not estimated.
+
+| what | before | after |
+|---|---|---|
+| unmute one card (2 controls) | 9 spawns | 9 spawns (first time) |
+| rest of the six-card sweep | 45 spawns | 45 spawns (first time) |
+| the next four sweeps, as `open_capture` did them per selection | **216 spawns** | **0** |
+| `systemctl start pipewire` per capture open | 1 spawn each | 1 per 120 s |
+| `_make_default` per spoken sentence | 3 pactl spawns | 3 per 300 s per target |
+| `open_arecord` on a card that never opens | up to **60** arecord spawns + 60 × 0.3 s | remembered winner tried first |
+| `sess.get_inputs()` during speech | **~31 ORT round trips/second** | 1 per session |
+
+## The Silero one is the most egregious
+
+`vad_speech_prob()` contained:
+
+```python
+names = {i.name for i in sess.get_inputs()}
+```
+
+A VAD frame is 512 samples at 16 kHz — 32 ms. So while anybody was
+speaking, that line crossed into the ONNX Runtime C API, allocated a
+`NodeArg` per input and built a fresh set about thirty-one times a
+second, forever, to answer a question fixed for the life of a loaded
+session. 120 frames (~4 s of speech) went from 120 metadata round trips
+to 1.
+
+It is cached against the **session object**, not merely stored: a
+re-download or a different Silero build can have different input names,
+and feeding a new session the old one's names would be a real bug
+wearing an optimisation's clothes. The test swaps the model mid-run.
+
+## What is deliberately NOT cached
+
+Caching is for the happy path. These are all somebody waiting for an
+answer about the hardware as it is *now*, and a cached skip would be a
+regression:
+
+- `_apply_capture_level()` — pushes a **new** level to the hardware. A
+  skip means the level silently never arrives, which is exactly the bug
+  `_max_capture_by_numid`'s docstring already records happening once,
+  when a hardcoded 100 % overwrote the 70 % the caller had just set.
+- `force_sink()` — a person just tapped that speaker.
+- `mic_report()` — a person tapped the diagnostic.
+- `full_mic_test()` — a person is watching it test each device.
+
+And when **not one** capture route opens, the service-kick and mixer
+caches are dropped so the retry pays in full. A dead `pipewire-pulse` is
+one of the few things that causes that, and skipping the restart because
+a healthy run skipped it minutes ago would be the worst possible moment
+to economise.
+
+Every window is finite and env-overridable (`MIXER_REDO_AFTER`,
+`SERVICE_KICK_AFTER`, `DEFAULT_REAPPLY_AFTER`), because these are
+*system* settings — somebody can move a slider in the desktop mixer, and
+a station that never reasserted itself would go quiet with no way back
+short of a restart. Hot-plug clears the mixer and arecord caches at
+once, since a card **number** can be reused by different hardware across
+a replug.
+
+## Removed: a by-name mic picker that never worked
+
+Five pieces existed — a `mic_device` settings key, a setter, a device
+lister, a by-name PortAudio opener, and a `_mic_pref()` stub — and
+**nothing ever read the key**. The picker did nothing at all. It is
+superseded by `force_card()`, which selects by ALSA card number, is
+wired to the Settings UI, is tested, and keeps working when a device
+reports a different name.
+
+A settings key that looks live and is not is worse than no key: anyone
+reading the config would reasonably conclude the microphone could be
+chosen there.
+
+## Dead code found and deliberately LEFT
+
+About 220 unreachable lines, verified by reference count with no dynamic
+dispatch anywhere that could reach them:
+
+| lines | where |
+|---|---|
+| 41 | `DoseApp._bt_action` |
+| 35 | `DoseVoice.mixer_summary` |
+| 27 | `DoseApp._pil_bar_chart` |
+| 23 | `DoseVoice._engage_bt_mic_pw` |
+| 20 | `DoseApp._inc_draft_doses` / `_dec_draft_doses` / `_adj_draft_dose` / `_toggle_draft_day` |
+| 13 | `DoseApp._pil_checkmark` |
+| 7 | `DoseApp._meter_rescan` |
+| 7 | `DoseVoice.is_pi` |
+
+It costs nothing at runtime, some of it looks like work in progress, and
+deleting a feature somebody is mid-way through building is not an
+optimisation. **Ryan's call, not mine.**
+
+## The real structural problem, NOT fixed
+
+`DoseVoice._run` is **1218 lines**, with `open_capture` (209),
+`open_pipe_cmd` (164), `ingest` (156), `route_floor`, `close_capture`
+and the rest as nested closures inside it. That is why every fix this
+week involved hunting line numbers, and why a 360 KB module exists at
+all.
+
+Splitting it is the right change and it is not being made blind. It
+touches the live audio engine, the Pi is off the network, and "it should
+work" is exactly what this audit was told not to accept. It needs a
+device to soak on.
+
+## Latency, where it actually goes
+
+Endpointing is fine (0.49–0.57 s). The variance is all STT: 0.12 s at
+best, 17.26 s at worst, on local `tiny` models. No amount of spawn
+trimming fixes that — free-tier cloud STT is the path, and it is written,
+tested, and waiting on a credential only Ryan can place.

@@ -3131,11 +3131,6 @@ class DoseVoice:
             pass
         return summary, report
 
-    def _mic_pref(self):
-        # Selection is fully automatic now — whatever is physically
-        # plugged in wins; stale saved choices are ignored.
-        return "auto"
-
     def speaker_test(self):
         """Play a short spoken line on the current speaker. Returns
         the playback path used, or False if nothing could play."""
