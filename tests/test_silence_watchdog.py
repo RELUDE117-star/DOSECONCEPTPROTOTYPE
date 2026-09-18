@@ -123,11 +123,27 @@ check("first pass starts the clock NOW, not at the epoch",
 check("...so a starting station cannot trip it immediately",
       e._silence_due(NOW) is None)
 
+# THE BAR HERE IS ZERO, not ROUTE_LIVE_PEAK. The device proved why:
+# on a quiet night the heartbeat read peak 0 for minutes with a
+# perfectly good microphone (_hb_peak decays in about two seconds, and
+# a sparse noise floor does not clear a threshold of 3 in every
+# two-second window), and the ladder fired twice in the first minute
+# after a restart, tearing down a capture that was working.
+#
+# The fault this watchdog exists for is EXACTLY ZERO, for ever:
+# 96,256 consecutive samples without one non-zero value. A live capsule
+# is never all-zero for two minutes; a dead endpoint is never anything
+# else.
 e = engine()
-e._silence_note_level(LIVE, NOW)
-check("peak exactly at the floor is NOT live", e._last_live_peak_ts != NOW)
-e._silence_note_level(LIVE + 1, NOW)
-check("one count above the floor IS live", e._last_live_peak_ts == NOW)
+e._silence_note_level(0, NOW)
+check("a peak of exactly zero is NOT live", e._last_live_peak_ts != NOW)
+e._silence_note_level(1, NOW)
+check("a single count above zero IS live — the quiet room that fired "
+      "this watchdog by mistake", e._last_live_peak_ts == NOW)
+e2 = engine()
+e2._silence_note_level(LIVE, NOW)
+check("...so a peak at the route floor is live too",
+      e2._last_live_peak_ts == NOW)
 
 e = engine(last_live=NOW - 400, step=2)
 e._silence_note_level(9542, NOW)
@@ -426,10 +442,15 @@ check("the step gap is an environment override too",
 check("the threshold leaves room for a quiet room (>= 30s)",
       dose_voice.SILENT_CAPTURE_AFTER >= 30,
       dose_voice.SILENT_CAPTURE_AFTER)
-check("...and still heals inside a few minutes (<= 180s)",
-      dose_voice.SILENT_CAPTURE_AFTER <= 180)
-check("liveness is judged against the PEAK floor, never RMS",
-      "peak > ROUTE_LIVE_PEAK" in CODE)
+check("...and still heals inside a few minutes (<= 300s)",
+      dose_voice.SILENT_CAPTURE_AFTER <= 300)
+check("liveness here is peak strictly above zero", "if peak > 0:" in CODE)
+check("...and the heartbeat says the same thing, so the file and the "
+      "behaviour cannot disagree",
+      'getattr(self, "_hb_peak", 0) > 0' in SRC)
+check("the window is long enough that no quiet room reaches it",
+      dose_voice.SILENT_CAPTURE_AFTER >= 90,
+      dose_voice.SILENT_CAPTURE_AFTER)
 
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:

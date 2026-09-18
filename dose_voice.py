@@ -441,7 +441,7 @@ CAPTURE_REOPEN_MAX_GAP = float(
 # Sixty seconds is long enough that no ordinary quiet can trip it and
 # short enough that the station heals itself well inside a conversation.
 SILENT_CAPTURE_AFTER = float(
-    os.environ.get("DOSE_SILENT_CAPTURE_AFTER", "60"))
+    os.environ.get("DOSE_SILENT_CAPTURE_AFTER", "120"))
 # Minimum gap between rungs of the recovery ladder. Each rung costs a
 # device reopen at most; giving the previous one time to prove itself
 # matters more than climbing fast, and a mic that has just been reopened
@@ -3444,7 +3444,7 @@ class DoseVoice:
                 # about the DEVICE; this line is about the SIGNAL.
                 "signal:         %s" % (
                     "live"
-                    if getattr(self, "_hb_peak", 0) > ROUTE_LIVE_PEAK
+                    if getattr(self, "_hb_peak", 0) > 0
                     else "SILENT for %.0fs (acts at %.0fs)" % (
                         now - (getattr(self, "_last_live_peak_ts", 0)
                                or now),
@@ -4224,7 +4224,27 @@ class DoseVoice:
         maintains, so it costs one comparison and never touches the
         audio path."""
         now = time.time() if now is None else now
-        if peak > ROUTE_LIVE_PEAK:
+        # STRICTLY ABOVE ZERO, not above ROUTE_LIVE_PEAK.
+        #
+        # ROUTE_LIVE_PEAK (3) is the right bar for CHOOSING a route:
+        # there, three seconds of audio are measured at once and a real
+        # capsule gives 29-107 while a dead endpoint gives 0.
+        #
+        # It is the wrong bar here, and the device said so. On a quiet
+        # night the heartbeat read peak 0 for minute after minute with
+        # a perfectly good microphone, because _hb_peak decays within
+        # about two seconds and a sparse noise floor does not clear a
+        # threshold of 3 in every two-second window. The ladder fired
+        # twice in the first minute after a restart, tearing down a
+        # capture that was working.
+        #
+        # The fault this watchdog exists for is not "quiet". It is
+        # EXACTLY ZERO, for ever: 96,256 consecutive samples without
+        # one non-zero value, because ALSA had averaged a two-channel
+        # capsule into silence. A live capsule is never all-zero for
+        # two minutes; a dead endpoint is never anything else. That is
+        # the discriminator, and it has no false positives.
+        if peak > 0:
             self._last_live_peak_ts = now
             # A live signal is proof the current rung works. Clear the
             # ladder so a later, unrelated fault starts from the cheap
