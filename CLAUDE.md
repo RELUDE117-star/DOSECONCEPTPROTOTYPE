@@ -1065,6 +1065,65 @@ but raising thread counts on this board is exactly what broke the
 recorder once already, so it gets measured on the device with the
 reopen counter watched, not reasoned about here.
 
+### The synthesis call itself — measured, not yet explained
+
+Split `_synth` into its three parts and the device is unambiguous:
+
+```
+synth: {'worker': 0.0, 'load': 0.0, 'synth': 2.468, 'chars': 32}
+synth: {'worker': 0.0, 'load': 0.0, 'synth': 2.183, 'chars': 31}
+synth: {'worker': 0.0, 'load': 0.0, 'synth': 3.439, 'chars': 38}
+```
+
+Not the out-of-process worker (0.0), not resolving the voice (0.0).
+`voice.synthesize_wav()` itself, **2.2–3.4 s for thirty-odd
+characters**, where the identical sentence measured **0.72 s**
+standalone in the same interpreter on the same board.
+
+**Ruled out, with numbers. Do not re-derive these:**
+
+| | |
+|---|---|
+| the cache lookup | 0.0002 s |
+| the file write | 0.0002 s |
+| `to_speech()` | 0.000 s |
+| the chunker | first chunks measure 20–39 chars |
+| the ONNX thread cap (2 vs 4) | 0.18 s |
+| contention, app idle vs stopped | 15% |
+| the background chunk renderer | reordered; no change |
+| Vosk decoding during the reply | gated; no change, and the room was 4.5% signal that run against 54% the run before |
+
+That is six explanations, all mine, all wrong. What is left is the
+difference between the app's process and a fresh one — the app's Piper
+session is built by `_load_piper()` and capped by
+`_cap_onnx_threads()`; the bench built its own. **Compare those two
+sessions' options directly before guessing a seventh time.**
+
+### The reply cache: 32 clips on disk, and no hit ever observed
+
+`voice/cache` holds 32 wavs, 4.7 MB, and the voice stamp matches, so
+`_purge_foreign_cache()` is NOT wiping it. Yet every render logs
+`hit: 0`, including replies identical across three runs. A hit costs
+0.0002 s against 2.4 s, so this is the single biggest available win
+and it is unexplained.
+
+Note the trap: the cache is `voice/cache`. An earlier job looked at
+`voice/tts`, found nothing, and "confirmed" the cache was empty — a
+directory that does not exist reads exactly like an empty one.
+
+### Two threads, one attribute — THREE TIMES IN ONE DAY
+
+1. `_last_engine`: the speculative transcription overwrote the Mac's
+   answer. The Mac answered three turns and was credited with one.
+2. `_t_tts`: the background chunk renderer overwrote the first chunk's
+   timings. One turn logged `speak=0.67` beside `synth=3.02`.
+3. `_t_tts` again, in the diagnostic added to catch (1).
+
+All three are the same shape: a method that records onto `self`,
+called concurrently from two threads, last writer wins. The fix is
+`threading.local()` and `_recording()`, not a flag on `self` — a flag
+on `self` is the same bug with more steps.
+
 ### Still open
 
 - **The acceptance harness reported "NO TURN RECORDED in 45s" for all
