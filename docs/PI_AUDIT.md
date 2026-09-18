@@ -316,3 +316,125 @@ See the commit that accompanies this document.
   working capture.
 - Install `audioop-lts` for exact audio math.
 - WER metric and real-audio regression tests.
+
+---
+
+# SESSION 2 — what was actually wrong, and what was done (2026-09-17)
+
+Everything here was measured on the device over SSH, through a
+queue-runner on the Mac (the cloud session has no LAN; see "Access
+reality" above).
+
+## The fault chain, in order
+
+1. **arecord exits on an ALSA XRUN.** An XRUN is an overrun — it happens
+   whenever something takes the CPU away from the capture for long
+   enough.
+2. **The reader thread just `break`s and returns.** The recorder was
+   never reaped (hence the recurring `[arecord] <defunct>`), its stdout
+   was never closed, and nothing told the engine the capture had died.
+3. **The kernel is left with a PCM in `state: SETUP` owned by a process
+   that no longer exists.** Unopenable by anyone, including a fresh
+   `arecord` from another account (`Device or resource busy`).
+4. **Permanent deafness from one transient overrun**, until a restart.
+
+Measured at its worst: `hw_ptr` frozen at 40054 for 23 minutes —
+**0.83 seconds of audio in 23 minutes** — while one thread burned
+1,072 s of CPU spinning against the dead device.
+
+## What caused the XRUNs in the first place
+
+`py-spy` on the live process, once the mic was streaming again:
+
+```
+Thread (active): "tts-prewarm"
+    run (onnxruntime/.../onnxruntime_inference_collection.py)
+    phoneme_ids_to_audio (piper/voice.py)
+    render_to_cache (dose_voice.py)
+```
+
+Piper's ONNX session plus three native ORT workers, ~100% each:
+**392–398% of one core at 73.5 °C**, at the exact moment the capture
+stream was coming up. `INFER_THREADS` was already 2 and
+`OMP_NUM_THREADS` was exported to match — neither mattered, because a
+stock onnxruntime wheel is not built with OpenMP and the only lever is
+`SessionOptions.intra_op_num_threads`, which piper leaves at 0.
+
+## Fixes, in the order they were made
+
+| Fix | What it does |
+|---|---|
+| `close_capture()` TERM→reap→close | One route to a stranded PCM. SIGKILL meant arecord never released the device. |
+| `_max_capture_by_numid()` honours `_capture_level` | It was csetting a hardcoded `100%` over the 70% written one line earlier. Device was at `8191 [100%] [31.99dB]`; now `5734 [70%] [22.39dB]`. |
+| Class-level defaults on `DoseVoice` | PortAudio's callback raced `__init__`; `AttributeError: '_muted'` was swallowed by cffi and **silently dropped audio blocks**. |
+| Rate probe asks the device first | Probed 16 kHz first; the AIRHUG supports **only 48 kHz stereo**, so every launch produced dozens of failed opens — and a failed open is what strands the PCM. |
+| `_cap_onnx_threads()` | Caps Piper's ORT session. **392% → 111% of one core.** |
+| Prewarm waits for audio to flow | Stops the TTS cache warm-up racing the capture at startup. |
+| Playback reaping | `[aplay] <defunct>`, same bug at the other end of the pipeline. |
+| **Reader teardown + `_force_reopen`** | **The one that makes it hold.** A dead recorder now reopens instead of wedging. |
+| `DOSE.sh` survives no TTY | `clear` fails without `TERM`, and the `ERR` trap turned that into `exit 1` — the systemd unit restart-looped on it. |
+| Updater syncs the whole branch | It shipped six hardcoded files; `voice_diagnostics.py`, `dose_cloud_stt.py` and all of `tools/` never reached a device. |
+| `test_no_private_keys.py` | Had failed on **every run since it was added** — it matched its own pattern list. Now 24/24 and stricter. |
+
+## Verified after the fixes (4-minute stress)
+
+```
+RUNNING=16  XRUN=0  SETUP=0        <- the terminal wedge is gone
+capture level 5734 [70%] [22.39dB]
+CPU ~95-111% of one core, 56 C, throttled=0x0
+```
+
+## Startup / boot
+
+- **There were TWO autostart entries** both launching the app
+  (`dose.desktop` → `DOSE.sh`, `dose-home-station.desktop` →
+  `launch.sh`). Two instances competing for one USB mic. The duplicate
+  is retired (renamed, not deleted).
+- A systemd user unit is written and installed
+  (`tools/dose-home-station.service` + `install_service.sh`) but left
+  **disabled**: it started cleanly once `DOSE.sh` was fixed, but
+  `DOSE.sh` runs an apt preflight taking **~80 s on every launch**,
+  which needs sorting before a restart-on-crash unit is safe to enable.
+
+## CORRECTIONS to earlier claims in this document
+
+- **audioop IS available to the app.** `python3 -c "import audioop"`
+  fails for the dev account, but the running app lists
+  `audioop._audioop` among its loaded extension modules — the backport
+  is in the kiosk user's site-packages. The 3.0%-of-a-core figure is
+  what the pure-Python fallback *would* cost, not what is running.
+  The method that produced the wrong answer — measuring a second
+  account's interpreter — is the part worth not repeating.
+- **The device HAS been calibrated**: `{"floor": 7, "voice": 4016,
+  "gate": 60.0, "gain": 1.0}`. "calibrated NO" was stale.
+- **The microphone was declared fixed too early.** The first teardown
+  fix was real but partial; the device wedged again within minutes once
+  an XRUN occurred. Only the reader-teardown fix makes it hold.
+
+## Still open
+
+- **Capture cycles rather than staying open**: over 4 minutes, RUNNING
+  16 samples vs no-stream 32. Not wedged, but not continuously
+  listening either. Next thing to chase.
+- **A capture probe can hang**: py-spy caught the voice thread blocked
+  in `sounddevice.stop()` inside `_probe_device` after a USB
+  re-enumeration. Needs a timeout/watchdog.
+- **QR scanning costs 84% of a core continuously**
+  (`pyzbar.decode` in `_camera_loop`), competing with audio. Throttling
+  it while a turn is in progress is the obvious win.
+- **`DOSE.sh` apt preflight ~80 s every launch.**
+- One `[aplay] <defunct>` still appears at startup from a path not yet
+  identified.
+
+## Latency, from the device's own `turns.jsonl`
+
+```
+"fast": 17.26, "speak": 1.41, "total": 25.19   <- worst observed
+"fast": 0.12,  "speak": 1.90, "total": 2.52    <- best observed
+engine "moonshine", model "tiny"
+```
+
+Endpointing is fine (0.49–0.57 s). The variance is all in STT. Local
+tiny models on a Pi 4 will not reach conversational quality; free-tier
+cloud STT (`dose_cloud_stt.py`, already written, off without a
+credential) is the path.
