@@ -901,6 +901,115 @@ answer in under two seconds.
   happened".** Three jobs went into inferring the reopen loop from
   external symptoms while that file held the answer. **Read it first.**
 
+## THE MAC IS THE RECOGNISER NOW — verified 2026-09-18
+
+Four real turns through the running station, after pairing:
+
+```
+13:18:50  'What time is it?'                fast=0.84  total=3.82  engine=mac
+13:19:39  'Did I take my aspirin today?'    fast=0.86  total=3.69  engine=mac
+13:20:32  'What do I take today?'           fast=0.93  total=4.70  engine=mac
+13:21:28  'How many pills do I have left?'  fast=0.83  total=5.96  engine=mac
+```
+
+Four for four, every word correct, with punctuation the Pi's `tiny.en`
+does not produce. The Mac's own log for the same turns:
+
+```
+stt 2.50s of audio in 0.68s -> 'What time is it?'
+stt 1.80s of audio in 0.67s -> 'Did I take my aspirin today?'
+stt 1.36s of audio in 0.67s -> 'What do I take today?'
+stt 1.74s of audio in 0.68s -> 'How many pills do I have left?'
+```
+
+**0.83 s against 4.34–12.99 s local.** The same phrase, `how many pills
+do i have left`, cost `fast=12.99` on the Pi an hour earlier.
+
+Capture through all of it: `blocks/sec 46.9`, `capture reopens: 2`,
+service restarts 0, 49.1 °C, `throttled 0x0`.
+
+### Four things had to be true, and three of them were not
+
+1. **The Pi has to be paired.** `dose_server.conf` in APP_DIR, 0600,
+   address on line one and token on line two. Written by the panel's
+   "Pair with the station", or by hand. **Delete it and the station
+   goes back to local. That is the off switch.**
+2. **The live-transcript shortcut must not answer first.** It answered
+   the common phrases before any recogniser ran, so a paired, healthy
+   Mac had a hit counter of zero. It is now skipped when the Mac is
+   available (`_remote_ready()`).
+3. **`finish()` must know the Mac exists.** It returns the local
+   speculation whenever it is not "going cloud" — a test that only ever
+   asked `_cloud_enabled() and _is_online()`. With no cloud credential
+   that is always False, so the speculation was returned every turn and
+   `_better_transcribe`, the only place the Mac is asked, was never
+   reached. `going_remote` includes `_remote_ready()` now.
+4. **The log has to name the right engine.** `_better_transcribe`
+   records the engine on `self`, and the speculative pass runs the same
+   method on another thread. Whichever finished last wrote the record,
+   so the Mac answered three turns and was credited with one. Which
+   pass is running is now `threading.local()`; a flag on `self` would
+   be read by whichever pass asked last, which is the same bug wearing
+   a hat.
+
+### The fallback policy: three strikes, not one
+
+`dose_remote_stt.py` used to write the Mac off for a flat 120 s after
+ONE failure — so a laptop waking from sleep cost the next twenty turns
+silently. Now:
+
+- **three CONSECUTIVE refusals** before backing off at all
+- back-off **10 s → 30 s → 90 s → 180 s**, and any success clears it
+- a **timeout is not a refusal**: the Mac answered the door and is
+  busy, so it does not count toward giving up
+- a `/health` probe runs from the heartbeat thread while idle, so a Mac
+  that comes back is used again within seconds, and it warms the model
+- the first request after a cold start gets 12 s, not 6
+
+`tests/test_remote_priority.py` (55 checks) pins all of it.
+
+### Read the heartbeat, not me
+
+```
+Mac speech server: MAC   turns answered by Mac: 4   refused: 0
+  slow: 0   last round trip: 41 ms
+```
+
+That line exists because Ryan asked whether the models were running on
+the Mac and the only honest answer was "I would have to go and look".
+
+### The Mac app
+
+`/Applications/DOSE PI CONNECTOR.app`. LSUIElement — **no dock icon and
+no window**; it starts a panel on `127.0.0.1:8766` and opens it in the
+browser. Traps, all of which have now bitten:
+
+- **It used to fail silently.** The launcher was one `exec` of a venv
+  python; if that venv was missing the process just vanished. It now
+  falls back to the system python (the panel is standard library only),
+  logs to `~/.dose-server/launch.log`, and puts failures on screen with
+  `osascript`.
+- **Clicking it when it is already running** bound a taken port and
+  exited, invisibly. It now opens the browser at the running panel.
+- **"Running: no" while the server was serving.** The panel asked its
+  own child-process handle, so a server started by an EARLIER panel was
+  invisible. It asks the port now.
+- The panel and server are **copied into the bundle**, so moving the
+  checkout cannot break the app.
+
+### Still open
+
+- **The acceptance harness reported "NO TURN RECORDED in 45s" for all
+  four turns while those four turns were being written.** The rows land
+  about 50 s apart, which is suspiciously close to its own timeout.
+  Either endpointing is slow in this room or the harness's detection is
+  wrong — **do not guess; measure the `endpoint` field.** The room is
+  loud: `blocks with signal: 6657 of 16041` (41%), against a calibration
+  profile recorded at `floor 7`.
+- Turn totals are 3.7–6.0 s against a 2 s goal. STT is no longer the
+  cost (0.84 s); whatever remains is endpointing, the language layer and
+  time-to-first-sound, and none of it has been broken down yet.
+
 ## Known limitations / TODO
 - `arecord -D default` fails with `Host is down` — the PipeWire ALSA plugin is
   not serving this user. Not blocking (the pinned `plughw:5,0` route works),
