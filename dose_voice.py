@@ -4899,8 +4899,76 @@ class DoseVoice:
             pass
 
     # ── audio output ──────────────────────────────────────────────────
+    @staticmethod
+    def _cap_onnx_threads(n=INFER_THREADS):
+        """Stop ONNX Runtime taking the whole board for TTS.
+
+        MEASURED ON THE DEVICE: with the microphone finally streaming,
+        the app sat at 392-398% CPU — all four cores — at 73.5 C, load
+        4.97. py-spy found the reason:
+
+            Thread (active): "tts-prewarm"
+                run (onnxruntime/.../onnxruntime_inference_collection.py)
+                phoneme_ids_to_audio (piper/voice.py)
+                synthesize (piper/voice.py)
+                render_to_cache (dose_voice.py)
+
+        Piper's ONNX session, plus three native ORT worker threads at
+        ~100% each. The prewarm renders every fixed line at startup, so
+        this lands squarely on top of launch, when the capture stream is
+        also coming up. The capture then cannot be drained in time and
+        the PCM reports XRUN — which is dropped audio, which is
+        misrecognition. A TTS cache warm-up must never be able to starve
+        the microphone.
+
+        INFER_THREADS is already 2, and OMP_NUM_THREADS and friends are
+        already exported to match (see the block near the top of this
+        file). It made no difference, because a stock onnxruntime wheel
+        is NOT built with OpenMP: it uses its own thread pool, sized to
+        the core count, and the ONLY lever is
+        SessionOptions.intra_op_num_threads. piper always passes a
+        default SessionOptions, whose intra_op_num_threads is 0 ("pick
+        for me"), so the env vars were never going to be read.
+
+        So we wrap InferenceSession and fill in that 0 before the
+        session is built. An explicit non-zero value set by any caller
+        is left alone — this only supplies a number where ORT would
+        otherwise have helped itself to the machine."""
+        try:
+            import onnxruntime as ort
+        except Exception:
+            return
+        if getattr(ort, "_dose_thread_cap", 0):
+            return
+        orig = ort.InferenceSession
+
+        def _capped(*args, **kwargs):
+            try:
+                so = kwargs.get("sess_options")
+                if so is None and len(args) > 1 and hasattr(
+                        args[1], "intra_op_num_threads"):
+                    so = args[1]
+                if so is None:
+                    so = ort.SessionOptions()
+                    kwargs["sess_options"] = so
+                # 0 means "ORT decides", which on a 4-core Pi means all
+                # of them. Only fill in a value nobody chose.
+                if getattr(so, "intra_op_num_threads", 0) == 0:
+                    so.intra_op_num_threads = n
+                if getattr(so, "inter_op_num_threads", 0) == 0:
+                    so.inter_op_num_threads = 1
+            except Exception:
+                pass          # never block synthesis over a tuning knob
+            return orig(*args, **kwargs)
+
+        ort.InferenceSession = _capped
+        ort._dose_thread_cap = n
+
     def _load_piper(self):
         if self._piper_voice is None:
+            # Cap BEFORE piper builds its session — thread counts cannot
+            # be changed after an InferenceSession exists.
+            self._cap_onnx_threads()
             from piper import PiperVoice
             self._piper_voice = PiperVoice.load(self._piper_path)
         return self._piper_voice

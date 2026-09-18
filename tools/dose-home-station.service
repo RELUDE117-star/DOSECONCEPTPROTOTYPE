@@ -41,8 +41,20 @@ ExecStart=/bin/bash %h/dose-home-station/DOSE.sh
 Restart=always
 RestartSec=5
 
-# The kiosk display. Adjust if the session is ever not :0.
+# The kiosk display. This station runs a WAYLAND session
+# (loginctl: Type=wayland) with XWayland behind it, and the app's own
+# environment carries BOTH — DISPLAY=:0 and WAYLAND_DISPLAY=wayland-0.
+# Tkinter goes through XWayland, so DISPLAY is the one that matters, but
+# passing both means anything that prefers Wayland finds it too.
+# XDG_RUNTIME_DIR is supplied by systemd for a user unit.
 Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XAUTHORITY=%h/.Xauthority
+# DOSE.sh runs `clear`, which exits non-zero with no TERM and used to
+# trip the launcher's ERR trap the instant the service started. DOSE.sh
+# now tolerates that on its own; this is the belt to that braces, and
+# costs nothing.
+Environment=TERM=dumb
 
 # SIGTERM to the whole group, and give the app time to release the USB
 # audio device before anything harsher. A capture killed with SIGKILL does

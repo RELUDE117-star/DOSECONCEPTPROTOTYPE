@@ -8,9 +8,28 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$HOME/dose-home-station"
 RAW_URL="https://raw.githubusercontent.com/relude117-star/doseconceptprototype/claude/quirky-brown-vkHwi"
 
-trap 'echo ""; echo "Something went wrong (see above)."; echo "Press any key to close..."; read -n 1 -s; exit 1' ERR
+# NEVER BLOCK, AND NEVER DIE, WITHOUT A TERMINAL.
+#
+# This script is launched two ways: from a desktop icon with a terminal
+# attached, and from an autostart entry or a systemd unit with no tty at
+# all. The unguarded `read -n 1 -s` here would wait forever for a
+# keypress nobody is there to give, so it is only attempted when stdin
+# really is a terminal, and even then with a timeout.
+trap 'echo ""; echo "Something went wrong (see above)."; \
+      if [ -t 0 ]; then echo "Press any key to close..."; \
+      read -n 1 -s -t 30; fi; exit 1' ERR
 
-clear
+# `clear` needs TERM. Under systemd there is no TERM and no tty, so it
+# exits non-zero — which, with the ERR trap above, killed the whole
+# launcher before it did anything. The service log said exactly this,
+# five times in a row as systemd retried:
+#
+#   TERM environment variable not set.
+#   Something went wrong (see above).
+#
+# Clearing a screen nobody is looking at is not worth failing a launch
+# over, so this is now advisory.
+clear 2>/dev/null || true
 echo "  DOSE Home Station"
 echo ""
 
