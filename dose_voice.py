@@ -2196,6 +2196,70 @@ class DoseVoice:
             return "", "cloud", self.CLOUD_BUDGET_S
         return box["text"], box["eng"], box["secs"]
 
+    # Intents that may be answered straight from the LIVE transcript.
+    #
+    # Every one of these is a question — the station looks something up
+    # and says it. Nothing here moves a motor, dispenses anything,
+    # changes stored data or handles a person in trouble. Those keep
+    # the full recogniser and its second opinion, however long that
+    # takes, because being fast about them is worth nothing and being
+    # wrong about them is worth a great deal.
+    QUICK_INTENTS = frozenset((
+        "time", "schedule", "pills_left", "taken_today", "next_dose",
+        "adherence", "did_take", "greeting", "thanks", "repeat", "help",
+    ))
+
+    def _quick_answer(self, live_text):
+        """Answer from Vosk's transcript when it already says enough.
+
+        THE POINT. Whisper costs about 4 s on this board and cannot be
+        made much faster — it pads every utterance to a thirty-second
+        window, so a one-word question costs what a sentence does. But
+        the live recogniser has already produced a transcript by the
+        time the person stops speaking, at no extra cost, and on this
+        station it is often exactly right:
+
+            vosk "what time is it"                -> time
+            vosk "how many pills to i have left"  -> pills_left
+            vosk "did i take my aspirin today"    -> did_take, Aspirin
+
+        When that transcript ALREADY parses into a complete intent,
+        waiting four more seconds to be told the same thing is waiting
+        for nothing.
+
+        The gate is the language layer's own judgement, not a
+        confidence number I invented: Intent.complete means "acting on
+        this now cannot be premature" — it is False for an unknown
+        intent and False for one that needs a medication it has not
+        matched. On the live transcripts this device logged, that is
+        precisely the line between the ones that were right and the
+        ones that were garbage:
+
+            "what to i take taken"     -> unknown, complete False
+            "a dose for time is it"    -> unknown, complete False
+            "how many pills two i tablet" -> unknown, complete False
+
+        So a miss costs nothing: the turn falls through to the full
+        recogniser exactly as before. A hit costs the four seconds.
+        """
+        text = (live_text or "").strip()
+        if not text or len(text.split()) < 2:
+            return None
+        if _nlu_mod is None:
+            return None
+        try:
+            if _nlu_mod.looks_hallucinated(text):
+                return None
+            intent = _nlu_mod.parse(text, self._med_names())
+            if intent.name not in self.QUICK_INTENTS:
+                return None
+            if not intent.complete:
+                return None
+            self._quick_hits = getattr(self, "_quick_hits", 0) + 1
+            return text
+        except Exception:
+            return None
+
     def _cap_audio(self, buf):
         """Never hand the recogniser more audio than a turn can afford.
 
@@ -6794,6 +6858,19 @@ class DoseVoice:
             mode), reuse the local speculation if no new speech arrived
             since it started: that is the latency win, and it is only
             safe to claim when we were not going to call the cloud."""
+            # ANSWER NOW IF THE LIVE TRANSCRIPT ALREADY SAYS ENOUGH.
+            # See _quick_answer(). This is the difference between a
+            # station that replies in about a second and one that
+            # replies in seven, on the commands people actually use.
+            quick = self._quick_answer(hint)
+            if quick:
+                self._t_fast = 0.0
+                self._t_slow = 0.0
+                self._raw_fast = ""
+                self._raw_slow = ""
+                self._last_engine = "vosk (live)"
+                self._stt_note = "answered from the live transcript"
+                return quick
             going_cloud = self._cloud_enabled() and self._is_online()
             if not going_cloud and spec \
                     and spec.get("voice_ts") == self._last_voice_ts:
@@ -6902,6 +6979,15 @@ class DoseVoice:
                 text = " ".join(final_parts).strip()
                 self._turn_stopped_at = lv
                 self._t_endpoint = time.time() - lv
+                # PUT IT ON THE SCREEN NOW. The person has stopped
+                # speaking and we are about to spend seconds deciding
+                # what they said. Showing the live transcript at this
+                # moment is what tells them they were heard — waiting
+                # until the answer is ready means several seconds of a
+                # screen that says nothing, which reads as "it missed
+                # me" and makes people repeat themselves.
+                if text:
+                    self._set_ui_state("listening", user_text=text)
                 # SECONDS FROM BYTES, NOT FROM BLOCK COUNT.
                 #
                 # turns.jsonl reported a 70.9-second utterance on a
@@ -8302,6 +8388,7 @@ class DoseVoice:
                 "stt_note": getattr(self, "_stt_note", ""),
                 "spec_hit": getattr(self, "_spec_hits", 0),
                 "spec_miss": getattr(self, "_spec_misses", 0),
+                "quick": getattr(self, "_quick_hits", 0),
                 "warmed": bool(getattr(self, "_warmed", False)),
                 "esc_loaded": getattr(self, "_whisper", None) is not None,
             })
