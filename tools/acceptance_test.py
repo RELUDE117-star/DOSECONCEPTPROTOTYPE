@@ -393,7 +393,18 @@ def live_turns(items, app_dir, pad=0.6):
             rows.append({"phrase": phrase, "live": False})
             continue
         time.sleep(pad)
-        for cmd in (["pw-play", src], ["paplay", src], ["aplay", "-q", src]):
+        # THE SPEAKER, ADDRESSED DIRECTLY, FIRST — the same fix
+        # play_and_record got, which this function did not. Every route
+        # here went to the sound server's default sink, and on this
+        # board `aplay` with no -D fails outright ("Host is down") while
+        # a success into an unplugged HDMI port is indistinguishable
+        # from a working one.
+        _dev = playback_card()
+        _routes = []
+        if _dev is not None:
+            _routes.append(["aplay", "-q", "-D", "plughw:%d,0" % _dev, src])
+        _routes += [["pw-play", src], ["paplay", src], ["aplay", "-q", src]]
+        for cmd in _routes:
             try:
                 if subprocess.run(cmd, capture_output=True,
                                   timeout=30).returncode == 0:
