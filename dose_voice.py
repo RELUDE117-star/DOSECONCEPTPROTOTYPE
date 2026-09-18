@@ -563,6 +563,14 @@ ROUTE_FLOOR_PATIENCE = float(os.environ.get("DOSE_ROUTE_FLOOR_PATIENCE",
 # reader thread's budget — see the downmix in the capture reader.
 CHANNEL_RECHECK = int(os.environ.get("DOSE_CHANNEL_RECHECK", "47"))
 
+# How much accumulated peak a channel needs before the downmix believes
+# it and stops summing both. Below this the choice is not "left" — it
+# is "we do not know yet", and the two are not the same: `>=` resolves
+# a tie to left, and on a capsule wired to the right that is silence
+# forever. One count is no evidence; a capsule that has been heard sits
+# orders of magnitude above it.
+CHANNEL_DECIDED = float(os.environ.get("DOSE_CHANNEL_DECIDED", "1.0"))
+
 # How much audio ALSA holds for us before it gives up, in microseconds.
 # The default is about half a second, and a decode on this board takes
 # four — so half a second of a busy machine costs the microphone. See
@@ -5955,7 +5963,8 @@ class DoseVoice:
                                         lp, getattr(self, "_ch_l", 0) * 0.9)
                                     self._ch_r = max(
                                         rp, getattr(self, "_ch_r", 0) * 0.9)
-                                    if self._ch_l == 0 and self._ch_r == 0:
+                                    if max(self._ch_l,
+                                           self._ch_r) < CHANNEL_DECIDED:
                                         data = audioop.tomono(data, 2, 1, 1)
                                     else:
                                         data = (left
@@ -5994,8 +6003,23 @@ class DoseVoice:
                                 # good. Summing is not the averaging that
                                 # caused the original fault: (1+0)/2
                                 # rounds to zero, 1+0 does not.
-                                elif (getattr(self, "_ch_l", 0) == 0
-                                      and getattr(self, "_ch_r", 0) == 0):
+                                # "UNDECIDED" MUST BE REACHABLE AGAIN.
+                                # The first version of this tested
+                                # `== 0`, and the running maxima decay
+                                # by multiplication: one sample of
+                                # value 1 leaves 0.042 thirty
+                                # re-checks later, which is not zero
+                                # and never will be. So a single
+                                # stray LSB latched the channel choice
+                                # for the life of the process — the
+                                # same permanence as the bug it
+                                # replaced, arrived at from the other
+                                # side. Below one count is no evidence
+                                # at all; a capsule that has actually
+                                # been heard sits far above it.
+                                elif max(getattr(self, "_ch_l", 0),
+                                         getattr(self, "_ch_r", 0)) \
+                                        < CHANNEL_DECIDED:
                                     data = audioop.tomono(data, 2, 1, 1)
                                 elif getattr(self, "_ch_l", 0) >= getattr(
                                         self, "_ch_r", 0):

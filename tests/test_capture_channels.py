@@ -209,14 +209,41 @@ print("\n── undecided means BOTH, never left by default ──────�
 # all of this, one layer further in.
 
 
-def choose(l_max, r_max):
+def choose(l_max, r_max, decided=dose_voice.CHANNEL_DECIDED):
     """The production rule between re-checks: 'SUM', 'L' or 'R'."""
-    if l_max == 0 and r_max == 0:
+    if max(l_max, r_max) < decided:
         return "SUM"
     return "L" if l_max >= r_max else "R"
 
 
 check("nothing proven yet sums the channels", choose(0, 0) == "SUM")
+
+# THE THRESHOLD IS NOT DECORATION. The first version of this tested
+# `== 0`, and the running maxima decay by multiplication: one sample of
+# value 1 leaves 0.042 after thirty re-checks, which is not zero and
+# never will be. A single stray LSB would have latched the channel
+# choice for the life of the process — the same permanence as the bug
+# it replaced, reached from the other side.
+decayed = 1.0
+for _ in range(30):
+    decayed = max(0.0, decayed * 0.9)
+check("a decayed maximum never actually reaches zero",
+      decayed != 0, decayed)
+check("...so an `== 0` test would latch forever after one sample",
+      (decayed == 0 and 0 == 0) is False)
+check("the threshold lets an undecided channel become undecided again",
+      choose(decayed, 0.0) == "SUM", decayed)
+check("a channel that has really been heard is NOT undecided",
+      choose(29.0, 0.0) == "L")
+check("the threshold is small enough that real signal always beats it",
+      dose_voice.CHANNEL_DECIDED <= 2.0, dose_voice.CHANNEL_DECIDED)
+check("...and large enough to ignore a single least-significant bit",
+      dose_voice.CHANNEL_DECIDED >= 0.5, dose_voice.CHANNEL_DECIDED)
+check("it is an environment override",
+      "DOSE_CHANNEL_DECIDED" in SRC)
+check("the production code uses the threshold, not an equality test",
+      "CHANNEL_DECIDED" in CODE
+      and 'self._ch_l == 0 and self._ch_r == 0' not in CODE)
 check("left proven takes left", choose(40, 0) == "L")
 check("right proven takes right", choose(0, 40) == "R")
 check("both proven takes the louder", choose(9, 40) == "R")
