@@ -330,6 +330,25 @@ WHISPER_MODELS = tuple(filter(None, os.environ.get(
 FAST_WHISPER_MODEL = os.environ.get("DOSE_FAST_WHISPER", "tiny.en")
 FAST_ENGINE_PIN = os.environ.get("DOSE_FAST_ENGINE", "").strip().lower()
 
+# ── HOW LONG A TURN IS ALLOWED TO SPEND BEING UNDERSTOOD ──────────────
+# Not a target — a CEILING, and one the station enforces rather than
+# hopes for. The device's own turns.jsonl recorded a 25.19 s turn made
+# of a 17.26 s fast pass with an escalation started on top of it,
+# because no stage asked what time it was before beginning.
+#
+# Six seconds is chosen against what the person does, not against what
+# the models want: past about five seconds of silence someone assumes
+# the machine did not hear them and says it again, which starts a new
+# turn and makes everything worse. Raise it on better hardware; the
+# escalation simply gets used more often.
+STT_TURN_BUDGET = float(os.environ.get("DOSE_STT_BUDGET", "6.0"))
+# base.en against tiny.en on identical audio. Used only to decide
+# whether the escalation FITS, never to time anything out, and it is
+# multiplied by this device's own freshly measured fast-pass time, so
+# the estimate tracks thermal throttling and load for free.
+ESCALATION_COST_RATIO = float(
+    os.environ.get("DOSE_ESCALATION_RATIO", "3.0"))
+
 # THE BENCHMARK the station scores itself against — the owner's targets,
 # in one place so the self-test and the audit report the same numbers.
 TARGET_ACCURACY = float(os.environ.get("DOSE_TARGET_ACCURACY", "99.5"))
@@ -2091,6 +2110,10 @@ class DoseVoice:
         self._raw_fast = ""
         self._raw_slow = ""
         self._raw_cloud = ""
+        # Cleared per turn, not per branch: a note left over from the
+        # previous turn attached to this one is a lie in the log, and
+        # the log is the only account of what happened out there.
+        self._stt_note = ""
 
         # 0) CLOUD FIRST when it is available and this is the real
         #    (non-speculative) pass.
@@ -2123,6 +2146,54 @@ class DoseVoice:
 
         # 2) Nothing we can act on — the stronger base.en model gets a
         #    turn on the same audio.
+        #
+        # ── BUT NOT AT ANY PRICE ─────────────────────────────────────
+        # Measured on the device, from its own turns.jsonl:
+        #
+        #     worst   "fast": 17.26   "speak": 1.41   "total": 25.19
+        #     best    "fast":  0.12   "speak": 1.90   "total":  2.52
+        #
+        # Endpointing accounts for 0.49-0.57 s of that. ALL the variance
+        # is transcription — and the worst turn is the fast model taking
+        # seventeen seconds and then the escalation being started ON TOP
+        # of it, because nothing anywhere asked what time it was.
+        #
+        # A better answer that arrives at twenty-five seconds is not a
+        # better answer. The person has repeated themselves, walked off,
+        # or tapped the logo again. So escalation now has to fit in what
+        # is left of the turn's budget.
+        #
+        # The cost is ESTIMATED FROM THIS DEVICE'S OWN MEASUREMENT, not
+        # from a constant: base.en is roughly ESCALATION_COST_RATIO times
+        # the fast model on the same audio, and self._t_fast is what the
+        # fast model just took on exactly this audio, on exactly this
+        # board, under exactly this load. A Pi under thermal throttling
+        # and a Pi that has just booted are different machines, and a
+        # hardcoded "escalation takes 4 s" is wrong on both.
+        #
+        # When it does not fit, step 3 below still runs and still hands
+        # back the best near-miss it has, which the phonetic matcher can
+        # work with. Skipping is recorded, because a station that never
+        # escalates is a station whose accuracy quietly fell.
+        elapsed = time.time() - t_start
+        left = STT_TURN_BUDGET - elapsed
+        est = max(0.2, self._t_fast * ESCALATION_COST_RATIO)
+        if left < est:
+            self._escalations_skipped = getattr(
+                self, "_escalations_skipped", 0) + 1
+            self._stt_note = ("escalation skipped: %.1fs used of %.1fs, "
+                              "base.en needs about %.1fs"
+                              % (elapsed, STT_TURN_BUDGET, est))
+            self._raw_slow = ""
+            self._t_slow = 0.0
+            self._last_engine = feng
+            # The fast answer, if there is one at all, beats silence and
+            # beats making the person wait for an answer they will not
+            # be there to hear.
+            if fast:
+                return fast
+            return vosk_text or ""
+        self._stt_note = ""
         t_wh = time.time()
         wh = self._whisper_transcribe(audio_bytes)
         self._raw_slow = wh or ""
@@ -6080,6 +6151,7 @@ class DoseVoice:
         self._turn_blocks = 0
         self._turn_peak = 0
         self._turn_snr = 0.0
+        self._t_spec_wait = 0.0
         deadline = time.time() + timeout
         buf = bytearray()
         heard = False
@@ -6135,10 +6207,29 @@ class DoseVoice:
             going_cloud = self._cloud_enabled() and self._is_online()
             if not going_cloud and spec \
                     and spec.get("voice_ts") == self._last_voice_ts:
-                spec["done"].wait(timeout=6)
+                # WAIT THE TURN BUDGET, NOT A ROUND NUMBER.
+                #
+                # This used to wait six seconds and then, if the
+                # speculation had not finished, transcribe the whole
+                # buffer AGAIN — six seconds of waiting followed by the
+                # full cost, for audio a worker was already most of the
+                # way through. That is the worst of both paths.
+                #
+                # The speculation is running on the SAME audio. Once it
+                # has started, nothing we can do is faster than letting
+                # it finish, so the only sensible question is how long
+                # the turn is allowed to take at all.
+                t_wait = time.time()
+                spec["done"].wait(timeout=STT_TURN_BUDGET)
+                waited = time.time() - t_wait
                 if spec.get("text"):
                     self._spec_hits = getattr(self, "_spec_hits", 0) + 1
+                    self._t_spec_wait = waited
                     return spec["text"]
+                # It really did run out of budget. Count it: a station
+                # whose speculation never lands is doing every turn
+                # twice, and that is invisible without this number.
+                self._spec_misses = getattr(self, "_spec_misses", 0) + 1
             return self._better_transcribe(final_buf, hint)
 
         while time.time() < deadline and not self._stop.is_set():
@@ -7446,6 +7537,15 @@ class DoseVoice:
                 "total": (t1 - t_stop) + getattr(
                     self, "_t_first_sound", 0.0),
                 "text": text,
+                # WHY this turn cost what it cost. A 25-second turn and
+                # a 2-second turn look identical in a log that records
+                # only the total, and the difference between them is a
+                # decision the station made — escalate or not, reuse the
+                # speculation or redo it. Record the decision next to
+                # its price.
+                "stt_note": getattr(self, "_stt_note", ""),
+                "spec_wait": round(getattr(self, "_t_spec_wait", 0.0), 2),
+                "budget": STT_TURN_BUDGET,
             }
             # Log it. "understood" is the thing that matters most: did
             # the station work out what was being asked, or did it fall
