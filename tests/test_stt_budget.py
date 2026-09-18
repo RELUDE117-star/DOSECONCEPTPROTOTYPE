@@ -192,8 +192,53 @@ check("the turn record carries the decision, not just the total",
       "\"stt_note\":" in CODE)
 check("...and the budget it was judged against",
       "\"budget\": STT_TURN_BUDGET" in CODE)
-check("the note is cleared per turn, not per branch",
-      CODE.count("self._stt_note = \"\"") >= 2)
+check("the note is set per turn, not per branch",
+      'self._stt_note = getattr(self, "_cap_note", "") or ""' in CODE)
+check("a cap applied on the way IN survives that reset — it happened "
+      "to this turn and is the first thing worth knowing about it",
+      'self._cap_note = ""' in CODE and "_cap_note" in CODE)
+
+print("\n── the audio itself is bounded ──────────────────────────────")
+# A budget downstream cannot rescue a 25-second transcription: by the
+# time it is consulted the 25 seconds are already spent.
+check("there is a ceiling on how much audio a turn may hand over",
+      "STT_MAX_AUDIO_S" in CODE)
+check("it is an environment override", "DOSE_STT_MAX_AUDIO" in SRC)
+check("twelve seconds is longer than anything said to a cabinet, "
+      "and short enough to bound the worst turn",
+      6 <= dose_voice.STT_MAX_AUDIO_S <= 20, dose_voice.STT_MAX_AUDIO_S)
+check("the cap is applied before the recogniser is called",
+      "finish(self._cap_audio(buf), text)" in CODE)
+
+_e = object.__new__(dose_voice.DoseVoice)
+_sr = dose_voice.SAMPLE_RATE
+_short = bytes(b"\x01\x00" * int(_sr * 3))
+_long = bytes(b"\x02\x00" * int(_sr * 40))
+check("a normal turn is handed over untouched",
+      _e._cap_audio(_short) == _short)
+_out = _e._cap_audio(_long)
+check("a runaway turn is cut to the ceiling",
+      abs(len(_out) / 2.0 / _sr - dose_voice.STT_MAX_AUDIO_S) < 0.05,
+      len(_out) / 2.0 / _sr)
+check("the LAST seconds are kept — a turn ends when somebody stops "
+      "speaking, so the words that matter are at the end",
+      _out == _long[-len(_out):])
+check("the cut is recorded, with both durations",
+      "audio capped" in getattr(_e, "_cap_note", ""), _e._cap_note)
+check("a cut is counted", getattr(_e, "_audio_capped", 0) == 1)
+check("nonsense input cannot raise", _e._cap_audio(b"") == b"")
+
+print("\n── a turn's duration is measured, not inferred ──────────────")
+# turns.jsonl reported a 70.9-second utterance on a turn whose listen
+# timeout is twelve. blocks * BLOCK_SIZE / SAMPLE_RATE counts blocks
+# the DEVICE delivered (1024 samples at 48 kHz) against the 16 kHz
+# rate, so every figure was three times too long — and I read one of
+# them as evidence that endpointing had run away.
+check("seconds come from the buffer's bytes",
+      "self._turn_secs = round(" in CODE and "len(buf) / 2.0" in CODE)
+check("...and the block-count estimate is only a fallback",
+      CODE.count("else round(blocks * BLOCK_SIZE") >= 2)
+check("it is reset per turn", "self._turn_secs = None" in CODE)
 
 print("\n── nothing here can make a turn SLOWER ──────────────────────")
 

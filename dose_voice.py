@@ -342,6 +342,14 @@ FAST_ENGINE_PIN = os.environ.get("DOSE_FAST_ENGINE", "").strip().lower()
 # turn and makes everything worse. Raise it on better hardware; the
 # escalation simply gets used more often.
 STT_TURN_BUDGET = float(os.environ.get("DOSE_STT_BUDGET", "6.0"))
+# The most audio a single turn may hand the recogniser. Transcription
+# cost is linear in length, so the worst turn is the longest one: the
+# device logged "fast": 25.02 on a buffer that had been accumulating
+# through a long pause. A budget downstream cannot rescue that — by the
+# time it is consulted the twenty-five seconds are already spent.
+# Twelve seconds is far longer than anything anyone says to a medicine
+# cabinet, and the LAST twelve are the ones kept.
+STT_MAX_AUDIO_S = float(os.environ.get("DOSE_STT_MAX_AUDIO", "12.0"))
 # The longest FIRST spoken fragment. Only this chunk is rendered before
 # any sound comes out, so this number IS the station's time-to-first-
 # sound on an uncached reply. Around forty characters is roughly two
@@ -2100,6 +2108,43 @@ class DoseVoice:
             return "", "cloud", self.CLOUD_BUDGET_S
         return box["text"], box["eng"], box["secs"]
 
+    def _cap_audio(self, buf):
+        """Never hand the recogniser more audio than a turn can afford.
+
+        Transcription cost is linear in audio length, so the worst turn
+        in turns.jsonl is the longest one. The device logged
+
+            "fast": 25.02   "speak": 2.01   "total": 33.66
+
+        on a buffer that had been accumulating while somebody talked
+        past the end of their sentence, a television played, or the
+        endpointer waited through a long pause. Twenty-five seconds of
+        transcription cannot be rescued by a budget downstream; by then
+        it has already been spent.
+
+        The LAST seconds are kept, not the first. A turn ends when
+        somebody stops speaking, so the words that matter are at the
+        end — and a person who rambles and then asks the question is
+        much commoner than one who asks and then rambles.
+
+        Returns the buffer unchanged when it is already short enough,
+        which is almost always.
+        """
+        try:
+            cap = int(STT_MAX_AUDIO_S * SAMPLE_RATE * 2)
+            if cap <= 0 or len(buf) <= cap:
+                return bytes(buf)
+            self._audio_capped = getattr(self, "_audio_capped", 0) + 1
+            # Held separately: _better_transcribe clears _stt_note at
+            # the top of every turn, and a note written before it runs
+            # would be wiped by the function it is describing.
+            self._cap_note = ("audio capped: %.1fs of %.1fs kept"
+                              % (STT_MAX_AUDIO_S,
+                                 len(buf) / 2.0 / float(SAMPLE_RATE)))
+            return bytes(buf[-cap:])
+        except Exception:
+            return bytes(buf)
+
     def _better_transcribe(self, audio_bytes, vosk_text, allow_cloud=True):
         """Work out what was actually said, trying harder when the
         first answer means nothing.
@@ -2121,8 +2166,11 @@ class DoseVoice:
         self._raw_cloud = ""
         # Cleared per turn, not per branch: a note left over from the
         # previous turn attached to this one is a lie in the log, and
-        # the log is the only account of what happened out there.
-        self._stt_note = ""
+        # the log is the only account of what happened out there. A cap
+        # applied on the way IN is carried over, because it happened to
+        # this turn and is the first thing worth knowing about it.
+        self._stt_note = getattr(self, "_cap_note", "") or ""
+        self._cap_note = ""
 
         # 0) CLOUD FIRST when it is available and this is the real
         #    (non-speculative) pass.
@@ -2202,7 +2250,6 @@ class DoseVoice:
             if fast:
                 return fast
             return vosk_text or ""
-        self._stt_note = ""
         t_wh = time.time()
         wh = self._whisper_transcribe(audio_bytes)
         self._raw_slow = wh or ""
@@ -6008,8 +6055,10 @@ class DoseVoice:
                     "total": getattr(self, "_t_endpoint", 0.0)
                     + getattr(self, "_t_fast", 0.0)
                     + getattr(self, "_t_slow", 0.0),
-                    "secs": round(blocks * BLOCK_SIZE
-                                  / float(SAMPLE_RATE), 1),
+                    "secs": getattr(self, "_turn_secs", None)
+                    if getattr(self, "_turn_secs", None) is not None
+                    else round(blocks * BLOCK_SIZE
+                               / float(SAMPLE_RATE), 1),
                     "peak": getattr(self, "_turn_peak", 0),
                     "clip_pct": round(100.0
                                       * getattr(self, "_turn_clip", 0)
@@ -6058,8 +6107,10 @@ class DoseVoice:
                             100.0 * getattr(self, "_turn_clip", 0)
                             / blocks),
                         "snr": round(getattr(self, "_turn_snr", 0.0), 1),
-                        "secs": round(blocks * BLOCK_SIZE
-                                      / float(SAMPLE_RATE), 1),
+                        "secs": getattr(self, "_turn_secs", None)
+                        if getattr(self, "_turn_secs", None) is not None
+                        else round(blocks * BLOCK_SIZE
+                                   / float(SAMPLE_RATE), 1),
                     })
                     self._speak("I didn't catch that, Ryan. "
                                 "Tap the logo and try again.")
@@ -6325,6 +6376,8 @@ class DoseVoice:
         self._turn_peak = 0
         self._turn_snr = 0.0
         self._t_spec_wait = 0.0
+        self._turn_secs = None
+        self._cap_note = ""
         deadline = time.time() + timeout
         buf = bytearray()
         heard = False
@@ -6485,7 +6538,19 @@ class DoseVoice:
                 text = " ".join(final_parts).strip()
                 self._turn_stopped_at = lv
                 self._t_endpoint = time.time() - lv
-                got = finish(buf, text)
+                # SECONDS FROM BYTES, NOT FROM BLOCK COUNT.
+                #
+                # turns.jsonl reported a 70.9-second utterance on a
+                # turn whose listen timeout is twelve. The number was
+                # blocks * BLOCK_SIZE / SAMPLE_RATE, but ingest()
+                # counts a block when the DEVICE hands one over — 1024
+                # samples at 48 kHz — and then resamples it to 16 kHz
+                # before it reaches this buffer. So every figure was
+                # three times too long, and I read one of them as
+                # evidence that endpointing had run away.
+                self._turn_secs = round(
+                    len(buf) / 2.0 / float(SAMPLE_RATE), 1)
+                got = finish(self._cap_audio(buf), text)
                 if got:
                     return got
                 # nothing recognisable — keep listening, don't re-fire
@@ -7851,7 +7916,9 @@ class DoseVoice:
                 "clip_pct": round(
                     100.0 * getattr(self, "_turn_clip", 0) / blocks),
                 "snr": round(getattr(self, "_turn_snr", 0.0), 1),
-                "secs": round(blocks * BLOCK_SIZE / float(SAMPLE_RATE), 1),
+                "secs": getattr(self, "_turn_secs", None)
+                if getattr(self, "_turn_secs", None) is not None
+                else round(blocks * BLOCK_SIZE / float(SAMPLE_RATE), 1),
             })
 
             # she has stopped speaking; clear whatever the microphone
