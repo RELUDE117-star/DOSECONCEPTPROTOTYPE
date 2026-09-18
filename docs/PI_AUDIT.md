@@ -438,3 +438,173 @@ Endpointing is fine (0.49–0.57 s). The variance is all in STT. Local
 tiny models on a Pi 4 will not reach conversational quality; free-tier
 cloud STT (`dose_cloud_stt.py`, already written, off without a
 credential) is the path.
+
+---
+
+# SESSION 3 — the actual root cause (2026-09-18)
+
+Sessions 1 and 2 fixed real bugs. Neither fixed the reason the
+microphone "frequently mishears or hears nothing", because neither had
+found it. This session found it, and it was not any of the things the
+previous two sessions had concluded.
+
+**Read this section before the two above it.** Where they disagree,
+this one is right, and the corrections at the end of it say why.
+
+## The measurement was wrong
+
+Route selection decided whether a capture device was connected by
+measuring `audioop.rms()`. Its own docstring said peak. In a quiet room
+those are not close numbers — they are on opposite sides of the
+decision. Measured on this station with the app stopped, three seconds
+per route, nobody speaking:
+
+| route | RMS | PEAK |
+|---|---|---|
+| card 5 (the real mic) `plughw:5,0` @16k | 0 | **29** |
+| card 5 `plughw:5,0` @48k | 0 | **33** |
+| card 5 via `sysdefault:5` | 0 | **107** |
+| card 4 ("USB Composite Device", dead) | 0 | **0** |
+| `-D default` | — | fails: `Host is down` |
+| `-D hw:5,0` @48k | — | fails: `Channels count non available` |
+
+RMS separates none of them. PEAK separates them perfectly.
+
+So every working route scored `floor 0`, failed the `floor > 1` test
+that means "this one is live", and was rejected as digitally silent.
+The mixer was fine the whole time — card 5 at 90%, capture switch
+`[on]` — and the hardware was fine the whole time.
+
+`capture_is_live()` had the same bug with a harsher threshold
+(`rms > 5`), so the running capture was also reported dead.
+
+## What happened next was worse
+
+Having rejected the real microphone, the walk continued to the end of
+its route list — where PortAudio device probing sat down and never got
+up. py-spy on the live app, seven minutes after a restart:
+
+```
+Thread 76603 (idle): "Thread-5 (_run)"
+    stop (sounddevice.py:1143)
+    _probe_device (dose_voice.py:1946)
+    _pick_input_device (dose_voice.py:2339)
+    open_portaudio (dose_voice.py:4111)
+    open_capture (dose_voice.py:4568)
+    _run (dose_voice.py:4658)
+```
+
+Not crashed. Not restarting. Not out of CPU. Still deciding which
+microphone to use, holding the ALSA PCM in `SETUP`, and never coming
+back. `Pa_StopStream` waits for the device to drain; on a wedged USB
+device it waits forever.
+
+`close_capture()` had the same blocking call in its PortAudio branch,
+and caught the engine one frame further on as soon as the probe was
+fixed. `mic_level()` had it too, on the UI thread — that one would have
+frozen the touchscreen, not just the microphone.
+
+## And it threw away the answer once it had it
+
+With peak measurement in, selection became correct and instant. The
+station's own report, three minutes after a restart:
+
+```
+selection #33 since start
+took: 2.8s (budget 45s)
+chose: arecord FORCED card 5,0
+verdict: a route showed a real noise floor
+capture reopens since start: 1
+```
+
+Thirty-three correct selections, each one discarded. The walk opened
+each route, measured it, **closed it**, then called the same opener
+again for the stream it would actually use — two opens of the same USB
+device a fraction of a second apart. The recorder's stderr recorded
+both halves:
+
+```
+arecord: pcm_read:2272: read error: Interrupted system call
+arecord sysdefault card 4: audio open error: Device or resource busy
+```
+
+EINTR is fatal to arecord: that is our own `SIGTERM` to the probe
+recorder, printed by the process we had just decided to trust and then
+killed. The `EBUSY` is the reopen arriving before the kernel had
+released the PCM.
+
+## Nothing could be seen, which is why this took three sessions
+
+- `DOSE.sh` ran `python3 dose_app.py 2>"$APP_DIR/error.log"`. `2>`
+  truncates, so every restart destroyed the log of the run that caused
+  it. Only stderr was kept. **And the file did not exist at all** — a
+  live check found no `error.log`, no `logs/dose.log`, and an empty
+  journal, while the app had been up seven minutes. Every traceback
+  this station has produced has gone nowhere.
+- `mic_report()` is only written when somebody taps the touchscreen.
+  The report on the device was **three days old** while the engine had
+  reopened its microphone dozens of times in the previous ten minutes.
+- The recorder's stderr went to `/dev/null` (fixed late in session 2) —
+  the only place that says `overrun!!!`, `EBUSY`, or `EINTR`.
+- Four different things in the supervising loop could trigger a reopen
+  and all four looked identical from outside: the counter went up.
+
+## Fixes
+
+| # | Fix |
+|---|---|
+| 1 | `route_floor()` / `capture_is_live()` measure **peak**, threshold `ROUTE_LIVE_PEAK = 3` (dead endpoint measures exactly 0; a real mic 29+) |
+| 2 | `_shut_stream()` — `Pa_AbortStream` on a daemon thread joined 2 s. Used by the probe, `close_capture()`, `mic_level()` and engine shutdown. A stream that will not close leaks one fd instead of deafening the station |
+| 3 | Deadlines everywhere in selection: 0.6 s/rate, 4 s/device, 12 s/PortAudio scan, 45 s/route walk — all env-overridable, all reported when hit |
+| 4 | A live non-speaker route **returns the stream it just measured**. No second open, no EBUSY race, no self-inflicted EINTR, ~2 s off every selection |
+| 5 | Recorder spawned with `start_new_session=True` — arecord dies on EINTR, so any group-directed signal killed the mic; it is out of that blast radius now |
+| 6 | `_peak_rms()` — audioop when present, `array` otherwise. Both paths tested to agree. The old fallbacks were `return 999` ("accept any route") and `return True` ("it's live, honest") |
+| 7 | `voice/selection.txt`, rewritten every selection: route chosen, peak/RMS of every route tried in order, time against budget, reopen count, **and why each reopen happened** |
+| 8 | Both streams append to `logs/dose.log` through `tee`, rotated at 8 MB, with a per-run banner. Unit's `StandardOutput` moved to `journal` so the two views don't duplicate |
+| 9 | `tests/test_route_liveness.py` — 44 checks, built on the measurements in the table above |
+
+## CORRECTIONS to sessions 1 and 2
+
+- **"Capture cycles rather than staying open" was not the recorder
+  crash-looping.** Those were the route walk's own probes — open,
+  listen 1.6 s, close, reject, next — and the `hw_ptr` resets were it
+  working exactly as written. Session 2 fixed a real recurrence bug and
+  then explained the wrong symptom with it. The stderr capture added to
+  catch the recorder complaining found nothing to catch, because the
+  recorder was never complaining.
+- **"A capture probe can hang" was not a side issue to chase later.**
+  It was the fault. It is listed under "Still open" in session 2 as one
+  bullet among five.
+- **The 283% CPU reading was not a runaway.** `ps pcpu` is an average
+  over process lifetime; it decayed 283 → 180 → 148 → 127 → 113 → 102%
+  as startup work finished. Temp 45–48 °C, `throttled=0x0`, load
+  average 0.8–1.5 on four cores. Nothing was wrong. Two wrong
+  diagnoses in one session, both from inferring a cause from an
+  external symptom instead of asking the program — which is why fix 7
+  exists.
+- **Card 4 is confirmed genuinely dead** (peak exactly 0 in a 3-second
+  recording), so `DOSE_MIC_CARD=5,0` is correct rather than merely
+  plausible.
+- **A large-file transfer to the Mac silently truncated**, twice.
+  Commit `2500bd6`'s message describes a whole fix; its diff contains
+  50 lines of it. It still parsed, so the syntax gate passed. Files now
+  move in 40 KB chunks whose md5 is checked at three points — source,
+  Mac, Pi — and the deploy job refuses to commit unless the reassembled
+  file matches byte for byte. The only reason the truncation was caught
+  is that a new test failed on the Pi with
+  `module dose_voice has no attribute ROUTE_LIVE_PEAK`.
+
+## Still open
+
+- `arecord -D default` fails with `Host is down` — the PipeWire ALSA
+  plugin is not serving this user. Not blocking (the pinned `plughw`
+  route works) but it means every `default` route in the walk is dead
+  weight.
+- The ONNX/Piper `SIGABRT` is still not root-caused; mitigated by the
+  supervisor. Running Piper synthesis in a subprocess is the fix.
+- `tests/audio/` has no real recordings yet, so the WER yardstick in
+  `tests/test_wer.py` has nothing to measure.
+- Free-tier cloud STT is written, tested and off. It needs a Groq key
+  placed at `~/dose-home-station/groq_key` (mode 0600) **by Ryan** —
+  no credential is handled or hardcoded here.
+- One `[aplay] <defunct>` at startup, source still unidentified.

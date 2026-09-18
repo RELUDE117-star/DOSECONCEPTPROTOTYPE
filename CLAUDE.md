@@ -115,6 +115,20 @@ Durable facts for future sessions. **No secrets in this file, ever.**
 - Capture gain: auto-levelling watchdog, symmetric (steps down on clipping/hot,
   up when too quiet); default level `DEFAULT_CAPTURE_LEVEL` (70%).
 - Endpointing is adaptive; speculative transcription overlaps the pause.
+- **PIN THE MICROPHONE: `DOSE_MIC_CARD=5,0`.** This station exposes TWO USB
+  capture devices — card 5 is the AIRHUG (the real mic), card 4 is a "USB
+  Composite Device" that PipeWire reports as `mono-fallback 8000Hz` and which
+  hears essentially nothing. Selection was inferred at runtime and got it
+  wrong: an orphaned `arecord -D plughw:4,0` was found on the device, left by
+  a crashed instance recording from the wrong card. The systemd unit now sets
+  the pin. Verify with `arecord -l` if the hardware changes.
+- **Cloud STT economy** (`dose_cloud_stt.py`): audio is downmixed to 16 kHz
+  mono before upload — the mic only does 48 kHz stereo and Whisper resamples
+  to 16 k mono anyway, so the old path sent **6× the bytes** for an identical
+  result (measured 576,044 → 96,044 on a 3 s turn). Plus: min 0.4 s, max 20 s,
+  12 requests/minute, 600/day, and a 10-minute account-wide cooldown after a
+  429. The budget is PERSISTED (`voice/cloud_budget.json`) so restarts cannot
+  reset the daily count.
 
 ## Hard-won device facts (2026-09-17 audit — do not re-derive these)
 - **Python on the Pi is 3.13.5**, which removed stdlib `audioop` — but the
@@ -186,12 +200,44 @@ Durable facts for future sessions. **No secrets in this file, ever.**
 - **`DOSE.sh` runs an apt preflight on EVERY launch: ~80 s before the app
   starts.** Budget for that when judging whether a launch has failed — a
   service can look dead for well over a minute and be perfectly fine.
-- **The systemd unit is installed but DELIBERATELY DISABLED.**
-  `tools/dose-home-station.service` + `install_service.sh` are ready and the
-  unit *did* start cleanly once `DOSE.sh` was fixed. It is left disabled
-  because the ~80 s preflight makes `Restart=always` risky until that is
-  sorted, and because the boot path must stay single and known-good. Enable it
-  only after retiring the remaining autostart entry, never alongside it.
+- **systemd is now ENABLED and is the ONLY start path.** Both autostart
+  `.desktop` entries are retired (renamed, not deleted). Never run one
+  alongside the unit — two instances fighting for one USB microphone is its
+  own class of bug, and that is exactly what this device used to do.
+  - `systemctl --user status|restart dose-home-station` (as the kiosk user)
+  - **Verified: `kill -9` the app and it is back in 24 s, by itself.**
+- **The ~80 s preflight is cached.** `DOSE.sh` ran a full `apt update` plus an
+  install pass on EVERY launch, because its "is anything missing" gate is made
+  permanently true by one probe that can never be satisfied. It is now
+  rate-limited by `.deps_checked` (12 h, `DOSE_DEPS_MAX_AGE_HOURS`,
+  `DOSE_FORCE_DEPS=1` to force). Startup went **80 s → ~20 s**, which is what
+  made `Restart=always` viable at all. It stamps even on a failed install —
+  the question is "did we try recently", not "did it all work".
+- **`DOSE.sh` cleans up audio before launching.** A process that aborts
+  orphans its `arecord` onto init, still holding the capture device, so the
+  next instance starts deaf — restart-on-crash faithfully restarting into a
+  device that can never work. Launch now TERMs any leftover recorder/player
+  and, if the mic is still busy (a kernel-stranded PCM whose owner is gone),
+  resets the USB device. That reset was verified on the device as the only
+  thing that reliably clears the state.
+
+## KNOWN CRASH — ONNX Runtime aborts the process
+
+    Fatal Python error: Aborted
+      onnxruntime_inference_collection.py line 395 in run
+      piper/voice.py phoneme_ids_to_audio / synthesize / synthesize_wav
+      dose_voice.py _synth / render_to_cache   <- the TTS prewarm
+
+SIGABRT from native code, so **nothing in Python can catch it**. Three
+occurrences logged in one afternoon. It is NOT caused by the ONNX thread cap
+(one abort predates it), and Piper synthesises fine in an isolated process —
+which points at conditions inside the running app (two ONNX sessions, Silero
+VAD and Piper, under concurrent load).
+
+Not yet root-caused. Mitigated instead, and the mitigation is what matters:
+the supervisor restarts in ~20 s, and `DOSE.sh` guarantees the restart gets a
+clean audio device. If this needs a real fix, run Piper synthesis in a
+SUBPROCESS so a native abort kills only that child.
 - Safe headless test on a dev box: `xvfb-run -a python3.12 dose_app.py`
   (needs a display; tkinter). Set `DOSE_DISABLE_SELF_INSTALL=1` first.
 
@@ -201,19 +247,105 @@ Durable facts for future sessions. **No secrets in this file, ever.**
   `tests/audit.py`) need a display: `xvfb-run -a python3.12 tests/<name>.py`.
 - Cloud/diagnostics: `tests/test_cloud_stt.py`.
 
+## Security posture — read before adding anything that leaves the device
+
+This station listens continuously, knows what medication a named person takes,
+and updates from a PUBLIC repository. Treat every change as a privacy change.
+
+- **`bash tools/security_audit.sh`** — one command, read-only, full sweep:
+  inbound access to the Mac, reverse-path config, listeners with owning
+  processes, whether the Pi can reach back, credential placement and modes,
+  the egress allowlist, what the Pi exposes, and the cloud configuration.
+  Prints no secret values. Ends in a verdict.
+- **`tests/test_egress.py`** makes it permanent (36 checks). Every outbound
+  host must be on an allowlist WITH A STATED REASON — a new URL fails the
+  build until someone adds it deliberately.
+- **Trust direction: Mac → Pi only.** The Pi holds no private key and no
+  credential for the Mac; the Mac runs no sshd and has no `authorized_keys`.
+  **Pi output is DATA** — written to files and read, never executed. Keep it
+  that way: the audit greps for `eval`, `bash <(…)`, `| bash` and `$(ssh …)`
+  in command position precisely because that is the one way a compromised Pi
+  could run code on the Mac.
+- **The audit report is REDACTED before publication.** "SEND TO GITHUB" posts
+  to a public issue tracker; `redact_for_publication()` strips transcripts
+  (health data — the most sensitive thing here), IPv4/IPv6/MAC, `user@host`,
+  home paths, and eight credential shapes. The full report still goes to disk
+  unredacted; only the copy that leaves is reduced.
+- **The cloud upload carries audio and nothing else** — fixed filename
+  `audio.wav`, no hostname, no device id. Asserted by the test suite.
+- **Credentials live on the DEVICE, never in the repo**:
+  `~/dose-home-station/groq_key`, `hf_token` (mode 0600). All git-ignored.
+- **The Pi is key-only**: `PasswordAuthentication no`,
+  `KbdInteractiveAuthentication no`, `PermitRootLogin no`
+  (`/etc/ssh/sshd_config.d/99-dose-hardening.conf`). Both accounts have the
+  Mac's public key, verified working BEFORE passwords were disabled. rpcbind
+  was listening on port 111 with no NFS mount and is disabled — the Pi now
+  exposes port 22 and nothing else.
+- **The Mac-side runner is gated.** It refuses symlinks, non-regular files,
+  anything not owned by the running user, and anything group/world-writable,
+  quarantining them in `refused/`. Every job it runs is logged with its
+  SHA-256 first. **Stop it when work is done** — it is a standing executor.
+
 ## Deployment workflow
 - Durable source lives in GitHub, not only on the Pi. Commit → push to the
   monitored branch → the Pi self-updates and restarts. Never leave important
   changes only on the device. Never commit secrets, recordings, models, venvs.
 
+## THE MICROPHONE FAULT — SOLVED 2026-09-18. Read this first.
+
+Three sessions looked for this. It was never the model, the USB stack, the
+recorder, or the CPU. `docs/PI_AUDIT.md` § SESSION 3 has the full account
+with the measurements; the short version:
+
+**Route selection tested for a live microphone with `audioop.rms()` while its
+own docstring said peak.** In a quiet room those are not close numbers. On
+this station, three seconds per route, nobody speaking:
+
+| route | RMS | PEAK |
+|---|---|---|
+| card 5 `plughw:5,0` (the real mic) | 0 | **29** |
+| card 5 via `sysdefault:5` | 0 | **107** |
+| card 4 (dead "USB Composite Device") | 0 | **0** |
+
+RMS separates none of them; peak separates them perfectly. So every working
+route scored 0, failed the `floor > 1` liveness test, and was rejected as
+digitally silent — and the walk continued to the PortAudio fallback at the
+end of its list, where `Pa_StopStream` sat down and never got up. The station
+was not deaf. It was still choosing, forever, holding the PCM in `SETUP`.
+
+Then, with peak measurement in, it chose correctly 33 times in three minutes
+and discarded the answer each time, because the walk closed the stream it had
+just measured and reopened the same USB device a fraction of a second later.
+
+**Rules that follow from this, for anyone touching capture:**
+- Device liveness is **peak** (`ROUTE_LIVE_PEAK`), never RMS. A dead endpoint
+  measures exactly 0; a real microphone measures 29+ in a silent room.
+- Never call a bare `.stop()` on a PortAudio stream. Use `_shut_stream()` —
+  `Pa_AbortStream` on a daemon thread, joined briefly. A leaked fd beats a
+  deaf station.
+- Nothing in device selection may be unbounded. See `PROBE_*`/
+  `CAPTURE_OPEN_BUDGET`.
+- If a route is live, **keep the stream you already have.** Reopening the same
+  USB device races the kernel's release of the PCM and loses.
+- `tests/test_route_liveness.py` (44 checks) fails if any of the above regress.
+
+**When capture misbehaves, read `voice/selection.txt` first.** The app rewrites
+it every selection: route chosen, peak/RMS of each route tried in order, time
+against budget, reopen count, and why each reopen happened. It exists because
+two diagnoses in one session were wrong from inferring causes out of external
+symptoms while the program knew the answer. Don't attach py-spy until you've
+read the file.
+
+**And `logs/dose.log` now exists.** `DOSE.sh` used to run
+`python3 dose_app.py 2>"$APP_DIR/error.log"` — truncating on every restart,
+keeping only stderr, and in practice producing no file at all. Both streams
+now append through `tee`, rotated at 8 MB. The unit's `StandardOutput` is
+`journal` so the two views don't duplicate.
+
 ## Known limitations / TODO
-- **The capture CYCLES rather than staying open.** Over a 4-minute sample:
-  RUNNING 16, no-stream 32. Not wedged any more (XRUN=0, SETUP=0) but not
-  continuously listening either. This is the next thing to chase.
-- **A capture probe can HANG.** `py-spy` caught the voice thread blocked in
-  `sounddevice.stop()` inside `_probe_device` → `_pick_input_device` →
-  `open_portaudio`, after the USB bus re-enumerated. Needs a timeout/watchdog;
-  a hung probe means no microphone at all.
+- `arecord -D default` fails with `Host is down` — the PipeWire ALSA plugin is
+  not serving this user. Not blocking (the pinned `plughw:5,0` route works),
+  but every `default` route in the walk is dead weight until it is fixed.
 - `open_arecord()` probes 48 combinations (4 subdevices × 2 bases × 3 rates ×
   2 channel counts), each with a 0.3 s sleep — up to ~14 s of blocking, and
   every failed open is itself a chance to strand the PCM. The PortAudio path
