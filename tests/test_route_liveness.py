@@ -375,6 +375,75 @@ check("the trail records how many blocks a route delivered, so "
 check("the selection dump records the engine state during the walk",
       "engine state during the walk" in src)
 
+print("\n10. The microphone is handed back before a self-restart")
+# dose_app.py restarts itself with os.execv() after an update. execv
+# REPLACES THE PROCESS IMAGE: no finally runs, no atexit fires, every
+# thread ceases. The recorder is a child in its own session, so it
+# survives all of that — still holding the USB device — and the process
+# taking our place is deaf.
+#
+# Measured on the device. Two selections, both "#1 since start", 54
+# seconds apart, while systemd reported ZERO restarts (the app restarted
+# ITSELF):
+#
+#   22:11:51  took 2.0s   chose card 5,0   peak 9542, 88 blocks
+#   22:12:45  took 63.8s  chose NOTHING    every route, 0 blocks
+#
+# "audio blocks delivered since start: 0" — no audio reached the new
+# process at all.
+import subprocess as _sp                                      # noqa: E402
+import threading as _th2                                      # noqa: E402
+
+_eng = object.__new__(dose_voice.DoseVoice)
+_eng._stop = _th2.Event()
+_eng._pw_proc = None
+_rec = _sp.Popen(["sleep", "300"], start_new_session=True,
+                 stdout=_sp.PIPE)
+_eng._cap_proc = _rec
+check("the stand-in recorder is in its own session, like the real one",
+      os.getsid(_rec.pid) == _rec.pid)
+check("it is alive before release", _rec.poll() is None)
+
+_t0 = __import__("time").time()
+_eng.release_audio()
+_el = __import__("time").time() - _t0
+
+check("release_audio() reaps the recorder", _rec.poll() is not None,
+      "rc=%s" % _rec.poll())
+check("it TERMs rather than KILLs, so the PCM is released cleanly",
+      _rec.poll() == -15, "rc=%s (-15 = SIGTERM)" % _rec.poll())
+check("it sets the stop event", _eng._stop.is_set())
+check("it clears the handle", _eng._cap_proc is None)
+check("it is fast enough to sit in front of execv", _el < 5,
+      "took %.2fs" % _el)
+_gone = False
+try:
+    os.kill(_rec.pid, 0)
+except OSError:
+    _gone = True
+check("no zombie is left behind", _gone)
+check("calling it twice is safe", (_eng.release_audio(), True)[1])
+_e2 = object.__new__(dose_voice.DoseVoice)
+_e2._stop = _th2.Event()
+_e2._pw_proc = None
+_e2._cap_proc = None
+check("safe with no recorder at all", (_e2.release_audio(), True)[1])
+
+_app = open(os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "dose_app.py"), encoding="utf-8").read()
+_i = _app.index("def _restart_app")
+_body = _app[_i:_i + 1600]
+# Compare CODE, not the comment that explains the fix — "os.execv"
+# appears in that prose, and matching it there is the same mistake the
+# injection detector made four times.
+_code = "\n".join(ln for ln in _body.splitlines()
+                  if not ln.lstrip().startswith("#"))
+check("_restart_app releases audio BEFORE os.execv",
+      "release_audio()" in _code and "os.execv" in _code
+      and _code.index("release_audio()") < _code.index("os.execv"))
+check("the live recorder is tracked so it can be released",
+      "self._cap_proc = p" in src)
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:

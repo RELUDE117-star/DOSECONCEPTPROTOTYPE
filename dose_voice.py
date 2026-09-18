@@ -4686,6 +4686,13 @@ class DoseVoice:
                                      env=self._audio_env())
             except Exception:
                 return None
+            # Keep a handle on the LIVE recorder. release_audio() needs
+            # to be able to end it from outside this closure, because
+            # os.execv() destroys every thread and every local without
+            # running a single finally — and a recorder that outlives
+            # that call keeps the USB capture device away from the
+            # process replacing us.
+            self._cap_proc = p
 
             def _drain_err(proc=p, label=name):
                 """Read the recorder's complaints so they are visible
@@ -6029,6 +6036,69 @@ class DoseVoice:
         self._pw_proc = p
         self._note_tts("piper worker ready")
         return p
+
+    def release_audio(self):
+        """Give the microphone back, on purpose, before the process ends.
+
+        WHY THIS EXISTS. dose_app.py restarts itself with os.execv()
+        after an update. execv REPLACES THE PROCESS IMAGE: no finally
+        runs, no atexit fires, every thread simply ceases. The capture
+        recorder is a child process in its own session, so it survives
+        all of that — still holding the USB device — and the process
+        that takes our place finds the microphone unavailable.
+
+        Measured on the device. Two selections, both "#1 since start",
+        54 seconds apart, while systemd reported ZERO service restarts
+        (because the app restarted ITSELF, not the unit):
+
+            22:11:51  took 2.0s   chose card 5,0   peak 9542, 88 blocks
+            22:12:45  took 63.8s  chose NOTHING    every route, 0 blocks
+
+        "audio blocks delivered since start: 0" is the whole story. Not
+        a measurement problem, not a silent microphone — no audio
+        reached the new process at all, because the old process's
+        recorder still had the device.
+
+        So the microphone is handed back deliberately: stop the loop,
+        TERM the recorder so it can release the ALSA PCM cleanly, reap
+        it, and take the synthesis worker too. Never raises — a failure
+        to tidy up must not stop the restart it precedes.
+        """
+        try:
+            self._stop.set()
+        except Exception:
+            pass
+        p = getattr(self, "_cap_proc", None)
+        self._cap_proc = None
+        if p is not None:
+            try:
+                if p.poll() is None:
+                    # TERM, never KILL first: a killed recorder does not
+                    # run its cleanup and strands the PCM, which is the
+                    # fault this project spent a whole session on.
+                    p.terminate()
+            except Exception:
+                pass
+            try:
+                p.wait(timeout=3)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+                try:
+                    p.wait(timeout=2)
+                except Exception:
+                    pass
+            try:
+                if p.stdout:
+                    p.stdout.close()
+            except Exception:
+                pass
+        try:
+            self.stop_piper_worker()
+        except Exception:
+            pass
 
     def stop_piper_worker(self):
         """End the synthesis worker. Safe to call repeatedly.

@@ -4206,6 +4206,24 @@ class DoseApp:
         self.root.after(2500, self._restart_app)
 
     def _restart_app(self):
+        # GIVE THE MICROPHONE BACK FIRST.
+        #
+        # os.execv() below replaces this process image: no finally runs,
+        # no atexit fires, every thread ceases. The capture recorder is
+        # a child in its own session, so it survives all of that — still
+        # holding the USB device — and the process that takes our place
+        # is deaf. Measured: a self-restart produced a selection with
+        # "audio blocks delivered since start: 0" on every route, while
+        # systemd reported zero restarts because the app restarted
+        # ITSELF.
+        #
+        # The camera was already released here. The microphone was not,
+        # and it is the one another process cannot simply reopen.
+        try:
+            if self.voice:
+                self.voice.release_audio()
+        except Exception:
+            pass
         try:
             if self.camera and self.camera_running:
                 self.camera_running = False
