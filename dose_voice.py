@@ -5945,8 +5945,48 @@ class DoseVoice:
                                         lp, getattr(self, "_ch_l", 0) * 0.9)
                                     self._ch_r = max(
                                         rp, getattr(self, "_ch_r", 0) * 0.9)
-                                    data = (left if self._ch_l >= self._ch_r
-                                            else right)
+                                    if self._ch_l == 0 and self._ch_r == 0:
+                                        data = audioop.tomono(data, 2, 1, 1)
+                                    else:
+                                        data = (left
+                                                if self._ch_l >= self._ch_r
+                                                else right)
+                                # UNDECIDED IS NOT "LEFT". IT IS "BOTH".
+                                #
+                                # The comparison below is `>=`, so before
+                                # either channel has ever shown a sample
+                                # the tie resolves to left — every block,
+                                # for as long as left stays silent, which
+                                # on a capsule wired to the right is
+                                # forever. The re-check cannot rescue it
+                                # either: it looks at ONE block, and if
+                                # that block is quiet both maxima stay 0
+                                # and the tie resolves to left again.
+                                #
+                                # The device, with capture finally
+                                # correct at 48 kHz stereo:
+                                #
+                                #   blocks/sec: 46.9   (nominal 46.9)
+                                #   live level: peak 0
+                                #
+                                # A flawless capture delivering silence —
+                                # the exact signature that started all of
+                                # this, one layer further in. And it must
+                                # be a tie in a quiet room, because the
+                                # hand measurement says only ~0.3% of
+                                # SAMPLES are non-zero.
+                                #
+                                # So while nothing has been proven, the
+                                # channels are SUMMED rather than picked.
+                                # A capsule on either side is then heard
+                                # at full amplitude, and the first block
+                                # carrying anything breaks the tie for
+                                # good. Summing is not the averaging that
+                                # caused the original fault: (1+0)/2
+                                # rounds to zero, 1+0 does not.
+                                elif (getattr(self, "_ch_l", 0) == 0
+                                      and getattr(self, "_ch_r", 0) == 0):
+                                    data = audioop.tomono(data, 2, 1, 1)
                                 elif getattr(self, "_ch_l", 0) >= getattr(
                                         self, "_ch_r", 0):
                                     data = audioop.tomono(data, 2, 1, 0)

@@ -195,6 +195,64 @@ check("perfect silence on both does not crash",
       downmix([(0, 0)] * 100, st3) in ("L", "R"))
 check("an empty block does not crash", downmix([], st3) in ("L", "R"))
 
+print("\n── undecided means BOTH, never left by default ──────────────")
+# The comparison is `>=`, so before either channel has shown a sample
+# the tie resolves to left — every block, for as long as left stays
+# silent, which on a capsule wired to the right is forever. The
+# re-check cannot rescue it: it looks at ONE block, and a quiet block
+# leaves both maxima at 0 and resolves to left again.
+#
+# The device, with capture finally correct at 48 kHz stereo:
+#     blocks/sec: 46.9   (nominal 46.9)
+#     live level: peak 0
+# A flawless capture delivering silence — the signature that started
+# all of this, one layer further in.
+
+
+def choose(l_max, r_max):
+    """The production rule between re-checks: 'SUM', 'L' or 'R'."""
+    if l_max == 0 and r_max == 0:
+        return "SUM"
+    return "L" if l_max >= r_max else "R"
+
+
+check("nothing proven yet sums the channels", choose(0, 0) == "SUM")
+check("left proven takes left", choose(40, 0) == "L")
+check("right proven takes right", choose(0, 40) == "R")
+check("both proven takes the louder", choose(9, 40) == "R")
+
+
+def sum_pair(l, r):
+    """audioop.tomono(data, 2, 1, 1) on one frame."""
+    return l + r
+
+
+check("a capsule on the RIGHT is audible while undecided",
+      sum_pair(0, 29) == 29,
+      "picking left here is the bug; averaging would give 14")
+check("a capsule on the LEFT is audible while undecided",
+      sum_pair(29, 0) == 29)
+check("summing is not the averaging that caused the original fault",
+      sum_pair(1, 0) == 1 and (1 + 0) // 2 == 0,
+      "1+0 survives; (1+0)/2 rounds to zero, which is the whole story")
+check("one non-zero block is enough to decide for good",
+      choose(*[max(a, b * 0.9) for a, b in ((0, 0), (29, 0))]) in
+      ("L", "R"))
+
+check("the summing weights appear in the reader",
+      CODE.count("audioop.tomono(data, 2, 1, 1)") == 2,
+      "once at the re-check, once between re-checks")
+# Positional, not whitespace-exact: three assertions in this suite have
+# already broken because they pinned the exact text of a line rather
+# than the property, and each time the code was right and the test was
+# wrong. Anchor on the summing call, then look forward.
+_i_sum = CODE.find("audioop.tomono(data, 2, 1, 1)",
+                   CODE.find("elif"))
+_i_ge = CODE.find('_ch_l", 0) >= getattr(')
+check("the undecided branch is tested BEFORE the >= comparison",
+      0 < _i_sum < _i_ge,
+      "otherwise >= wins the tie and left is chosen anyway")
+
 # The flapping this replaces: an RMS tie resolves left every time, so a
 # right-wired capsule is silence until something is loud enough to
 # break the tie, and then the choice changes mid-utterance.
