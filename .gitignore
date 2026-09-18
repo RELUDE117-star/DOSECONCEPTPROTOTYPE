@@ -29,6 +29,42 @@ hf_token
 *_token.txt
 .env
 .env.*
+# The Mac speech server's pairing file: its LAN address on line one and
+# a BEARER TOKEN on line two. It matched none of the patterns above —
+# not *_key, not *_token — because it is named for what it is rather
+# than for what it holds, and the deploy job that writes it said so:
+#
+#     git-ignored: CHECK THIS
+#
+# It has never been committed. That is luck, not design, and this
+# repository is public.
+dose_server.conf
+*.conf
+
+# THE MEDICATION DATA, which is the most sensitive thing this project
+# touches and was not ignored at all. It is what a named person takes,
+# when, and whether they took it — health data about one identifiable
+# human being, in a PUBLIC repository.
+#
+# Nothing has been committed. Again, that is luck: the device writes
+# med_data.json into the app directory, the updater is careful never to
+# overwrite it, and every backup and export it makes sits beside it
+# under a name nothing here covered.
+#
+# The credential rules above exist because a leaked token costs money.
+# This one costs somebody their privacy, and it should have been the
+# first line in this file rather than an afterthought found by a test.
+med_data.json
+med_data.json.*
+adherence_log.json
+adherence_log.json.*
+learning.json
+calibration.json
+*.bak
+# Recordings and transcripts: what was said in this person's kitchen.
+voice/
+*.wav
+turns.jsonl
 
 # Per-device runtime state, not source. cloud_budget.json is the record
 # of how much free quota this station has used; it is meaningless

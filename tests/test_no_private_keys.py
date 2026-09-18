@@ -149,6 +149,68 @@ for f in ("tools/bootstrap_claude_access.py", "dose_app.py"):
         ok("redact" in src.lower(),
            "%s names key material only to redact it" % f)
 
+# ── EVERY FILE THAT HOLDS A CREDENTIAL IS IGNORED BY NAME ───────────
+#
+# The Mac speech server's pairing file is `dose_server.conf`: a LAN
+# address on line one and a BEARER TOKEN on line two. It matched none
+# of the .gitignore credential patterns — not *_key, not *_token —
+# because it is named for what it IS rather than for what it HOLDS.
+#
+# It was never committed, but that was luck. The deploy job that writes
+# it onto the Pi printed "git-ignored: CHECK THIS" and that was the
+# only reason anyone looked. This repository is public.
+print()
+print("── every credential file is ignored, by name ──")
+IGN = os.path.join(ROOT, ".gitignore")
+_ign = open(IGN, encoding="utf-8").read() if os.path.exists(IGN) else ""
+
+
+def ignored(name):
+    """Does .gitignore cover this filename? Asked of git, not of a
+    regex of mine — git is the thing that decides."""
+    try:
+        r = subprocess.run(["git", "check-ignore", "-q", name],
+                           cwd=ROOT, capture_output=True, timeout=10)
+        return r.returncode == 0
+    except Exception:
+        # No git here: fall back to asking whether the literal name
+        # appears, which is weaker but never falsely reassuring.
+        return name in _ign
+
+
+for secret_file in ("dose_server.conf", "github_token", "groq_key",
+                    "hf_token", "id_ed25519", "id_rsa", ".env"):
+    ok(ignored(secret_file),
+       "%s is git-ignored" % secret_file)
+
+# AND THE MEDICATION DATA, which is the most sensitive thing here and
+# was not ignored at all. What a named person takes, when, and whether
+# they took it is health data about one identifiable human being, and
+# this repository is public. The credential rules above exist because a
+# leaked token costs money; this costs somebody their privacy, and it
+# was found by widening a test rather than by anyone thinking of it.
+print("── and the medication data, which matters more than the tokens ──")
+for private_file in ("med_data.json", "med_data.json.bak",
+                     "adherence_log.json", "learning.json",
+                     "calibration.json", "voice/turns.jsonl",
+                     "voice/raw_from_engine.wav"):
+    ok(ignored(private_file), "%s is git-ignored" % private_file)
+
+# And none of them is actually IN the repository right now.
+try:
+    tracked = subprocess.run(["git", "ls-files"], cwd=ROOT,
+                             capture_output=True, text=True,
+                             timeout=15).stdout.split("\n")
+except Exception:
+    tracked = []
+for t in tracked:
+    base = os.path.basename(t.strip())
+    ok(base not in ("dose_server.conf", "github_token", "groq_key",
+                    "hf_token", "id_rsa", "id_ed25519"),
+       "no credential file is tracked (%s)" % (base or "-"))
+    if base in ("dose_server.conf", "github_token"):
+        break
+
 print()
 print("private-key guard: %d passed, %d failed" % (PASSED, FAILED))
 if FAILED:
