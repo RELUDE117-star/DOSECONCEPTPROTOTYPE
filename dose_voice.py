@@ -364,6 +364,22 @@ HOT_SPEECH_RMS = float(os.environ.get("DOSE_HOT_RMS", "6000"))
 # capture is stepped UP. This is the recovery path for a mic left stuck
 # low by the down-only watchdog (device reported voice RMS 15).
 LOW_SPEECH_RMS = float(os.environ.get("DOSE_LOW_RMS", "500"))
+
+# ── capture liveness ──────────────────────────────────────────────────
+# How long the DEVICE can go without handing us a single block before we
+# treat the capture as dead. This is deliberately not about speech: a
+# quiet room still delivers blocks, and the old ten-second rule (keyed
+# off speech reaching the queue) tore down a healthy microphone every
+# ten seconds of silence. Reopening takes longer than that on this
+# board, so the clock was already expired when the new stream came up.
+CAPTURE_DEAD_AFTER = float(os.environ.get("DOSE_CAPTURE_DEAD_AFTER", "8"))
+# Floor between reopen attempts, and the ceiling it backs off to. A mic
+# that cannot be reopened must not be hammered: every attempt walks a
+# long device/rate/channel list and is another chance to strand a PCM.
+CAPTURE_REOPEN_MIN_GAP = float(
+    os.environ.get("DOSE_CAPTURE_REOPEN_GAP", "5"))
+CAPTURE_REOPEN_MAX_GAP = float(
+    os.environ.get("DOSE_CAPTURE_REOPEN_MAX_GAP", "60"))
 # Where the hardware capture starts before the auto-leveller tunes it.
 # Moderate on purpose: high enough to lift a stuck-low USB capsule off
 # near-silence, low enough not to slam a hot one into clipping.
@@ -3345,6 +3361,40 @@ class DoseVoice:
         threading.Thread(target=work, daemon=True,
                          name="input-level").start()
 
+    def _capture_restart_allowed(self):
+        """Gate on reopening the microphone, so a device that cannot be
+        reopened is not hammered.
+
+        Reopening capture on this hardware is not cheap — open_arecord()
+        alone can walk a long list of device/rate/channel combinations —
+        and every attempt is another chance to leave a stranded PCM
+        behind. Without a floor between attempts a failing mic turns
+        into a hot loop that makes the situation worse, which is exactly
+        what the device did: capture absent two thirds of the time,
+        cycling continuously.
+
+        So: at least CAPTURE_REOPEN_MIN_GAP between attempts, backing
+        off to CAPTURE_REOPEN_MAX_GAP if they keep coming. The counter
+        is exposed for diagnostics — a station quietly restarting its
+        microphone forty times an hour is a fault worth seeing, not
+        something to hide behind a retry."""
+        now = time.time()
+        last = getattr(self, "_last_reopen_ts", 0.0)
+        streak = getattr(self, "_reopen_streak", 0)
+        # Exponential-ish backoff, bounded.
+        gap = min(CAPTURE_REOPEN_MIN_GAP * (2 ** min(streak, 4)),
+                  CAPTURE_REOPEN_MAX_GAP)
+        if now - last < gap:
+            return False
+        # A long healthy spell clears the streak, so an isolated blip
+        # never leaves the device permanently slow to recover.
+        if now - last > CAPTURE_REOPEN_MAX_GAP * 2:
+            streak = 0
+        self._last_reopen_ts = now
+        self._reopen_streak = streak + 1
+        self._capture_restarts = getattr(self, "_capture_restarts", 0) + 1
+        return True
+
     def trim_capture_if_clipping(self):
         """Keep the microphone at a usable level — turning it DOWN when
         it saturates AND UP when it is too quiet.
@@ -3865,6 +3915,13 @@ class DoseVoice:
             """Common path for every capture backend: gate, resample
             to 16 kHz, apply auto-gain, feed the queue, service the
             live level meter."""
+            # PROOF OF LIFE FROM THE DEVICE, recorded before any of the
+            # early returns below. This is "the microphone delivered a
+            # block", which is a completely different question from
+            # "somebody said something" — and conflating the two was
+            # tearing down a perfectly healthy capture every ten
+            # seconds of quiet. See the watchdog in the main loop.
+            self._last_block_ts = time.time()
             if self._muted:
                 return
             if self.state == "speaking":
@@ -4635,13 +4692,34 @@ class DoseVoice:
                     self._set_ui_state("idle")
                 self._drain(rec)
                 continue
-            # Bluetooth drops: if no audio arrives for a while, the
-            # capture likely died — redo the full selection (the
-            # device may have reconnected on a different profile)
-            if time.time() - last_audio > 10 and self.state == "idle":
+            # CAPTURE WATCHDOG — "the device stopped delivering", NOT
+            # "nobody has spoken".
+            #
+            # This used to key off last_audio, which is only stamped
+            # when a block comes OFF the queue. In a quiet room the
+            # gate means nothing reaches the queue, so a perfectly
+            # healthy microphone looked dead after ten seconds and the
+            # loop tore it down and reopened it. Reopening takes longer
+            # than ten seconds on this hardware, so the clock was
+            # already expired when the new stream came up and it did it
+            # again immediately. Measured on the device: the capture
+            # was ABSENT for two thirds of a four-minute window,
+            # cycling the whole time — and every one of those teardowns
+            # was another chance to strand the PCM.
+            #
+            # _last_block_ts is stamped in ingest() for every block the
+            # device hands us, before any gate, mute or speaking check.
+            # That is the real liveness signal. A Bluetooth mic that
+            # drops, or a USB mic that stops delivering, still trips
+            # this; a silent room no longer does.
+            lb = getattr(self, "_last_block_ts", 0.0) or last_audio
+            if (time.time() - lb > CAPTURE_DEAD_AFTER
+                    and self.state == "idle"
+                    and self._capture_restart_allowed()):
                 close_capture(stream)
                 stream = open_capture()
                 last_audio = time.time()
+                self._last_block_ts = time.time()
                 if stream is None:
                     time.sleep(3)
                     continue
