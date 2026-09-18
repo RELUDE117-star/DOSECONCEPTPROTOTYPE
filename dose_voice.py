@@ -3827,8 +3827,18 @@ class DoseVoice:
                 "last reply:     %r" % (
                     str(getattr(self, "_last_reply", ""))[:80]),
                 "",
-                "capture reopens: %d" % getattr(
-                    self, "_capture_restarts", 0),
+                # Two different numbers, because they mean two
+                # different things. "reopens" is the microphone dying
+                # on us; "closed on purpose" is us ending a recorder
+                # deliberately, during a selection or a re-open. They
+                # used to be the same number, and a run of 332 reopens
+                # turned out to be 332 of the second kind — our own
+                # teardown, reported by the reader as a death, which
+                # set _force_reopen, which brought the loop back to
+                # tear down the replacement.
+                "capture reopens: %d   closed on purpose: %d" % (
+                    getattr(self, "_capture_restarts", 0),
+                    getattr(self, "_capture_closes", 0)),
                 # The fault this station actually had: blocks arriving
                 # on time, every sample zero. "HEARING: YES" above is
                 # about the DEVICE; this line is about the SIGNAL.
@@ -6019,7 +6029,33 @@ class DoseVoice:
                             proc.stdout.close()
                     except Exception:
                         pass
-                    if not self._stop.is_set():
+                    # DID WE END THIS RECORDER OURSELVES?
+                    #
+                    # close_capture() leaves the pid here before it
+                    # terminates. Without that, our own teardown was
+                    # reported as the microphone dying, _force_reopen
+                    # was set, and the supervisor came straight back to
+                    # tear down the replacement — a reopen loop with a
+                    # one-second period that ran 332 times in a soak
+                    # while blocks/sec sat at a perfect 47.7.
+                    on_purpose = False
+                    try:
+                        seen = getattr(self, "_closed_on_purpose", None)
+                        if seen and proc.pid in seen:
+                            seen.discard(proc.pid)
+                            on_purpose = True
+                            # COUNTED, not silent. Suppressing the
+                            # reopen must not also suppress the
+                            # evidence: "reopens: 0" with the capture
+                            # being torn down all day is the same
+                            # under-reporting that sent a previous
+                            # session hunting a caller that did not
+                            # exist. One number, no log flood.
+                            self._capture_closes = getattr(
+                                self, "_capture_closes", 0) + 1
+                    except Exception:
+                        pass
+                    if not self._stop.is_set() and not on_purpose:
                         # Tell the supervisor the microphone is gone so
                         # it reopens instead of going quietly deaf.
                         # _force_reopen is the loop's EXISTING, already
@@ -6378,6 +6414,42 @@ class DoseVoice:
             if kind == "portaudio":
                 self._shut_stream(h, "close_capture")
                 return
+            # SAY THAT THIS TEARDOWN WAS DELIBERATE.
+            #
+            # Without this the station reopens its microphone forever.
+            # The reader thread's finally cannot see who ended the
+            # recorder, so it treated OUR OWN terminate() as the mic
+            # dying and set _force_reopen — which brings the loop
+            # straight back here to terminate the replacement. One
+            # legitimate reopen, from anything at all, and the station
+            # spends the rest of its life doing this:
+            #
+            #   recorder ... ended after 47 blocks (rc=1):
+            #     said: Aborted by signal Terminated...
+            #   (every second, 332 times, blocks/sec a perfect 47.7)
+            #
+            # py-spy found the engine parked in open_pipe_cmd's own
+            # settle-sleep, reached from _run -> open_capture ->
+            # open_arecord -> attempt: not stuck, not crashed, just
+            # opening a microphone it was about to close. Three jobs
+            # went into inferring this from symptoms while the app was
+            # writing the answer into selection.txt the whole time.
+            #
+            # Keyed by pid, not a bare flag: two teardowns can overlap
+            # during a re-selection, and a flag set by one would
+            # silence the other's genuine death report.
+            try:
+                seen = getattr(self, "_closed_on_purpose", None)
+                if seen is None:
+                    seen = self._closed_on_purpose = set()
+                seen.add(h.pid)
+                # Never let this grow without bound if a reader thread
+                # dies before it can consume its entry.
+                if len(seen) > 32:
+                    seen.clear()
+                    seen.add(h.pid)
+            except Exception:
+                pass
             # Pipe recorder: let it close the ALSA device itself.
             try:
                 h.terminate()

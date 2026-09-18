@@ -452,6 +452,87 @@ check("the cache is still consulted first on a reopen",
       "known = win.get(card)" in CODE and "cap = attempt(*known)" in CODE,
       "evicting is right; throwing the optimisation away is not")
 
+print("\n── our own teardown is not the microphone dying ─────────────")
+# THE REOPEN LOOP, and the most expensive single line in this file's
+# history. close_capture() terminates the recorder. The reader thread's
+# finally could not see who ended it, so it reported OUR OWN
+# terminate() as the microphone dying and set _force_reopen — which
+# brought the supervisor straight back to tear down the replacement.
+#
+# One legitimate reopen, from anything at all, and the station spends
+# the rest of its life doing this:
+#
+#   recorder ... ended after 47 blocks (rc=1):
+#     said: Aborted by signal Terminated...     (every second, 332 times)
+#   blocks/sec: 47.7      live level: peak 0
+#
+# py-spy found the engine parked in open_pipe_cmd's settle-sleep,
+# reached from _run -> open_capture -> open_arecord -> attempt. Not
+# stuck, not crashed: opening a microphone it was about to close.
+
+
+class Recorder(object):
+    def __init__(self, pid):
+        self.pid = pid
+
+
+def reader_should_reopen(voice, proc, stopping=False):
+    """The production rule from the reader's finally, isolated."""
+    on_purpose = False
+    seen = getattr(voice, "_closed_on_purpose", None)
+    if seen and proc.pid in seen:
+        seen.discard(proc.pid)
+        on_purpose = True
+    return (not stopping) and (not on_purpose)
+
+
+class Fake(object):
+    pass
+
+
+fk = Fake()
+fk._closed_on_purpose = set()
+
+check("a recorder that died on its own DOES trigger a reopen",
+      reader_should_reopen(fk, Recorder(101)) is True)
+
+fk._closed_on_purpose.add(202)
+check("a recorder WE closed does not",
+      reader_should_reopen(fk, Recorder(202)) is False,
+      "this is the loop: our terminate reported as a death")
+check("...and the pid is consumed, so a later recorder reusing that "
+      "pid is not silently ignored",
+      reader_should_reopen(fk, Recorder(202)) is True,
+      fk._closed_on_purpose)
+
+fk._closed_on_purpose = {303, 404}
+check("overlapping teardowns are told apart by pid",
+      reader_should_reopen(fk, Recorder(303)) is False
+      and reader_should_reopen(fk, Recorder(404)) is False
+      and reader_should_reopen(fk, Recorder(505)) is True,
+      "a bare flag set by one teardown would silence the other's "
+      "genuine death report")
+
+check("shutting down suppresses it regardless",
+      reader_should_reopen(fk, Recorder(606), stopping=True) is False)
+
+check("close_capture records the pid BEFORE it terminates",
+      0 < CODE.find("seen.add(h.pid)") < CODE.find("h.terminate()"),
+      "recorded after the signal is a race the reader can win")
+check("the reader consumes the pid rather than leaving it set",
+      "seen.discard(proc.pid)" in CODE)
+check("the set cannot grow without bound",
+      "if len(seen) > 32:" in CODE,
+      "a reader that dies before consuming its entry must not leak")
+check("a deliberate close is COUNTED, not silent",
+      "self._capture_closes = getattr(" in CODE,
+      "suppressing the reopen must not suppress the evidence")
+check("the heartbeat reports the two separately",
+      "closed on purpose: %d" in CODE,
+      "332 reopens turned out to be 332 of the other kind")
+check("_force_reopen is guarded by the on-purpose test",
+      "if not self._stop.is_set() and not on_purpose:" in CODE)
+
 print("\n── a reopen is counted wherever it happens ──────────────────")
 check("the forced-reopen path increments the counter too",
       CODE.count("self._capture_restarts = getattr(") >= 2,
