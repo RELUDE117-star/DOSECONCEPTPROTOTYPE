@@ -1031,16 +1031,39 @@ them:**
    First chunks are 20–39 characters and `speak` does not track them
    (38 chars cost 5.53 s, 39 chars cost 3.56 s).
 
-**What is left, and it fits the evidence:** the same first chunk costs
-0.38–0.68 s in the loopback harness, which runs with the **app
-stopped**, and 2.78–5.53 s inside the running app. Two identical "The
-time is …" replies measured 2.78 and 3.25 — 17% apart on identical
-text — so the variable is load, not text.
+3. *It is CPU contention with the running app.* **Measured, and it is
+   not.** The same sentence, five renders each, on the device:
 
-During a turn `state != "idle"`, so Vosk is decoding every 21 ms block
-on the main loop while Piper renders. That is the leading candidate
-and it has **not been confirmed**. Confirm it before acting on it: the
-last three explanations for this number were all mine and all wrong.
+   ```
+   app running, engine idle   0.78 0.78 0.76 0.80 0.74   (2.6x real time)
+   app stopped                0.68 0.65 0.67 0.62 0.65   (3.1x real time)
+   ```
+
+   Contention costs **15%**, not 400%. Piper renders "The time is
+   1:28 PM." in 0.78 s with the whole application running.
+
+**So the 2.78 s is not synthesis.** Raw `PiperVoice.synthesize_wav`
+plus the wave write is 0.78 s; the app's `_t_first_sound` around
+`render_to_cache()` is 2.78 s. Roughly two seconds is spent somewhere
+between those two, and `render_to_cache` itself is thin — a cache
+check, `_synth`, an `os.replace`.
+
+**And the benchmark above has a flaw that points at the answer.** It
+loaded the voice with ONNX's DEFAULT thread count, i.e. all four
+cores. The application calls `_cap_onnx_threads()` and runs Piper at
+`intra_op_num_threads = 2`, which exists because an uncapped Piper
+took 392% of a core and starved the microphone (see § the CPU hog).
+So 0.78 s and 2.78 s were never measured under the same conditions,
+and the next measurement must apply the cap before drawing any
+conclusion from the gap.
+
+If the cap is the cost, it is a real trade-off rather than a bug: it
+was added to stop the capture being starved. The microphone faults it
+was protecting against have since been root-caused properly (channels,
+buffer, the reopen loop), so raising it to 3 may now be affordable —
+but raising thread counts on this board is exactly what broke the
+recorder once already, so it gets measured on the device with the
+reopen counter watched, not reasoned about here.
 
 ### Still open
 
