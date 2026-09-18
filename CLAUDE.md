@@ -997,6 +997,51 @@ browser. Traps, all of which have now bitten:
 - The panel and server are **copied into the bundle**, so moving the
   checkout cannot break the app.
 
+### Time-to-first-sound is the last cost, and it is CONTENTION
+
+With the Mac answering, the turn is:
+
+| reply | endpoint | stt | speak | total |
+|---|---|---|---|---|
+| "The time is 1:28 PM." | 0.50 | 0.99 | **2.78** | 4.38 |
+| "I could not find aspirin, Ryan." | 0.82 | 0.88 | **2.86** | 4.68 |
+| "No medications are in view today, …" | 0.44 | 0.96 | **3.56** | 5.08 |
+| "Current inventory: New Medication, …" | 0.50 | 0.84 | **5.53** | 6.94 |
+
+`speak` is `_t_first_sound` — the FIRST chunk's render and nothing
+else. Endpointing and transcription are now flat and small; this is
+the whole remaining gap against the two-second goal.
+
+**Two hypotheses tested and both wrong, recorded so nobody retries
+them:**
+
+1. *The background render was racing it.* `_speak()` started the
+   worker for chunks 2..n before rendering chunk 1. Reordering it
+   (render → stamp → start worker → play) is still correct and is in,
+   but it did **not** flatten `speak`.
+2. *The chunking was not splitting.* It is. Measured directly:
+
+   ```
+   'The time is 1:28 PM.'          chunks=1 first=20
+   'I could not find aspirin...'   chunks=1 first=31
+   'No medications are in view...' chunks=2 first=39
+   'Current inventory: New Med...' chunks=2 first=38
+   ```
+
+   First chunks are 20–39 characters and `speak` does not track them
+   (38 chars cost 5.53 s, 39 chars cost 3.56 s).
+
+**What is left, and it fits the evidence:** the same first chunk costs
+0.38–0.68 s in the loopback harness, which runs with the **app
+stopped**, and 2.78–5.53 s inside the running app. Two identical "The
+time is …" replies measured 2.78 and 3.25 — 17% apart on identical
+text — so the variable is load, not text.
+
+During a turn `state != "idle"`, so Vosk is decoding every 21 ms block
+on the main loop while Piper renders. That is the leading candidate
+and it has **not been confirmed**. Confirm it before acting on it: the
+last three explanations for this number were all mine and all wrong.
+
 ### Still open
 
 - **The acceptance harness reported "NO TURN RECORDED in 45s" for all
