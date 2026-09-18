@@ -1147,11 +1147,46 @@ abort in the child costs a respawn instead of the application — so the
 code and the switch stay. It is simply not a latency fix, and that is
 now a number rather than a suspicion.
 
-**Nine explanations, nine measurements, nine misses.** The 0.77 s
-standalone / 2.4 s in-app gap is still open. What has NOT been tried:
-timing `voice.synthesize_wav` from inside the live app process against
-a fresh voice loaded in that same process — every comparison so far
-has changed the process and the voice object together.
+**Nine explanations, nine measurements, nine misses.** Then the tenth,
+which finally isolates one variable — two PiperVoice objects in ONE
+process, same sentence, back to back:
+
+```
+voice A loaded in 4.99s
+  A render 1-3   0.91  0.79  0.75
+voice B loaded in 5.01s   (A still resident)
+  B render 1-3   0.82  0.81  0.75
+  A render 4-5   0.83  0.79   (both resident)
+```
+
+So it is **not the voice object ageing** and **not the memory
+footprint** — a process holding two full Piper sessions still renders
+in 0.79 s.
+
+### Where that leaves it, and it is a sharper question than before
+
+| | |
+|---|---|
+| a separate process, WHILE the app runs | **0.78 s** |
+| the app's own process, same moment, same board | **2.4 s** |
+
+Not machine-wide CPU contention — an external process is fast at the
+very moment the app is slow. Something **inside the app's interpreter**
+costs 1.6 s per render.
+
+**The leading candidate is now the GIL, and it has not been tested.**
+ONNX releases the GIL during inference, but the Python around it —
+phonemization, audio assembly — does not, and it is competing with a
+capture reader thread doing `ratecv` and AGC arithmetic on 47 blocks a
+second, plus the Tk main loop and the heartbeat. An external process
+has no such competition, which is exactly the shape of the table above.
+
+Note this also explains why gating Vosk and Silero did not help: both
+run their heavy work in C with the GIL released. The per-block Python
+in `ingest()` does not.
+
+**Do not "fix" this by moving synthesis to the worker.** That was
+measured: 6.71 s against 2.41 s in-process (§ above).
 
 ### The reply cache: 32 clips on disk, and no hit ever observed
 
