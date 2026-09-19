@@ -1189,6 +1189,57 @@ penalty                          none
 here rather than guessing a twelfth, because every one of these cost a
 device round trip and the station is not blocked on it.
 
+### THE PROFILE NAMES IT: piper forks espeak, per sentence
+
+`py-spy record` across a real turn, 1,668 samples in the app's own
+process. The frames around synthesis:
+
+```
+#163  phonemize              phonemize_espeak.py:36
+#164  phonemize              voice.py:297
+#165  synthesize             voice.py:349
+#166  synthesize_wav         voice.py:465
+#167  _synth                 dose_voice.py
+#168  render_to_cache        dose_voice.py
+#201  run                    subprocess.py:554      <-- here
+```
+
+**piper shells out to espeak to phonemize, every single sentence.**
+`subprocess.run` means `fork()` (or posix_spawn), and **fork cost
+scales with the parent's memory map**, not with the child. Forking
+from a 1.6 GB process with hundreds of mappings is far more expensive
+than forking from a 200 MB bench.
+
+That is the first hypothesis that fits EVERY measurement at once:
+
+| measurement | explained? |
+|---|---|
+| external process 0.78 s, app 2.4 s, same moment | yes — the bench is small, the app is not |
+| two voices in ONE process still 0.79 s | yes — that process is still small |
+| the 138 MB worker at 6.71 s | it forks too, and pays IPC on top |
+| a capture-reader thread costs nothing | yes — fork cost is not a GIL or CPU effect |
+| ONNX thread cap irrelevant (0.18 s) | yes — the cost is not in inference |
+| gating Vosk and Silero changed nothing | yes — wrong subsystem entirely |
+
+**It is hypothesis twelve and it is not yet confirmed** — the profile
+shows the call in the stack, not how much of the 1.6 s it holds (the
+self-time aggregation in job 219 printed nothing; the speedscope
+event parsing was wrong, not the data). Confirm by timing `phonemize`
+alone in a big process against a small one before acting.
+
+**If it holds, the fix is not to make fork cheaper.** It is the reply
+cache, which already skips this path entirely — and which produced the
+best turn of the session:
+
+```
+heard "What time is it?"
+endpoint 0.55 + stt 0.92 (mac) + speak 0.00 = TOTAL 1.69 s
+```
+
+`speak 0.00` is a cache HIT. Under the two-second goal, on a real
+turn. Pre-rendering the invariant replies at startup would make that
+the normal case rather than the lucky one.
+
 ### The one tool not yet pointed at this question
 
 Every measurement above has been a *reconstruction* — a bench that
