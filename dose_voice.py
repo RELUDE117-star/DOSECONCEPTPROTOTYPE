@@ -10148,7 +10148,27 @@ class DoseVoice:
         self._closed.clear()
         while True:
             t_stop = getattr(self, "_turn_stopped_at", time.time())
+            # WHERE THE HALF-SECOND NOBODY MEASURED IS GOING.
+            #
+            # total is (t1 - t_stop) + the first chunk's render, and
+            # with the speculation landing the device reads:
+            #
+            #   endpoint 0.46   stt 0.00   speak 0.00   TOTAL 1.07
+            #
+            # 0.46 + 0.00 + 0.00 does not make 1.07. Six tenths of a
+            # second happen between the person stopping and the reply
+            # being chosen, and not one line of this program measured
+            # them — so every explanation of them would have been a
+            # guess, and this file records what guessing has cost.
+            #
+            #   pre    stopping -> arriving here (endpoint, transcript,
+            #          and the listen loop's own overhead)
+            #   ui     the "thinking" state reaching the screen, which
+            #          marshals onto the Tk thread and WAITS for it
+            #   think  respond() — the language layer itself
+            t_enter = time.time()
             self._set_ui_state("thinking", user_text=text)
+            t_ui = time.time() - t_enter
             t0 = time.time()
             reply, keep_listening = self.respond(text)
             t_think = time.time() - t0
@@ -10163,6 +10183,11 @@ class DoseVoice:
                 "model": (self._ms_arch_used or "").split("_")[0].lower()
                 or self._whisper_size,
                 "think": t_think,
+                # See the comment in _handle_exchange: total is not
+                # endpoint + stt + speak, and the difference was
+                # unmeasured until now.
+                "pre": t_enter - t_stop,
+                "ui": t_ui,
                 "speak": getattr(self, "_t_first_sound", 0.0),
                 # WHERE THE FIRST CHUNK'S TIME WENT. `speak` above is
                 # one number and it has disagreed with every bench I
@@ -10228,6 +10253,12 @@ class DoseVoice:
                 "slow": round(self._turn["slow"], 2),
                 "speak": round(self._turn["speak"], 2),
                 "total": round(self._turn["total"], 2),
+                # The three that add up to the difference between
+                # total and (endpoint + stt + speak). See the comment
+                # in _handle_exchange.
+                "pre": round(self._turn.get("pre", 0.0), 2),
+                "ui": round(self._turn.get("ui", 0.0), 2),
+                "think": round(self._turn.get("think", 0.0), 2),
                 # audio quality: is it hearing clean speech, or mush?
                 "room": round(getattr(self, "_nfloor", 0)),
                 "voice": round(getattr(self, "_speech_level", 0)),
