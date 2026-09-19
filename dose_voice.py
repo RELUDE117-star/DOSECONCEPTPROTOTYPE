@@ -5386,6 +5386,30 @@ class DoseVoice:
                     chunks = self._split_first(self._sentences(line))
                 except Exception:
                     chunks = [line]
+                # AND EACH SENTENCE ON ITS OWN.
+                #
+                # Chunking depends on the length of the WHOLE line, so
+                # the same opening lands differently in different
+                # replies. "Acknowledged. Standing by." is 26
+                # characters, under the split threshold, and caches
+                # whole — while "Acknowledged. Protocol three: protect
+                # the patient." splits and asks for "Acknowledged."
+                # alone, which was never stored.
+                #
+                # The device showed it: every invariant opening
+                # CACHED, and the turn that said "Acknowledged."
+                # still rendering it from scratch.
+                #
+                # So the sentences are cached independently too. A
+                # sentence is the unit an opening is actually made of,
+                # and storing them costs a few hundred kilobytes.
+                try:
+                    for part in re.split(r"(?<=[.!?])\s+", line):
+                        part = part.strip()
+                        if part and part not in chunks:
+                            chunks.append(part)
+                except Exception:
+                    pass
                 for c in chunks:
                     if self._stop.is_set():
                         return

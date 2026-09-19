@@ -323,6 +323,37 @@ check("the inventory reply opens with exactly that cached fragment",
 # because it is short; only a long one splits, and then it splits at
 # the invariant prefix. Both are the good outcome, for different
 # reasons, and the test should say so rather than demand one shape.
+# AND THE SENTENCE PIECES, because chunking depends on the length of
+# the WHOLE line. "Acknowledged. Standing by." is 26 characters and
+# caches whole; "Acknowledged. Protocol three: protect the patient."
+# splits and asks for "Acknowledged." alone, which was never stored.
+# The device showed exactly that: every invariant opening CACHED, and
+# a turn saying "Acknowledged." still rendering it from scratch.
+check("each fixed line's SENTENCES are cached independently",
+      're.split(r"(?<=[.!?])\\s+", line)' in SRC,
+      "a sentence is the unit an opening is actually made of")
+
+
+def _prewarmed_keys(line):
+    import re as _re
+    out = list(pipeline(line))
+    for part in _re.split(r"(?<=[.!?])\s+", line):
+        part = part.strip()
+        if part and part not in out:
+            out.append(part)
+    return out
+
+
+check("the opening of a LONG reply is among a short line's keys",
+      _first("Acknowledged. Protocol three: protect the patient.")
+      in _prewarmed_keys("Acknowledged. Standing by."),
+      (_first("Acknowledged. Protocol three: protect the patient."),
+       _prewarmed_keys("Acknowledged. Standing by.")))
+check("...which is the case that was missing before",
+      _first("Acknowledged. Protocol three: protect the patient.")
+      not in pipeline("Acknowledged. Standing by."),
+      "chunking alone never produced this key")
+
 check("a LONG inventory opens with the cached invariant fragment",
       _first("Current inventory: New Medication, 26; Metformin, 12.")
       == "Current inventory:",
