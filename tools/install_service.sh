@@ -92,12 +92,49 @@ if ! systemctl --user cat "$UNIT_NAME" >/dev/null 2>&1; then
 fi
 
 systemctl --user enable "$UNIT_NAME" || die "enable failed"
-say "Enabled $UNIT_NAME (starts with the graphical session)."
+say "Enabled $UNIT_NAME."
 
-# Survive the user not being logged in graphically, if that ever matters.
+# ── LINGERING IS NOT OPTIONAL, AND THIS USED TO FAIL SILENTLY ───────
+#
+# It read:
+#
+#     loginctl enable-linger "$USER" 2>/dev/null \
+#         && say "Lingering enabled for $USER."
+#
+# `enable-linger` needs root (or a polkit prompt). As an ordinary
+# user it FAILS — and the error went to /dev/null, and the `&&` meant
+# the success message simply did not print. Nothing said anything.
+#
+# So the station had `Linger=no` for its entire life, which means
+# rjarv1's systemd manager only exists while somebody is logged in.
+# Combined with WantedBy=graphical-session.target (see the unit
+# file), the app never started at boot AT ALL — a cold-boot test on
+# 2026-09-19 counted ZERO instances and 3.4 GB free.
+#
+# FIFTH discarded error message in this project, after `-q` on
+# arecord, `stderr=DEVNULL` on the piper worker, that worker's own
+# exception, and `tail -1` on a git merge. Every one of them cost a
+# day.
+#
+# Now: try with sudo, say which way it went, and say it EVERY time —
+# a step that only reports when it succeeds is a step you cannot
+# tell apart from one that never ran.
 if command -v loginctl >/dev/null 2>&1; then
-    loginctl enable-linger "$USER" 2>/dev/null \
-        && say "Lingering enabled for $USER."
+    if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" = "yes" ]; then
+        say "Lingering already enabled for $USER."
+    elif sudo -n loginctl enable-linger "$USER" 2>&1; then
+        say "Lingering enabled for $USER (starts at boot, no login needed)."
+    elif loginctl enable-linger "$USER" 2>&1; then
+        say "Lingering enabled for $USER."
+    else
+        say ""
+        say "COULD NOT ENABLE LINGERING. Without it this unit only"
+        say "starts once somebody logs in graphically, so the station"
+        say "will NOT come up on its own after a power cut. Run:"
+        say "    sudo loginctl enable-linger $USER"
+        say ""
+    fi
+    say "  Linger is now: $(loginctl show-user "$USER" -p Linger --value 2>/dev/null)"
 fi
 
 systemctl --user start "$UNIT_NAME" || die "start failed — see: systemctl --user status $UNIT_NAME"

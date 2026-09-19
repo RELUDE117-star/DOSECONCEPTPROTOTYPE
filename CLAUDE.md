@@ -2199,6 +2199,123 @@ filenames across the whole of DOSE.sh and matched an unrelated
 install-copy line 15,000 characters away. **Assert the property from
 the line it is about.**
 
+## IT NEVER STARTED AT BOOT. NOT ONCE, IN ITS WHOLE LIFE.
+
+**2026-09-19, and this is the most important thing in this file.**
+
+Ryan, before going to bed:
+
+    "make sure that the versin of the app we have been opening and
+     the one that actually works is the one that autoamtically starts
+     at startup fo the raspberry pi, and that there is always only
+     one session that opens up when i replug in the raspberry pi to
+     power"
+
+So a job rebooted the Pi and counted, instead of checking that the
+unit was `enabled` and calling that proof:
+
+    INSTANCES AFTER COLD BOOT: 0
+    service: inactive
+    memory available: 3401 MB
+
+**Not two sessions. Zero.** Three and a half gigabytes free is a
+board running nothing at all. Pull the plug on this medication
+cabinet and it came back silent.
+
+**TWO CAUSES, BOTH SILENT, BOTH YEARS-OLD-FEELING:**
+
+**1. `WantedBy=graphical-session.target`.** That target is one a
+desktop environment is supposed to activate. This board's compositor
+does not. The device said so the moment anybody asked:
+
+    is graphical-session.target ever reached:  inactive
+    is default.target reached:                 active
+
+So the unit was `enabled` — for a moment that never arrives. And the
+unit's own state had been saying it all along, in fields nobody had
+read:
+
+    is-enabled:            enabled
+    ActiveEnterTimestamp=  (empty)
+    journalctl:            -- No entries --
+
+**ENABLED AND NEVER STARTED.** Not failed, not crashed, not
+restarted — never attempted, in any boot, ever. A unit that has
+never run has no log, and **"-- No entries --" reads exactly like
+"nothing went wrong"**.
+
+**2. `Linger=no`.** `install_service.sh` did call
+`loginctl enable-linger`, as an ordinary user, where it needs root —
+with the error sent to `/dev/null` and the success message behind a
+`&&`. It failed every time and said nothing, for the life of the
+station. **Fifth discarded error message in this project**, after
+`-q` on arecord, `stderr=DEVNULL` on the piper worker, that worker's
+own exception, and `tail -1` on a git merge.
+
+Fix: `WantedBy=default.target graphical-session.target`, plus
+`sudo loginctl enable-linger rjarv1`. Verified by rebooting:
+**1 instance, 20 seconds after a cold boot**, cgroup
+`.../dose-home-station.service`, same four file hashes as every test
+that evening.
+
+**WHY NOBODY CAUGHT IT:** every restart ever tested here was
+`systemctl --user restart` or a `kill -9`, *inside a session that was
+already up*. This file has said "systemd is now ENABLED and is the
+ONLY start path" since 2026-09-17, and it was true — the path was
+simply never automatic. **"Verified: kill -9 the app and it is back
+in 24 s" is not a boot test.** The only test that counts is the one
+the owner performs: pull the plug.
+
+**AND DO NOT ADD AN ExecStartPre THAT WAITS FOR THE DISPLAY.** I did,
+to stop a crash-loop against a compositor that is not up yet; the
+quoted value contained a newline and systemd rejected the file
+entirely —
+
+    Unbalanced quoting, ignoring: "/bin/bash -c '# wait-for-display"
+    Unit configuration has fatal error, unit will not be started.
+
+— turning "a unit nothing wants" into "a unit that will not parse",
+which is worse. `Restart=always` with `RestartSec=5` already handles
+it and `StartLimitBurst=5/300s` stops the thrash. **The unit is the
+one file on this board that, if malformed, means the cabinet never
+starts.** It is not the place to be clever.
+
+## The desktop icon, and one station whatever you click
+
+`Exec=/bin/bash $APP_DIR/DOSE.sh` in the desktop shortcut meant
+clicking the station's own icon started a SECOND full instance
+whenever the service was up. Ryan diagnosed this himself before any
+measurement did. The entry also had no `Icon=` line, which is why he
+was running DOSE.sh by hand — the missing logo and the duplicate
+instance were the same bug.
+
+- `tools/dose_launch.sh` is what the shortcut runs: running → raise
+  the window; down → `systemctl --user start`; no unit → DOSE.sh,
+  last resort. It also leaves `voice/update_request`, which
+  `dose_app._consume_update_request()` picks up on its one-second
+  tick, so clicking the icon pulls the latest build even when the
+  station is already up — through the ORDINARY update check, brakes
+  intact.
+- `DOSE.sh` refuses to be the second copy too (systemd exempt via
+  `INVOCATION_ID`), because a guard covering only the path I was
+  thinking about is the shape of every duplicate bug here.
+- The icon is copied to `~/.local/share/icons/dose.png` rather than
+  referenced inside the checkout, which every update rewrites.
+- **`DOSE_FREEZE=1` was in the unit**, so the auto-update Ryan asked
+  for was blocked by the service itself. Removed — the brakes that
+  made it necessary (persisted cooldown, three tries per hash) now
+  exist properly.
+- Verified: 1 instance before, after one click, after two, and after
+  running DOSE.sh by hand the old way.
+- `tests/test_single_instance.py` (37 checks).
+
+**Quoting, four levels deep, broke two separate steps tonight**: the
+panel-pin code inline in a job (`unexpected EOF while looking for
+matching quote`, `/^[panel]/: No such file`) and a `printf` whose
+newlines became literal `n`. Anything non-trivial that runs on the Pi
+goes in a FILE that gets copied there — job → ssh → sudo → bash -c is
+four shells, and only a path should cross them.
+
 ## Known limitations / TODO
 - `arecord -D default` fails with `Host is down` — the PipeWire ALSA plugin is
   not serving this user. Not blocking (the pinned `plughw:5,0` route works),

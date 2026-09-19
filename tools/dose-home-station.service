@@ -87,4 +87,60 @@ StandardOutput=journal
 StandardError=journal
 
 [Install]
-WantedBy=graphical-session.target
+# ── THE LINE THAT MEANT IT NEVER STARTED AT BOOT ────────────────────
+#
+# This said `WantedBy=graphical-session.target` alone, and on
+# 2026-09-19 a cold-boot test found the station DID NOT COME UP:
+#
+#     INSTANCES AFTER COLD BOOT: 0
+#     service: inactive
+#     memory available: 3401 MB
+#
+# Three and a half gigabytes free is a board running nothing. Pull
+# the plug on this cabinet and it came back silent.
+#
+# graphical-session.target is a target a desktop environment is meant
+# to activate. This board's compositor does not, and the device said
+# so plainly once anybody asked:
+#
+#     is graphical-session.target ever reached:  inactive
+#     is default.target reached:                 active
+#
+# So the unit was `enabled` — for a moment that never arrives. The
+# unit's own state named it too, in fields nobody had read:
+#
+#     ActiveEnterTimestamp=  (empty)
+#     journalctl:            -- No entries --
+#
+# ENABLED AND NEVER STARTED. Not failed, not crashed — never
+# attempted, in any boot, ever. A unit that has never run has no log,
+# and "no entries" reads exactly like "nothing went wrong".
+#
+# It worked all this time because every start was a MANUAL one:
+# `systemctl --user restart`, inside a session that was already up,
+# by me. CLAUDE.md has said "systemd is the ONLY start path" since
+# September 17 and the path was never automatic. Nobody had tested
+# the one thing a person actually does — pull the plug — because
+# every restart test was a service restart or a kill -9.
+#
+# default.target is what a LINGERING user manager reaches at boot.
+# Lingering is the other half and is not set by this file:
+#
+#     sudo loginctl enable-linger rjarv1
+#
+# without which rjarv1's systemd manager only exists while somebody
+# is logged in. Verified together: one instance, 20 seconds after a
+# cold boot, in cgroup .../dose-home-station.service.
+#
+# graphical-session.target stays alongside, so nothing is taken away
+# from a system where it does work.
+#
+# AND DO NOT ADD AN ExecStartPre THAT WAITS FOR THE DISPLAY. I tried;
+# the quoted value contained a newline and systemd rejected the whole
+# file — "Unbalanced quoting ... unit will not be started" — which
+# turned "a unit nothing wants" into "a unit that will not parse".
+# Restart=always with RestartSec=5 already covers a compositor that
+# is not up yet, and StartLimitBurst keeps that from thrashing. This
+# is the one file on the board that, if malformed, means the cabinet
+# never starts.
+WantedBy=default.target graphical-session.target
