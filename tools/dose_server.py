@@ -192,6 +192,32 @@ PROMPT = ("Medication reminder device. Commands: what time is it, "
           "go to user, next dose.")
 
 
+def _norm_words(s):
+    return "".join(c if (c.isalnum() or c == " ") else " "
+                   for c in (s or "").lower()).split()
+
+
+# The prompt's OPENING, which is not a thing anybody says to a
+# medicine cabinet. The command phrases inside the prompt are exactly
+# what people do say, so they cannot be used as a signature — "what
+# time is it" is a contiguous substring of the prompt and also the
+# most common real question this station gets.
+_PROMPT_TELLS = (
+    ("medication", "reminder", "device"),
+    ("commands", "what", "time", "is", "it", "what", "do", "i", "take"),
+)
+
+
+def _is_prompt_echo(text):
+    w = tuple(_norm_words(text))
+    if not w:
+        return False
+    for tell in _PROMPT_TELLS:
+        if w[:len(tell)] == tell:
+            return True
+    return False
+
+
 def transcribe(wav_bytes, model_name=None):
     """WAV in, text out. The only thing this program does.
 
@@ -210,6 +236,26 @@ def transcribe(wav_bytes, model_name=None):
         vad_filter=True, condition_on_previous_text=False,
         initial_prompt=PROMPT)
     text = " ".join(s.text for s in segs).strip()
+    if _is_prompt_echo(text):
+        # THE MODEL HANDING THE PROMPT BACK.
+        #
+        # initial_prompt biases the decoder toward this station's
+        # vocabulary, which is why every model got every command
+        # exactly right. On audio it cannot make out, it sometimes
+        # returns the prompt INSTEAD — and the device caught base.en
+        # doing it on a real turn:
+        #
+        #     stt[base.en] 3.88s of audio -> 'Medication reminder device.'
+        #
+        # which the station then tried to answer. Ryan asked for
+        # exactly this to be watched: "it needs to be correct on what
+        # was actually said and what was transcribed".
+        #
+        # Empty is the honest answer, and it is also the useful one:
+        # the Pi treats an unusable transcript as a reason to ask
+        # /stt, where the stronger model gets a proper try.
+        log("dropped a prompt echo: %r" % text[:60])
+        text = ""
     took = time.time() - t0
     _STATS["audio_seconds"] += secs
     _STATS["infer_seconds"] += took

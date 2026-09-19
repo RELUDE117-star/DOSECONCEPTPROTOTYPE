@@ -153,6 +153,29 @@ check("...and load_model refuses any name that is not one of them",
       'if name not in (MODEL_NAME, FAST_MODEL_NAME):' in SRV_TEXT,
       "belt and braces: nothing can reach it from a request, and it "
       "still checks")
+# THE MODEL HANDING THE PROMPT BACK. initial_prompt biases the decoder
+# toward this station's vocabulary — it is why every model got every
+# command exactly right — and on audio it cannot make out it sometimes
+# returns the prompt INSTEAD. The device caught it on a real turn:
+#
+#     stt[base.en] 3.88s of audio -> 'Medication reminder device.'
+#
+# and the station tried to answer it.
+check("a transcript that is just the prompt coming back is dropped",
+      "_is_prompt_echo" in SRV_TEXT
+      and SRV_TEXT.index("def _is_prompt_echo")
+      < SRV_TEXT.index("if _is_prompt_echo(text):"))
+check("...before the caller ever sees it",
+      SRV_TEXT.index("if _is_prompt_echo(text):")
+      < SRV_TEXT.index("return text, secs, took"))
+check("...and it is the OPENING that is the signature, not the "
+      "commands inside the prompt",
+      "_PROMPT_TELLS" in SRV_TEXT,
+      "'what time is it' is a contiguous substring of the prompt AND "
+      "the most common real question this station gets — it cannot "
+      "be used to detect an echo")
+check("...and dropping one is logged, not silent",
+      "dropped a prompt echo" in SRV_TEXT)
 check("the request body is still only audio",
       "json.loads" not in SRV_TEXT.split("def do_POST")[1],
       "nothing in the body selects anything")
