@@ -384,6 +384,10 @@ STT_TURN_BUDGET = float(os.environ.get("DOSE_STT_BUDGET", "7.0"))
 # it. The call cannot be cancelled, so it is abandoned rather than
 # stopped: see _fast_transcribe. Zero disables the ceiling.
 STT_LOCAL_CEILING = float(os.environ.get("DOSE_STT_LOCAL_CEILING", "8.0"))
+# ...and the shortest wait worth starting one for. A recogniser handed
+# 0.2 s of wall clock is a wasted pass and a guaranteed abandon; below
+# this the turn is better served by the live transcript it already has.
+STT_LOCAL_FLOOR = float(os.environ.get("DOSE_STT_LOCAL_FLOOR", "1.5"))
 # The most audio a single turn may hand the recogniser. Transcription
 # cost is linear in length, so the worst turn is the longest one: the
 # device logged "fast": 25.02 on a buffer that had been accumulating
@@ -2296,10 +2300,17 @@ class DoseVoice:
     FAST_CONF_FLOOR = float(os.environ.get("DOSE_FAST_CONF_FLOOR",
                                            "-0.85"))
 
-    def _fast_transcribe(self, audio_bytes):
+    def _fast_transcribe(self, audio_bytes, budget=None):
         """Run the fast recogniser chosen for this board, UNDER A WALL
         CLOCK. Returns (text, engine_tag). Sets self._fw_conf as a side
         effect (0.0 when the engine reports no confidence).
+
+        `budget` is what remains of STT_TURN_BUDGET when the caller
+        got here — because a remote attempt may already have spent
+        most of it, and two separately bounded steps in a row are not
+        a bounded turn. It is floored at STT_LOCAL_FLOOR (a pass with
+        a second and a half is worth starting; one with 0.2 s is not)
+        and capped at STT_LOCAL_CEILING.
 
         NOTHING IN A TURN MAY RUN UNBOUNDED. The device recorded this:
 
@@ -2322,6 +2333,8 @@ class DoseVoice:
         person stand at a medication cabinet for a hundred seconds.
         """
         if STT_LOCAL_CEILING > 0:
+            wait = STT_LOCAL_CEILING if budget is None else max(
+                STT_LOCAL_FLOOR, min(STT_LOCAL_CEILING, budget))
             out = {}
 
             def run():
@@ -2333,14 +2346,14 @@ class DoseVoice:
             th = threading.Thread(target=run, daemon=True,
                                   name="stt-fast")
             th.start()
-            th.join(STT_LOCAL_CEILING)
+            th.join(wait)
             if "r" in out:
                 return out["r"]
             self._stt_abandoned = getattr(self, "_stt_abandoned", 0) + 1
             if _recording():
                 self._stt_note = (
-                    "local pass abandoned at %.0fs — answering with "
-                    "the live transcript" % STT_LOCAL_CEILING)
+                    "local pass abandoned at %.1fs — answering with "
+                    "the live transcript" % wait)
             return "", "abandoned"
         return self._fast_transcribe_now(audio_bytes)
 
@@ -2821,7 +2834,21 @@ class DoseVoice:
             # cloud unusable/failed — fall through to the local models
 
         # 1) THE FAST PATH answers.
-        fast, feng = self._fast_transcribe(audio_bytes)
+        # WHAT IS LEFT OF THE TURN, NOT A FIXED EIGHT SECONDS.
+        #
+        # The ceiling worked — a pass that used to run 105 s was
+        # abandoned at 8 — but the turn it was in still came to 11.96 s,
+        # because the Mac had already spent its timeout before the
+        # local pass started its own. Two bounded steps in a row are
+        # not a bounded turn.
+        #
+        # STT_TURN_BUDGET is the number that was chosen against what a
+        # person does: past about five seconds they assume the machine
+        # did not hear them and say it again. So the fast pass gets
+        # what remains of it, floored at something a recogniser can
+        # actually finish in, and never more than the hard ceiling.
+        fast, feng = self._fast_transcribe(
+            audio_bytes, budget=STT_TURN_BUDGET - (time.time() - t_start))
         fast_conf = getattr(self, "_fw_conf", 0.0)
         self._raw_fast = fast or ""
         if _recording():

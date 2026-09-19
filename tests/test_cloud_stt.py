@@ -177,7 +177,7 @@ for a, val in (("_raw_vosk", ""), ("_raw_fast", ""), ("_raw_slow", ""),
                ("_fw_conf", 0.0), ("_fast_choice", "whisper")):
     setattr(v, a, val)
 v._cloud_enabled = lambda: False
-v._fast_transcribe = lambda a: ("open storage", "whisper-tiny.en")
+v._fast_transcribe = lambda a, budget=None: ("open storage", "whisper-tiny.en")
 v._whisper_transcribe = lambda a: ""
 v._trim_silence = lambda a, keep_ms=140: a
 got = v._better_transcribe(b"x" * 4000, "")
@@ -193,7 +193,7 @@ for a, val in (("_raw_vosk", ""), ("_raw_fast", ""), ("_raw_slow", ""),
 v2._cloud_enabled = lambda: True
 v2._is_online = lambda ttl=30.0: True
 v2._cloud_transcribe = lambda a: ("what time is it", "cloud:groq", 0.4)
-v2._fast_transcribe = lambda a: ("WRONG local", "whisper-tiny.en")
+v2._fast_transcribe = lambda a, budget=None: ("WRONG local", "whisper-tiny.en")
 v2._whisper_transcribe = lambda a: ""
 v2._trim_silence = lambda a, keep_ms=140: a
 got2 = v2._better_transcribe(b"x" * 4000, "")
@@ -210,7 +210,7 @@ for a, val in (("_raw_vosk", ""), ("_raw_fast", ""), ("_raw_slow", ""),
 v3._cloud_enabled = lambda: True
 v3._is_online = lambda ttl=30.0: True
 v3._cloud_transcribe = lambda a: ("", "cloud", 0.0)   # failed
-v3._fast_transcribe = lambda a: ("open settings", "whisper-tiny.en")
+v3._fast_transcribe = lambda a, budget=None: ("open settings", "whisper-tiny.en")
 v3._whisper_transcribe = lambda a: ""
 v3._trim_silence = lambda a, keep_ms=140: a
 got3 = v3._better_transcribe(b"x" * 4000, "")
@@ -230,7 +230,7 @@ for a, val in (("_raw_vosk", ""), ("_raw_fast", ""), ("_raw_slow", ""),
 v4.CLOUD_BUDGET_S = 0.5          # tiny budget for the test
 v4._cloud_enabled = lambda: True
 v4._is_online = lambda ttl=30.0: True
-v4._fast_transcribe = lambda a: ("open storage", "whisper-tiny.en")
+v4._fast_transcribe = lambda a, budget=None: ("open storage", "whisper-tiny.en")
 v4._whisper_transcribe = lambda a: ""
 v4._trim_silence = lambda a, keep_ms=140: a
 v4._write_wav = lambda a: "/tmp/_hang.wav"

@@ -206,7 +206,10 @@ check("...and the short-circuit is the thing guarded by it",
       "if not going_remote and spec" in DVC)
 check("the Mac is still tried before the local models",
       DVC.index("_remote_stt.available()")
-      < DVC.index("fast, feng = self._fast_transcribe(audio_bytes)"))
+      # NOT the exact call text — it gained a `budget` argument and
+      # this failed with nothing wrong. Assert the ORDERING, from a
+      # part of the call that names what it is.
+      < DVC.index("fast, feng = self._fast_transcribe("))
 check("a Mac answer is labelled as one in the turn log",
       'self._last_engine = "mac"' in DVC,
       "'engine=whisper-tiny.en' on every row is how this was found")

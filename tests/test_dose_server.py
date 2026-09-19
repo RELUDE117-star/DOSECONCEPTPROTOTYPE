@@ -220,7 +220,8 @@ check("the Mac is optional at import time",
 check("it is tried before the local models",
       "_remote_stt.available()" in DVC
       and DVC.index("_remote_stt.available()")
-      < DVC.index("fast, feng = self._fast_transcribe(audio_bytes)"))
+      # NOT the exact call text: it gained a `budget` argument.
+      < DVC.index("fast, feng = self._fast_transcribe("))
 check("the whole attempt is inside a try",
       "if allow_cloud and _remote_stt is not None:" in DVC)
 check("a remote answer still has to be usable",

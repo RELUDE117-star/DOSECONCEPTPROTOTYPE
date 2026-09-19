@@ -75,7 +75,14 @@ class Fake(object):
         e._usable = lambda t: bool(t) and usable
         e._fw_conf = 0.0
 
-        def fast(_b):
+        # THE DOUBLE TAKES THE SAME ARGUMENTS AS THE REAL THING.
+        # _fast_transcribe gained a `budget` — what remains of the
+        # turn — and a fake that refuses it tests the fake. That is
+        # the piper_worker lesson, recorded in CLAUDE.md: "a test
+        # double more permissive than the real thing tests the
+        # double"; one that is STRICTER hides a real signature change
+        # behind a TypeError.
+        def fast(_b, budget=None):
             time.sleep(min(fast_secs, 0.05))
             # Report the time the REAL model would have taken, which is
             # what the estimate is built from.
@@ -364,7 +371,7 @@ check("...and it is settable on the device without a code change",
 _ft = CODE.split("def _fast_transcribe(")[1]
 _ft = _ft[:_ft.index("def _fast_transcribe_now")]
 check("the recogniser runs where it can be given up on",
-      "threading.Thread" in _ft and "join(STT_LOCAL_CEILING)" in _ft,
+      "threading.Thread" in _ft and "th.join(wait)" in _ft,
       "faster-whisper cannot be cancelled mid-call")
 check("...and the turn carries on rather than waiting for it",
       'return "", "abandoned"' in _ft)
@@ -379,6 +386,30 @@ check("the ceiling wraps the FAST pass, which is the one that ran "
       CODE.index("def _fast_transcribe(")
       < CODE.index("def _fast_transcribe_now("),
       "a ceiling on the second step is not a ceiling")
+
+# TWO BOUNDED STEPS IN A ROW ARE NOT A BOUNDED TURN.
+#
+# The ceiling worked — a pass that used to run 105 s was abandoned at
+# 8 — and the turn it was in still came to 11.96 s, because the remote
+# attempt had already spent its own timeout before the local pass
+# started counting. The fast pass gets what REMAINS of the turn
+# budget.
+check("the fast pass is given what is left of the turn, not a fixed "
+      "number",
+      "budget=STT_TURN_BUDGET - (time.time() - t_start)" in CODE,
+      "a remote attempt may already have spent most of it")
+check("...floored, because a pass with 0.2s is a guaranteed abandon",
+      hasattr(dose_voice, "STT_LOCAL_FLOOR")
+      and 0 < dose_voice.STT_LOCAL_FLOOR < dose_voice.STT_LOCAL_CEILING,
+      getattr(dose_voice, "STT_LOCAL_FLOOR", None))
+check("...and still capped by the hard ceiling",
+      "min(STT_LOCAL_CEILING, budget)" in _ft)
+check("the floor is settable on the device",
+      "DOSE_STT_LOCAL_FLOOR" in CODE)
+_worst = (dose_voice.STT_TURN_BUDGET + dose_voice.STT_LOCAL_CEILING)
+check("and the arithmetic bounds the stage: budget + ceiling is the "
+      "worst case, not budget x steps",
+      _worst <= 16.0, "%.1fs" % _worst)
 
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
