@@ -2504,6 +2504,37 @@ class DoseVoice:
         "adherence", "did_take", "greeting", "thanks", "repeat", "help",
     ))
 
+    def _vad_line(self):
+        """One heartbeat line about the two gates a sound has to pass.
+
+        "It hears nothing" and "it hears plenty and calls none of it
+        speech" are indistinguishable from outside, and the station
+        stopped entering 'listening' at exactly the point
+        silero_vad.onnx stopped being deleted on every launch — so for
+        the first time in a long while the VAD is genuinely running.
+        That is the correct state, but it means the model's verdict is
+        now load-bearing and nothing reported it.
+
+          loud   blocks that cleared the energy gate
+          voice  ...of which Silero called speech
+
+        loud 0 means the audio is not arriving. loud high with voice 0
+        means it is arriving and being rejected, which is a different
+        problem with a different fix.
+        """
+        try:
+            loud = getattr(self, "_vad_loud", 0)
+            voice = getattr(self, "_vad_voice", 0)
+            pct = (100.0 * voice / loud) if loud else 0.0
+            model = "silero" if getattr(self, "_vad", None) is not None \
+                else "energy only (Silero absent — fails open)"
+            return ("voice gate:     loud %d   called speech %d (%.0f%%)"
+                    "   floor %.0f   model: %s"
+                    % (loud, voice, pct, getattr(self, "_nfloor", 0.0),
+                       model))
+        except Exception:
+            return "voice gate:     unreadable"
+
     def _cache_line(self):
         """One heartbeat line about the reply cache: how many clips are
         on disk, whether anything wiped them this run, and how far the
@@ -4176,6 +4207,7 @@ class DoseVoice:
                 # voice/selection.txt: ask the program, do not model
                 # it.
                 self._cache_line(),
+                self._vad_line(),
                 # The fault this station actually had: blocks arriving
                 # on time, every sample zero. "HEARING: YES" above is
                 # about the DEVICE; this line is about the SIGNAL.
@@ -6278,6 +6310,19 @@ class DoseVoice:
                     self._turn_snr = max(getattr(self, "_turn_snr", 0.0),
                                          self._snr)
                 energetic = rms > gate
+                # WHAT THE GATE AND THE MODEL EACH DECIDED.
+                #
+                # The station stopped entering 'listening' at exactly
+                # the point silero_vad.onnx stopped being deleted on
+                # every launch — so for the first time in a while the
+                # VAD is genuinely running, and "it hears nothing" and
+                # "it hears everything and calls none of it speech"
+                # look identical from outside. Two counters separate
+                # them, and the heartbeat prints both.
+                if energetic:
+                    self._vad_loud = getattr(self, "_vad_loud", 0) + 1
+                    if is_voice:
+                        self._vad_voice = getattr(self, "_vad_voice", 0) + 1
                 if energetic and is_voice:
                     # stamp the moment: the endpointer uses this to cut
                     # the instant the user stops talking
