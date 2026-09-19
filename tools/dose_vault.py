@@ -224,6 +224,31 @@ def main(argv):
         print()
         print("A read prompts on this machine. Nothing here stores or")
         print("knows your password — macOS holds that decision.")
+        print()
+        # IF HE WANTS TO DO IT BY HAND, HE SHOULD BE ABLE TO.
+        #
+        # Ryan: "that would be smart to just save it to the mac
+        # passwords myself and then i have to use the fingerprint
+        # authentication jsut to use it". Nothing here needs to be the
+        # one that creates the item — the server looks it up by name.
+        # So the names are printed rather than buried, and an item he
+        # makes in Keychain Access or Passwords works identically.
+        print("To add or manage these yourself, the names are:")
+        print()
+        for name in sorted(KNOWN):
+            print("    %-16s service %-22s account %s"
+                  % (name, _service(name), _account()))
+        print()
+        print("In Keychain Access: File > New Password Item, with the")
+        print("service as the Keychain Item Name. Then open it, go to")
+        print("Access Control, and choose 'Confirm before allowing")
+        print("access' with NO applications in the list — that is the")
+        print("same thing --new does, and it is what makes macOS ask.")
+        print()
+        print("Touch ID: where your Mac offers it, the prompt that")
+        print("appears will take your fingerprint instead of typing")
+        print("the password. That is macOS's choice, not this")
+        print("program's — there is nothing here to turn on.")
         return 0
 
     if a.new:
