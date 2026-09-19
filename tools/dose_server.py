@@ -133,8 +133,46 @@ def log(msg):
         pass
 
 
+def _vault():
+    """tools/dose_vault.py, if it is beside us. Optional on purpose:
+    a station that has not been through the protection step must keep
+    working exactly as before."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import dose_vault
+        return dose_vault
+    except Exception:
+        return None
+
+
 def token():
-    """The shared secret, created once, readable only by this user."""
+    """The shared secret.
+
+    THE KEYCHAIN FIRST, AND IT PROMPTS.
+
+    Ryan: "you physically and not an autumn or ai needs to manually
+    type in a password on the MacBook itself in order to ever get
+    access to any of the token".
+
+    When the token has been moved into the login keychain with no
+    trusted applications, reading it here puts a dialog on this Mac
+    and waits for him. That happens ONCE, when the server starts —
+    not per request — so the cost is one password at launch and the
+    plaintext never goes back to disk.
+
+    A file is still read when the keychain has nothing, because a
+    station that has not been through the protection step has to keep
+    working. `--status` says which of the two is in force, in words,
+    so nobody has to guess whether it is protected.
+    """
+    v = _vault()
+    if v is not None and v.supported() and v.present("mac-token"):
+        val, err = v.get("mac-token")
+        if val:
+            log("token released from the keychain by someone at this Mac")
+            return val
+        log("the keychain did not release the token (%s) — "
+            "falling back to the file" % (err or "refused"))
     try:
         with open(TOKEN_FILE) as f:
             t = f.read().strip()
@@ -417,11 +455,24 @@ def main():
         print(token())
         return 0
     if a.status:
-        print(json.dumps({"lan": lan_address(), "port": a.port,
-                          "model": MODEL_NAME,
-                          "token_installed": os.path.exists(TOKEN_FILE),
-                          "peer": ALLOW_PEER or "any private address"},
-                         indent=1))
+        v = _vault()
+        protected = bool(v is not None and v.supported()
+                         and v.present("mac-token"))
+        print(json.dumps(
+            {"lan": lan_address(), "port": a.port,
+             "model": MODEL_NAME, "fast_model": FAST_MODEL_NAME,
+             "token_installed": os.path.exists(TOKEN_FILE),
+             # SAY WHICH, IN WORDS. "token_installed: true" was true of
+             # a plaintext file anything running as Ryan could read,
+             # and it looked reassuring. Whether a person has to
+             # approve the read is the thing worth reporting.
+             "token_protected": protected,
+             "token_protection": (
+                 "keychain — a person must approve each read on this Mac"
+                 if protected else
+                 "PLAINTEXT FILE — anything running as you can read it"),
+             "peer": ALLOW_PEER or "any private address"},
+            indent=1))
         return 0
     if a.serve:
         return serve(a.host or None, a.port, not a.no_preload)
