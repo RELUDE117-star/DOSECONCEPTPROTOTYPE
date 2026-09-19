@@ -627,7 +627,21 @@ def _find_logo():
 def _load_med_data():
     try:
         with open(DATA_PATH, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+        # SELF-HEAL THE PERMISSIONS ON THE WAY IN.
+        #
+        # _save_med_data() below sets 0600, but that only fixes the
+        # file the next time something SAVES. Measured on the device
+        # after shipping that change: still -rw-rw-r--, because the
+        # station had not written its medication file since. A
+        # security fix that waits for an unrelated event is a security
+        # fix you cannot state you have made. Startup is the event.
+        try:
+            if os.stat(DATA_PATH).st_mode & 0o077:
+                os.chmod(DATA_PATH, 0o600)
+        except Exception:
+            pass
+        return data
     except Exception:
         return {}
 
