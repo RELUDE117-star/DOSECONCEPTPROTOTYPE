@@ -294,9 +294,61 @@ check("the prewarm chunks each line the way _speak does",
       "self._split_first(self._sentences(line))" in SRC,
       "whole lines are not what render_to_cache is asked for")
 check("...and renders every chunk, not just the first",
-      "for c in chunks:" in SRC and "self.render_to_cache(c)" in SRC,
+      "heads.append(chunks[0])" in SRC and "tails.extend(chunks[1:])" in SRC
+      and "self.render_to_cache(c)" in SRC,
       "the later ones are played seconds after and cost nothing to "
       "have ready")
+# ORDER, NOT JUST COVERAGE. Rendering in list order put three safety
+# monologues at positions six to eight — the longest lines the station
+# has, and among the rarest — while "Acknowledged." and "Standing by."
+# waited behind them. Only the first chunk of a reply is ever waited
+# for, so every first chunk is rendered before any remainder, shortest
+# first.
+check("first chunks are rendered before sentences, and those before "
+      "remainders",
+      "for group in (heads, sents, tails):" in SRC,
+      "the openings decide time-to-first-sound; nothing else does")
+check("...and shortest first inside each group",
+      "sorted(group, key=len)" in SRC,
+      "a one-second clip that unblocks a reply beats a nine-second "
+      "monologue that does not")
+check("the prewarm stands aside during a turn",
+      'while self.state in ("thinking", "speaking"):' in SRC,
+      "nice(10) settles cores, not the four ONNX threads")
+
+# THE BUG THIS COST AN HOUR ON. render_to_cache() writes its timings
+# to self._t_tts, which is what the turn log prints as `hit`. The
+# prewarm calls it hundreds of times on its own schedule — so without
+# the thread-local flag, its misses land on whatever turn is in
+# flight. The device showed "Acknowledged." present in the cache by
+# key, and the turn that spoke it logging hit=0.
+_pre = SRC.index("def prewarm_replies")
+_body = SRC[_pre:SRC.index("def ", SRC.index("self._prewarmed = n", _pre))]
+check("the prewarm marks itself speculative, so its rows never land "
+      "on a live turn",
+      "_TL.speculative = True" in _body,
+      "fourth instance of two threads, one attribute, last writer wins")
+check("...before it renders anything",
+      _body.index("_TL.speculative = True")
+      < _body.index("self.render_to_cache("),
+      "a flag set after the first render is a flag that missed one")
+
+# respond() holds twenty-seven fixed replies that _fixed_lines() never
+# knew about — including the "Acknowledged. Standing by." family that
+# the device caught rendering from scratch.
+check("the fixed replies inside respond() are prewarmed too",
+      "self._fixed_lines() + self._spoken_constants()" in SRC,
+      "a hand-kept list goes stale the moment somebody adds a reply")
+_harvest = V._spoken_constants(V.__new__(V))
+check("...and that harvest actually finds them",
+      len(_harvest) >= 20, len(_harvest))
+check("...including the one the device caught",
+      "Acknowledged. Standing by." in _harvest)
+check("no format template is ever cached as a literal",
+      not any("%" in s or "{" in s for s in _harvest),
+      "a clip of the characters '%s' is one nobody asks for")
+check("nothing unspeakably long gets in",
+      all(len(s) <= 200 for s in _harvest))
 check("_speak still looks up the first chunk",
       "first = self.render_to_cache(chunks[0])" in SRC)
 

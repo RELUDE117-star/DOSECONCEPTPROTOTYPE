@@ -5322,6 +5322,76 @@ class DoseVoice:
         threading.Thread(target=work, daemon=True,
                          name="model-warm").start()
 
+    def _spoken_constants(self):
+        """Every fixed reply that lives in respond() rather than in
+        _fixed_lines(), read out of this file's own syntax tree.
+
+        WHY NOT JUST LIST THEM.
+        --------------------------------------------------------------
+        Because a hand-kept list is a list that goes stale. respond()
+        holds twenty-seven fixed replies in random.choice() blocks —
+        "Acknowledged. Standing by.", "Thank you, Ryan. I aim for
+        precision.", the three ways it introduces itself — and every
+        one of them is spoken far more often than the safety
+        monologues that ARE in the prewarm list. The device proved the
+        cost: a turn replying "Acknowledged. Protocol three: protect
+        the patient." rendered its opening from scratch, because that
+        whole family of replies was invisible to the prewarm.
+
+        Copying them into _fixed_lines() would work exactly until
+        somebody adds a twenty-eighth, which is the kind of decay that
+        does not announce itself — the station just gets slower at one
+        sentence and nobody knows why.
+
+        WHAT IT WILL AND WILL NOT TAKE.
+        --------------------------------------------------------------
+        Only string literals that are elements of a LIST literal inside
+        respond(). That is the shape every one of these replies has, it
+        excludes docstrings, log lines and format templates, and a
+        mistake costs one unnecessary clip rendered at idle — a few
+        hundred kilobytes, no behaviour change. Anything with a format
+        placeholder is skipped outright: "%s" cached as the literal two
+        characters would be a clip that is never asked for.
+
+        Reading its own source is cheap (one parse, once, on a
+        background thread) and it cannot fail into anything worse than
+        the old list, because every failure path returns [].
+        """
+        out = []
+        try:
+            import ast
+            path = os.path.abspath(__file__)
+            with open(path, "r", encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+        except Exception:
+            return out
+        try:
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.FunctionDef):
+                    continue
+                if node.name not in ("respond", "_quick_answer"):
+                    continue
+                for sub in ast.walk(node):
+                    if not isinstance(sub, ast.List):
+                        continue
+                    for el in sub.elts:
+                        if not isinstance(el, ast.Constant):
+                            continue
+                        s = el.value
+                        if not isinstance(s, str):
+                            continue
+                        s = s.strip()
+                        if not (6 <= len(s) <= 200):
+                            continue
+                        if "%" in s or "{" in s or "\n" in s:
+                            continue
+                        if " " not in s or s[-1] not in ".!?":
+                            continue
+                        out.append(s)
+        except Exception:
+            return out
+        return out
+
     def prewarm_replies(self):
         """Render every fixed line into the cache, in the background at
         low priority so it never competes with live audio.
@@ -5342,6 +5412,24 @@ class DoseVoice:
         startup costs recognition accuracy, which is the whole point of
         the device."""
         def work():
+            # NOT THE PASS THE TURN REPORTS — FOURTH TIME.
+            #
+            # render_to_cache() writes its own timings to self._t_tts,
+            # and that is what the turn log prints as `hit`. This thread
+            # calls it hundreds of times, on its own schedule, for lines
+            # nobody asked for. Without this flag its rows land on
+            # whatever turn happens to be in flight.
+            #
+            # That is exactly what the device showed: "Acknowledged."
+            # was sitting in the cache, verified present by key, and the
+            # turn that said it logged hit=0. The turn had hit it; the
+            # prewarm wrote a miss over the row a moment later. I spent
+            # an hour looking for a cache bug that was a reporting bug.
+            #
+            # _last_engine, _t_tts on the stream thread, _t_tts on the
+            # speculation thread, and now this. Every time: two threads,
+            # one attribute, last writer wins.
+            _TL.speculative = True
             try:
                 os.nice(10)
             except Exception:
@@ -5378,8 +5466,25 @@ class DoseVoice:
             # and every chunk is rendered — the opening because it is
             # on the critical path, the rest because they are played
             # seconds later and cost nothing to have ready.
-            n = 0
-            for line in self._fixed_lines():
+            # ORDER MATTERS MORE THAN COVERAGE.
+            #
+            # Rendering in list order put three safety monologues — the
+            # poison-control line, the crisis line, the dose-advice line
+            # — at position six, seven and eight. They are the longest
+            # things this station can say and among the rarest, and the
+            # cache spent its first several minutes on them while
+            # "Acknowledged." and "Standing by." waited behind.
+            #
+            # Only the FIRST chunk of a reply is on the critical path;
+            # everything after it renders during playback and is never
+            # waited for. So: every line's first chunk, shortest first,
+            # then the individual sentences, then the remainders. The
+            # openings that decide time-to-first-sound are all a few
+            # dozen characters, so the whole first group is done in
+            # under a minute — and the monologues still get cached,
+            # last, out of everybody's way.
+            heads, sents, tails = [], [], []
+            for line in self._fixed_lines() + self._spoken_constants():
                 if self._stop.is_set():
                     return
                 try:
@@ -5403,18 +5508,43 @@ class DoseVoice:
                 # So the sentences are cached independently too. A
                 # sentence is the unit an opening is actually made of,
                 # and storing them costs a few hundred kilobytes.
+                if chunks:
+                    heads.append(chunks[0])
+                    tails.extend(chunks[1:])
                 try:
                     for part in re.split(r"(?<=[.!?])\s+", line):
                         part = part.strip()
-                        if part and part not in chunks:
-                            chunks.append(part)
+                        if part:
+                            sents.append(part)
                 except Exception:
                     pass
-                for c in chunks:
+
+            order, seen = [], set()
+            for group in (heads, sents, tails):
+                for c in sorted(group, key=len):
+                    if c and c not in seen:
+                        seen.add(c)
+                        order.append(c)
+            self._prewarm_total = len(order)
+
+            n = 0
+            for c in order:
+                if self._stop.is_set():
+                    return
+                # NEVER RENDER DURING A TURN.
+                #
+                # nice(10) settles who gets a core, not who gets the
+                # four ONNX threads, and a background synthesis in the
+                # middle of a live reply competes with the one render
+                # the person is actually waiting for. Idle is the only
+                # time this work is free, so it only runs then.
+                while self.state in ("thinking", "speaking"):
                     if self._stop.is_set():
                         return
-                    if self.render_to_cache(c):
-                        n += 1
+                    time.sleep(0.25)
+                if self.render_to_cache(c):
+                    n += 1
+                    self._prewarmed = n
             self._prewarmed = n
         threading.Thread(target=work, daemon=True,
                          name="tts-prewarm").start()
