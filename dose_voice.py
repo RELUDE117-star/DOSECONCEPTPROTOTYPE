@@ -109,6 +109,26 @@ except Exception:
 
 VOICE_DIR = os.environ.get(
     "DOSE_VOICE_DIR", os.path.expanduser("~/dose-home-station/voice"))
+# Every place that can delete a pre-rendered clip writes one line here,
+# and the heartbeat prints the last of them. Three pieces of code can
+# do it — this file, dose_app._retire_other_voices and DOSE.sh — and
+# working out which one from the outside cost two device round trips
+# and two wrong answers.
+CACHE_PURGE_LOG = os.path.join(VOICE_DIR, "cache_purges.log")
+
+
+def _cache_purge_note(msg):
+    """Record who deleted pre-rendered speech, and when. Never raises:
+    a diagnostic that can break the thing it is watching is worse than
+    no diagnostic."""
+    try:
+        os.makedirs(VOICE_DIR, exist_ok=True)
+        with open(CACHE_PURGE_LOG, "a") as f:
+            f.write("%s pid=%d %s\n"
+                    % (time.strftime("%Y-%m-%d %H:%M:%S"), os.getpid(),
+                       msg))
+    except Exception:
+        pass
 LEARN_PATH = os.path.join(VOICE_DIR, "learning.json")
 LEARN_FUZZ = 0.87          # similarity for a learned phrase to fire
 MAX_LEARNED = 300
@@ -2513,11 +2533,24 @@ class DoseVoice:
             elif getattr(self, "_cache_purge_skipped", False):
                 why = "kept (voice unresolved, left alone)"
             else:
-                why = "kept"
+                why = "kept by this object"
+            # ...AND WHAT THE DISK SAYS, which is a different question.
+            # "kept" above speaks only for THIS DoseVoice in THIS
+            # process, and the app builds more than one. The log is
+            # written by whichever deleter actually fires, in whatever
+            # process, and it outlives all of them.
+            last = ""
+            try:
+                with open(CACHE_PURGE_LOG) as f:
+                    lines = [ln.strip() for ln in f if ln.strip()]
+                if lines:
+                    last = "   last purge: %s" % lines[-1][:90]
+            except Exception:
+                pass
             done = getattr(self, "_prewarmed", 0)
             total = getattr(self, "_prewarm_total", 0)
             return ("reply cache:    %d clips   %s   prewarm %d/%d   "
-                    "voice=%s" % (n, why, done, total, stamp))
+                    "voice=%s%s" % (n, why, done, total, stamp, last))
         except Exception:
             return "reply cache:    unreadable"
 
@@ -8993,14 +9026,34 @@ class DoseVoice:
             except Exception:
                 pass
             if was != now:
+                n = 0
                 for f in glob.glob(os.path.join(cache, "*.wav")):
                     try:
                         os.unlink(f)
+                        n += 1
                     except Exception:
                         pass
                 with open(stamp, "w") as f:
                     f.write(now)
                 self._cache_purged = was or "(unstamped)"
+                # A BREADCRUMB ON DISK, NOT AN ATTRIBUTE.
+                #
+                # The heartbeat reported "kept" while 126 clips
+                # disappeared across a restart. An attribute on `self`
+                # only speaks for THIS object in THIS process — and
+                # the app builds more than one DoseVoice, so a purge
+                # on a probe instance is invisible to the instance
+                # writing the heartbeat. Three deleters, two wrong
+                # guesses, and the reason it stayed unfindable is that
+                # every witness I asked was the wrong one.
+                #
+                # A file outlives the object, the process and the
+                # restart. dose_app's _retire_other_voices and
+                # DOSE.sh's retirement branch write to the same one,
+                # so whichever fires is named by its own hand.
+                _cache_purge_note("dose_voice._purge_foreign_cache: "
+                                  "%d clips, stamp was %r, now %r"
+                                  % (n, was, now))
         except Exception:
             pass
 

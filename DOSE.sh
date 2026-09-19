@@ -401,6 +401,13 @@ for F in "$VOICE_DIR"/*.onnx "$VOICE_DIR"/*.onnx.json; do
 done
 if [ -n "$RETIRED" ]; then
     echo "  Retired an older voice; she is the only one now."
+    # SIGN IT — see dose_voice._cache_purge_note. Three pieces of code
+    # can delete a pre-rendered clip and the cache was vanishing on
+    # every restart while all three looked innocent from outside.
+    N=$(ls -1 "$VOICE_DIR"/cache/*.wav 2>/dev/null | wc -l | tr -d ' ')
+    printf '%s pid=%d DOSE.sh retirement branch: %s clips\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$N" \
+        >> "$VOICE_DIR/cache_purges.log" 2>/dev/null || true
     rm -f "$VOICE_DIR"/cache/*.wav 2>/dev/null || true
     rm -f "$VOICE_DIR"/cache/.voice 2>/dev/null || true
 fi

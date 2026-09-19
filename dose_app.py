@@ -5266,11 +5266,28 @@ class DoseApp:
                 pass
         if removed:
             # clips rendered in the old voice would still play
+            n = 0
             for f in _glob.glob(os.path.join(vdir, "cache", "*.wav")):
                 try:
                     os.unlink(f)
+                    n += 1
                 except Exception:
                     pass
+            # SIGN IT. Three pieces of code can delete a pre-rendered
+            # clip — this one, dose_voice._purge_foreign_cache and
+            # DOSE.sh — and the cache was vanishing on every restart
+            # while each of them looked innocent from the outside. One
+            # log, written by whichever actually fires.
+            try:
+                import time as _t
+                with open(os.path.join(vdir, "cache_purges.log"),
+                          "a") as _f:
+                    _f.write("%s pid=%d dose_app._retire_other_voices:"
+                             " %d clips, retired %s\n"
+                             % (_t.strftime("%Y-%m-%d %H:%M:%S"),
+                                os.getpid(), n, ",".join(removed)))
+            except Exception:
+                pass
         return removed
 
     def migrate_voice(self):
