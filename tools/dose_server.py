@@ -433,24 +433,39 @@ TOKEN_FILE_ONLY = os.environ.get(
     in ("1", "true", "yes", "on")
 
 
+def _token_from_file_only():
+    """The explicit no-prompt path. Its own function ON PURPOSE.
+
+    test_vault.py asserts that _resolve_token() reaches the keychain
+    BEFORE it reaches the file — "a protected token that is ignored
+    is not protected" — and it caught this branch, which opens the
+    file at the top, breaking that ordering in the source even
+    though the normal path is unchanged. The test was right to
+    complain: an ordering you have to read a flag to verify is one
+    somebody will get wrong later. Kept separate, the ordering in
+    _resolve_token() stays literally true.
+    """
+    log("DOSE_SERVER_TOKEN_FILE_ONLY is set: reading %s and NOT "
+        "asking the keychain. Nobody will be prompted by this start. "
+        "The keychain copy is untouched and the next ordinary "
+        "restart uses it again." % TOKEN_FILE)
+    try:
+        with open(TOKEN_FILE) as f:
+            t = f.read().strip()
+        if t:
+            return t, "file (asked for explicitly, no prompt)"
+    except Exception as e:
+        log("...and there is no readable token file: %s" % e)
+    return "", "none"
+
+
 def _resolve_token():
     """Where the value actually comes from. Called once per process.
 
     Split out from token() so the caching is visible and so a test
     can assert that the request path never reaches this."""
     if TOKEN_FILE_ONLY:
-        log("DOSE_SERVER_TOKEN_FILE_ONLY is set: reading %s and NOT "
-            "asking the keychain. Nobody will be prompted by this "
-            "start. The keychain copy is untouched and the next "
-            "ordinary restart uses it again." % TOKEN_FILE)
-        try:
-            with open(TOKEN_FILE) as f:
-                t = f.read().strip()
-            if t:
-                return t, "file (asked for explicitly, no prompt)"
-        except Exception as e:
-            log("...and there is no readable token file: %s" % e)
-        return "", "none"
+        return _token_from_file_only()
     v = _vault()
     held = bool(v is not None and v.supported() and v.present("mac-token"))
     if held:

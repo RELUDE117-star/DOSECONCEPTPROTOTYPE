@@ -257,10 +257,13 @@ check("...and falls back to the file when there is nothing there",
       "open(TOKEN_FILE)" in tok,
       "a station that has not been through the protection step has "
       "to keep working")
+# Case-insensitive: the refusal message is now shouted, because two
+# hundred requests went by while it whispered.
+tok_l = tok.lower()
 check("...and says out loud when a person released it",
       "released from the keychain by someone at this Mac" in tok)
 check("...and when the keychain refused",
-      "did not release the token" in tok)
+      "did not release the token" in tok_l)
 check("the vault is optional at import time",
       "def _vault(" in SRV and "return None" in SRV.split("def _vault(")[1][:400],
       "the server must not fail to start because a helper is missing")
