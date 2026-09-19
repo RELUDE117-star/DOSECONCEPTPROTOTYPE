@@ -749,6 +749,12 @@ works and is fast", never "it will understand everyone".
   down, and it happened anyway.
 - **`sudo -n tr ... < /proc/PID/environ` fails**: the redirect is done
   by the *shell*, not by sudo. Use `sudo -n cat ... | tr`.
+- **And the same for a GLOB — this one is silent.**
+  `sudo -n rm -f $APP/*.bak226` expands in the CALLING shell, which
+  runs as `claudeagent` and cannot read `/home/rjarv1` (mode 0700).
+  It expands to nothing, `rm` gets a literal path, and `-f` reports
+  success for a file it never saw: "backups before: 3, after: 3".
+  The shell has to be the privileged one: `sudo -n bash -c '...'`.
 
 ## "IT CRASHES EVERY TIME" WAS NEVER A CRASH — 2026-09-18
 
