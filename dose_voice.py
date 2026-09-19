@@ -351,6 +351,19 @@ FAST_ENGINE_PIN = os.environ.get("DOSE_FAST_ENGINE", "").strip().lower()
 # turn and makes everything worse. Raise it on better hardware; the
 # escalation simply gets used more often.
 STT_TURN_BUDGET = float(os.environ.get("DOSE_STT_BUDGET", "7.0"))
+# THE HARD CEILING ON ONE LOCAL RECOGNISER CALL.
+#
+# STT_TURN_BUDGET gates the base.en escalation — the SECOND step. The
+# device then recorded a FIRST step of 105.14 s, and the turn total
+# came to 106.32 s, because nothing above the escalation was asking
+# what time it was. The station gave a sensible answer to an empty
+# room.
+#
+# Eight seconds is past the point where a person has already decided
+# the machine did not hear them, so there is nothing to protect after
+# it. The call cannot be cancelled, so it is abandoned rather than
+# stopped: see _fast_transcribe. Zero disables the ceiling.
+STT_LOCAL_CEILING = float(os.environ.get("DOSE_STT_LOCAL_CEILING", "8.0"))
 # The most audio a single turn may hand the recogniser. Transcription
 # cost is linear in length, so the worst turn is the longest one: the
 # device logged "fast": 25.02 on a buffer that had been accumulating
@@ -434,6 +447,7 @@ TTS_FIRST_CHUNK_MIN = int(os.environ.get("DOSE_TTS_FIRST_MIN", "12"))
 INVARIANT_OPENINGS = (
     "Current inventory:",
     "One dose remains today:",
+    "I could not find",
     "The time is",
     "You have",
 )
@@ -2263,9 +2277,56 @@ class DoseVoice:
                                            "-0.85"))
 
     def _fast_transcribe(self, audio_bytes):
-        """Run the fast recogniser chosen for this board.
-        Returns (text, engine_tag). Sets self._fw_conf as a side
-        effect (0.0 when the engine reports no confidence)."""
+        """Run the fast recogniser chosen for this board, UNDER A WALL
+        CLOCK. Returns (text, engine_tag). Sets self._fw_conf as a side
+        effect (0.0 when the engine reports no confidence).
+
+        NOTHING IN A TURN MAY RUN UNBOUNDED. The device recorded this:
+
+            reply                          stt      total   engine
+            I didn't catch that, Ryan...  105.14   106.32   whisper-tiny.en
+
+        A hundred and five seconds for a local pass on at most twelve
+        seconds of audio. The station answered sensibly and answered it
+        into an empty room — the person had been gone for a minute and
+        a half.
+
+        STT_TURN_BUDGET existed and did not help: it gates the base.en
+        ESCALATION, and the thing that ran long was the fast pass
+        underneath it. A ceiling on the second step is not a ceiling.
+
+        Cancelling faster-whisper mid-call is not possible, so the work
+        is done on a thread and ABANDONED on the deadline: the turn
+        carries on with the live transcript, the orphan finishes into
+        nothing, and the row says so. Wasting one pass beats making a
+        person stand at a medication cabinet for a hundred seconds.
+        """
+        if STT_LOCAL_CEILING > 0:
+            out = {}
+
+            def run():
+                try:
+                    out["r"] = self._fast_transcribe_now(audio_bytes)
+                except Exception:
+                    out["r"] = ("", "error")
+
+            th = threading.Thread(target=run, daemon=True,
+                                  name="stt-fast")
+            th.start()
+            th.join(STT_LOCAL_CEILING)
+            if "r" in out:
+                return out["r"]
+            self._stt_abandoned = getattr(self, "_stt_abandoned", 0) + 1
+            if _recording():
+                self._stt_note = (
+                    "local pass abandoned at %.0fs — answering with "
+                    "the live transcript" % STT_LOCAL_CEILING)
+            return "", "abandoned"
+        return self._fast_transcribe_now(audio_bytes)
+
+    def _fast_transcribe_now(self, audio_bytes):
+        """The recogniser call itself. Separated so the ceiling above
+        has something to give up on."""
         eng = self._fast_engine()
         if eng == "moonshine" and self._moonshine_v2() is not None:
             self._fw_conf = 0.0        # moonshine reports none
@@ -4628,6 +4689,14 @@ class DoseVoice:
             "No medications are in view today, Ryan.",
             "Nothing further is scheduled today, Ryan.",
             "Yes, Ryan.", "No, Ryan.",
+            # First sentences of replies built with an f-string, so
+            # _spoken_constants() cannot see them but the chunker
+            # splits here every time. The device measured
+            # "Negative, Ryan. New Medication has not been dispensed
+            # today." at speak 1.95 — all of it in the first fifteen
+            # characters, which never change.
+            "Negative, Ryan.",
+            "Partially.",
         ]
         seen, out = set(), []
         for ln in lines:

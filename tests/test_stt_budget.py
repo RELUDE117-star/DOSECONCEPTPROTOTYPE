@@ -345,6 +345,41 @@ for _ in range(20000):
 check("the decision costs nothing measurable (20k in < 0.5s)",
       time.time() - t0 < 0.5, "%.3fs" % (time.time() - t0))
 
+print("\n── and the FIRST step has a ceiling too ─────────────────────")
+# The budget above gates the base.en escalation — the second step.
+# The device then recorded a first step of 105.14 s and a turn total
+# of 106.32 s, because nothing above the escalation was asking what
+# time it was. The station answered a person who had been gone for a
+# minute and a half.
+import dose_voice                                            # noqa: E402
+
+check("there is a hard ceiling on one local recogniser call",
+      hasattr(dose_voice, "STT_LOCAL_CEILING"))
+check("...and it is shorter than the turn a person will wait through",
+      0 < dose_voice.STT_LOCAL_CEILING <= 12.0,
+      dose_voice.STT_LOCAL_CEILING)
+check("...and it is settable on the device without a code change",
+      "DOSE_STT_LOCAL_CEILING" in CODE)
+
+_ft = CODE.split("def _fast_transcribe(")[1]
+_ft = _ft[:_ft.index("def _fast_transcribe_now")]
+check("the recogniser runs where it can be given up on",
+      "threading.Thread" in _ft and "join(STT_LOCAL_CEILING)" in _ft,
+      "faster-whisper cannot be cancelled mid-call")
+check("...and the turn carries on rather than waiting for it",
+      'return "", "abandoned"' in _ft)
+check("an abandoned pass is counted, not swallowed",
+      "_stt_abandoned" in _ft,
+      "a station whose recogniser quietly stopped answering is worse "
+      "than one that is visibly slow")
+check("...and it says so in the row",
+      "_stt_note" in _ft and "abandoned" in _ft)
+check("the ceiling wraps the FAST pass, which is the one that ran "
+      "long",
+      CODE.index("def _fast_transcribe(")
+      < CODE.index("def _fast_transcribe_now("),
+      "a ceiling on the second step is not a ceiling")
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:
