@@ -1496,6 +1496,70 @@ both cut from a base the Mac's clone does not have, so every fetch said
 sat four commits behind a Pi that had the code. `git bundle verify`
 before trusting either one.
 
+### UNDER A SECOND, AND WHAT IS ACTUALLY LEFT
+
+Two models on the Mac, picked by ROUTE (`/stt` small.en, `/stt-fast`
+distil-small.en — a second constant, never a name in the request, so
+the body stays pure audio). The fast one answers the pass that races
+the endpointer; anything it returns that does not parse is asked again
+properly, which is exactly the case where a drug name matters.
+
+Benchmarked on that Mac, identical audio, six clips:
+
+| model | median decode | command phrases | "…after the metformin" |
+|---|---|---|---|
+| small.en | 0.57 s | all exact | metformin |
+| distil-small.en | 0.44 s | all exact | metformin |
+| base.en | 0.21 s | all exact | **medformin** |
+| tiny.en | 0.12 s | all exact | **med foreman** |
+
+base.en was tried first and delivered 10 of 11 turns under a second —
+and transcribed "what do I take today" as "what two i take today
+tomorrow" three times in one run. Two tenths of a second buys a
+transcript that is what he said. **Decode is FLAT with audio length**
+(0.61 s for 0.93 s of speech, 0.69 s for 3.22 s): Whisper pads to a
+thirty-second window, so a three-word question costs what a sentence
+does, on an M1 as much as on the Pi.
+
+Best measured turn: **0.42 s**, median 0.84 s, 10 of 11 under a
+second, 100% understood.
+
+**ONE IN FLIGHT AT A TIME.** With voices in the room `_last_voice_ts`
+moves constantly, a speculation fires on every change, and each is a
+request to a Mac that has ONE model and queues them:
+
+```
+2.62s of audio in 3.87s
+2.62s of audio in 6.19s
+2.94s of audio in 9.88s      <- against 0.48s when asked once
+```
+
+A new speculation now starts only when the last has finished. Max
+decode across the next run: 1.11 s.
+
+**AND THE ROOM STOPPED BEING A LABORATORY.** Two runs of the same
+build disagreed completely. The Mac's log said why:
+
+```
+'Did I take my aspirin today?  I spent like a day waiting in '
+'Basically This Guy Got What Do I Take Today?  He shows every'
+"How's the first person?  How many pills do I have left?"
+```
+
+Somebody is talking in that room and the station is transcribing what
+is really there, correctly. **A run taken while a person is speaking
+is not a measurement of the station.** Check the Mac's log for
+stranger's words before believing a bad run.
+
+**WHAT IS STILL OPEN:** roughly half the harness's turns reach the Mac
+as audio whose VAD finds no speech at all (`0.02s -> ''`), and the
+station falls back to Vosk's live text — which is where the sloppy
+transcripts come from. The mic has AI vocal isolation ON, and the
+harness plays through a loudspeaker across the room; the leading
+hypothesis is that the isolation suppresses loudspeaker audio. **That
+cannot be settled without a person speaking to it**, which is the one
+instrument this session does not have.
+
 ### 0.45 SECONDS — transcribe while he is still talking
 
 **The architecture that got under a second.** Measured on the device,
