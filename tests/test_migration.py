@@ -180,11 +180,33 @@ ok("_purge_foreign_cache" in acks,
 
 # (c) belt and braces: a stamp file, so even a half-run migration
 #     cannot leave a clip of hers behind
-pf = vsrc.split("def _purge_foreign_cache")[1][:1200]
+# NOT A FIXED SLICE. This was `[:1200]` and a docstring paragraph
+# pushed the code it checks out of the window — the exact trap
+# CLAUDE.md records under "four test assertions broke and all four
+# were the test's fault". Take the function, and stop at the next one.
+pf = vsrc.split("def _purge_foreign_cache")[1]
+pf = pf[:pf.index("\n    def ")]
 ok('stamp' in pf and '"*.wav"' in pf,
    "the clip cache is stamped with the voice that rendered it")
 ok("if was != now:" in pf,
    "and every clip is deleted the moment that stamp doesn't match")
+
+# AN UNRESOLVED VOICE IS NOT A DIFFERENT VOICE.
+#
+# `_piper_path` is filled in by the preflight, which has not
+# necessarily run when this does, so `now` could be "" — and then
+# every stamp differed from it and the whole cache went. The device
+# counted it twice in one evening: 61 clips -> 35, and 116 -> 22
+# sixty seconds after a restart. Every restart threw the prewarm away
+# and re-rendered it, in minutes of synthesis at 68 C, for a
+# directory whose contents were perfectly good.
+ok(pf.index("if not self._piper_path:") < pf.index("if was != now:"),
+   "the voice is resolved before anything is compared")
+ok("_cache_purge_skipped" in pf
+   and pf.index("_cache_purge_skipped") < pf.index("if was != now:"),
+   "and an unknown voice leaves the cache alone instead of wiping it")
+ok(pf.index("return") < pf.index("if was != now:"),
+   "it returns rather than falling through to the delete loop")
 
 # (d) she is deleted on sight, before any download
 mg = src.split("def migrate_voice")[1].split(

@@ -8814,12 +8814,48 @@ class DoseVoice:
         runs at startup, compares a stamp against the voice actually
         loaded, and wipes the whole cache if they differ. It means no
         ordering mistake in an update — and no half-finished migration
-        — can leave a clip of an older voice on the device."""
+        — can leave a clip of an older voice on the device.
+
+        AN UNRESOLVED VOICE IS NOT A DIFFERENT VOICE.
+
+        `self._piper_path` is filled in by the preflight, and this runs
+        at startup, so it can be None here — in which case `now` was
+        the empty string, every stamp differed from it, and the whole
+        cache went. The device counted it twice in one evening:
+
+            221 ended with  61 clips   ->  222 started and found 35
+            223 started with 116 clips ->  60 s later there were 22
+
+        Every restart threw the prewarm away and paid for it again, in
+        minutes of synthesis at 68 °C, for a directory whose contents
+        were perfectly good. Purging is for a voice that CHANGED; not
+        knowing which voice we have is a reason to leave the cache
+        alone and let the voice-keyed lookup do its job — a clip in
+        the wrong voice can never be selected anyway, which is what
+        the key is for."""
         try:
             cache = os.path.join(VOICE_DIR, "cache")
             os.makedirs(cache, exist_ok=True)
             stamp = os.path.join(cache, ".voice")
+            if not self._piper_path:
+                # Cheap: this is a filename, not a model load. The
+                # preflight sets it too, but it has not necessarily
+                # run yet, and the cache key uses the same value — so
+                # resolving it here keeps the purge honest AND keeps
+                # every key written before the preflight identical to
+                # the keys looked up after it.
+                try:
+                    found = sorted(glob.glob(
+                        os.path.join(VOICE_DIR, "%s*.onnx" % VOICE_NAME)))
+                    if found:
+                        self._piper_path = found[0]
+                except Exception:
+                    pass
             now = os.path.basename(self._piper_path or "")
+            if not now:
+                # Still unknown. Leave the cache alone: see above.
+                self._cache_purge_skipped = True
+                return
             was = ""
             try:
                 with open(stamp) as f:
