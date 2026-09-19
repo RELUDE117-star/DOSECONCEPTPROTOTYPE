@@ -410,10 +410,37 @@ check("a LONG inventory opens with the cached invariant fragment",
       _first("Current inventory: New Medication, 26; Metformin, 12.")
       == "Current inventory:",
       _first("Current inventory: New Medication, 26; Metformin, 12."))
-check("...and a short one is spoken whole, being short enough not to "
-      "need the trick",
-      _first("Current inventory: Aspirin, 4.")
-      == "Current inventory: Aspirin, 4.")
+# THIS EXPECTATION CHANGED ON PURPOSE. It used to say a short
+# inventory is spoken whole "being short enough not to need the
+# trick". Short is not the same as cheap: the device rendered
+# "The time is 4:48 PM." — twenty characters — in 3.20 s, every time,
+# because the minute is different every time and no cache can hold it.
+# A declared opening is a cache HIT at 0.0002 s, and the tail renders
+# under playback. So a reply that starts with one is split however
+# short it is.
+check("even a short reply is split at a declared opening",
+      _first("Current inventory: Aspirin, 4.") == "Current inventory:",
+      _first("Current inventory: Aspirin, 4."))
+check("...and the tail is the whole of the rest",
+      pipeline("Current inventory: Aspirin, 4.")[1] == "Aspirin, 4.")
+check("the un-cacheable reply that cost 3.20 s now opens on a cached "
+      "fragment",
+      pipeline("The time is 4:48 PM.") == ["The time is", "4:48 PM."],
+      pipeline("The time is 4:48 PM."))
+# ...but a declared opening is a LAST RESORT. Applying it ahead of the
+# boundary search turned a clean break at the comma into "You have".
+check("a real pause beats a prefix that happens to be cached",
+      _first("You have two doses left today, Ryan, and the next one "
+             "is at six.") == "You have two doses left today,",
+      _first("You have two doses left today, Ryan, and the next one "
+             "is at six."))
+check("every declared opening is also prewarmed",
+      all(o in V._fixed_lines(V.__new__(V)) for o in dose_voice.INVARIANT_OPENINGS),
+      "a fragment the chunker can produce that the cache does not "
+      "hold is rendered from scratch on the critical path, forever")
+_bad = [t for t in CORPUS
+        if " ".join(pipeline(t)).split() != t.split()]
+check("declared openings lose no words either", not _bad, _bad)
 check("the slowest case is the one that gets the cached opening",
       len("Current inventory: New Medication, 26; Metformin, 12.")
       > len("Current inventory: Aspirin, 4."))

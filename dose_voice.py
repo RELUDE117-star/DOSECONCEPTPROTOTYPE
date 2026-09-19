@@ -410,6 +410,44 @@ TTS_FIRST_CHUNK_MAX = int(os.environ.get("DOSE_TTS_FIRST_MAX", "32"))
 # ...and the shortest. Below this a reply opens with a stutter, which
 # sounds broken in a way that being half a second slower does not.
 TTS_FIRST_CHUNK_MIN = int(os.environ.get("DOSE_TTS_FIRST_MIN", "12"))
+# THE OPENINGS OF REPLIES THAT CAN NEVER BE CACHED WHOLE.
+#
+# Most of what this station says is assembled at the moment it answers
+# — a time, an inventory, a medication name — so the whole line is
+# different every time and the cache can never hold it. The device
+# measured the result: three turns at speak 0.00 because their replies
+# were fixed, beside
+#
+#     "The time is 4:48 PM."              speak 3.20
+#     "One dose remains today: Atorva..."  speak 2.94
+#
+# But the OPENING of each of those never changes, and the opening is
+# the only part on the critical path — the rest renders while it plays.
+# "The time is" has no comma and no full stop inside it, so
+# _split_first() had nothing to break on and rendered the whole line.
+#
+# These are declared, not detected, and that is the point: each one is
+# a phrase somebody chose as an opening and can hear ending cleanly.
+# _split_first() may break after any of them; prewarm_replies() renders
+# every one at startup. Adding a phrase here without saying it out loud
+# first is how a station starts opening mid-thought.
+INVARIANT_OPENINGS = (
+    "Current inventory:",
+    "One dose remains today:",
+    "The time is",
+    "You have",
+)
+# The remainder after a declared opening only has to be SOMETHING.
+#
+# TTS_FIRST_CHUNK_MIN (12) exists to stop the chunker finding a comma
+# three characters in and opening with a stutter. It does not apply
+# here: the opening is a phrase a person chose, and the tail is
+# whatever the station is actually reporting. "4:48 PM." is eight
+# characters and a complete thought, and refusing to split there cost
+# 3.20 s of silence on the most-asked question this station gets.
+#
+# Three characters, only to reject a tail that is punctuation.
+TTS_OPENING_MIN_REST = 3
 # base.en against tiny.en on identical audio. Used only to decide
 # whether the escalation FITS, never to time anything out, and it is
 # multiplied by this device's own freshly measured fast-pass time, so
@@ -4578,12 +4616,17 @@ class DoseVoice:
         # identical every single time somebody asks. Rendering it once
         # at startup turns the slowest reply the station has into one
         # that starts speaking immediately.
+        # ONE LIST, TWO USERS. These are the same openings _split_first()
+        # is allowed to break after — declared once, at the top of the
+        # file, so an opening the chunker can produce is always an
+        # opening the cache holds. Two lists would drift, and the
+        # failure would be silent: a fragment rendered from scratch on
+        # the critical path, every single time, for as long as nobody
+        # noticed.
+        lines += list(INVARIANT_OPENINGS)
         lines += [
-            "Current inventory:",
             "No medications are in view today, Ryan.",
             "Nothing further is scheduled today, Ryan.",
-            "The time is",
-            "You have",
             "Yes, Ryan.", "No, Ryan.",
         ]
         seen, out = set(), []
@@ -8928,8 +8971,38 @@ class DoseVoice:
         if not chunks:
             return chunks
         head = chunks[0]
+        def _declared(rest_of):
+            """Fall back to a hand-declared opening (see
+            INVARIANT_OPENINGS) when the ordinary rules find nothing.
+
+            LAST RESORT, NOT FIRST CHOICE. Applying this ahead of the
+            boundary search turned
+
+                "You have two doses left today, Ryan, and the next
+                 one is at six."
+
+            from a clean break at the comma into "You have" — a
+            two-word opening where a perfectly good one was already
+            available. A real pause a speaker would make beats a
+            prefix I happen to have cached.
+
+            It earns its place on the replies that have no boundary at
+            all. "The time is 4:48 PM." is twenty characters, so the
+            window check below returns it untouched, and it cost
+            3.20 s to render on the device EVERY time, because the
+            minute is different every time and no cache can hold it.
+            """
+            for opening in INVARIANT_OPENINGS:
+                if not head.startswith(opening):
+                    continue
+                rest = head[len(opening):].strip()
+                if len(rest) < TTS_OPENING_MIN_REST:
+                    return None      # nothing but punctuation left
+                return [opening, rest] + list(rest_of)
+            return None
+
         if len(head) <= TTS_FIRST_CHUNK_MAX:
-            return chunks
+            return _declared(chunks[1:]) or chunks
         cands = []
         for m in re.finditer(
                 r"(?:[.!?…]\s)|(?:[,;:]\s)|(?:\s[-–—]\s)"
@@ -8949,7 +9022,7 @@ class DoseVoice:
                 continue
             cands.append((rank, cut))
         if not cands:
-            return chunks
+            return _declared(chunks[1:]) or chunks
         inside = [c for c in cands if c[1] <= TTS_FIRST_CHUNK_MAX]
         if inside:
             # strongest boundary; among equals, as much as fits
@@ -8986,6 +9059,14 @@ class DoseVoice:
             if os.path.exists(whole):
                 self._t_first_sound = 0.0     # already rendered
                 self._t_cached = True
+                # SAY SO IN THE ROW. This path never calls
+                # render_to_cache(), so _t_tts kept whatever the last
+                # render left there — and the device printed three
+                # turns at speak 0.00 beside hit=0, which is not a
+                # thing that can happen. The best outcome the cache
+                # has was being reported as its worst.
+                if _recording():
+                    self._t_tts = {"hit": 1, "whole": 1}
                 self._play_wav(whole)
                 return
 

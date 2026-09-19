@@ -1263,30 +1263,106 @@ Facts any such attempt must respect, all measured:
 **Do not "fix" this by moving synthesis to the worker.** Measured:
 6.71 s against 2.41 s in-process.
 
-### The reply cache: 32 clips on disk, and no hit ever observed
+### The reply cache: three bugs wearing each other's clothes
 
-`voice/cache` holds 32 wavs, 4.7 MB, and the voice stamp matches, so
-`_purge_foreign_cache()` is NOT wiping it. Yet every render logs
-`hit: 0`, including replies identical across three runs. A hit costs
-0.0002 s against 2.4 s, so this is the single biggest available win
-and it is unexplained.
+`voice/cache` held 32 wavs and every render logged `hit: 0`, including
+replies identical across three runs. A hit costs 0.0002 s against
+2.4 s, so this was the single biggest available win. It took three
+passes because each fix revealed the next, and the last one was not a
+cache problem at all.
+
+**1. The keys were not the keys anybody looked up.** `prewarm_replies()`
+rendered each fixed line WHOLE. `_speak()` never renders a whole line —
+it splits it and renders `chunks[0]`, so the key it asks for is the
+OPENING FRAGMENT. For every line long enough to split, the prewarmed
+entry could not be found. *A cache whose keys are not the keys anybody
+looks up is a directory of files.*
+
+**2. The same words in a different line are a different key.** Chunking
+depends on the length of the WHOLE line. `"Acknowledged. Standing by."`
+is 26 characters and caches whole; `"Acknowledged. Protocol three:
+protect the patient."` splits and asks for `"Acknowledged."` alone,
+which had never been stored. So each fixed line's SENTENCES are cached
+independently as well as its chunks.
+
+**3. And then the report lied.** With both fixed, `"Acknowledged."` was
+verified present in the cache BY KEY — and the turn that spoke it still
+logged `hit=0`. There was no third cache bug. See below.
 
 Note the trap: the cache is `voice/cache`. An earlier job looked at
 `voice/tts`, found nothing, and "confirmed" the cache was empty — a
 directory that does not exist reads exactly like an empty one.
 
-### Two threads, one attribute — THREE TIMES IN ONE DAY
+### The prewarm's ORDER decides time-to-first-sound, not its coverage
+
+Rendering the fixed lines in list order put three safety monologues —
+the poison-control line, the crisis line, the dose-advice line — at
+positions six, seven and eight. They are the longest things this
+station can say and among the rarest, and the cache spent its first
+several minutes on them while `"Acknowledged."` and `"Standing by."`
+waited behind. 240 s of prewarm produced eight clips.
+
+Only a reply's FIRST chunk is on the critical path; everything after it
+renders during playback and is never waited for. So: every line's first
+chunk, shortest first, then the individual sentences, then the
+remainders. The openings that decide time-to-first-sound are all a few
+dozen characters, so the whole first group is done inside a minute —
+and the monologues still get cached, last, out of everybody's way.
+
+Two more things the device forced:
+
+- **It only renders while the station is idle.** `nice(10)` settles who
+  gets a core; it does nothing about the four ONNX threads, and a
+  background synthesis during a live reply competes with the one render
+  the person is waiting for.
+- **`respond()` holds 27 fixed replies that `_fixed_lines()` never knew
+  about** — including the exact `"Acknowledged. Standing by."` family
+  the device caught rendering from scratch. `_spoken_constants()` reads
+  them out of this file's own syntax tree (string literals inside list
+  literals in `respond()`), because a hand-copied list works right up
+  until somebody adds a 28th, and that decay does not announce itself:
+  the station just gets slower at one sentence and nobody knows why.
+
+### Two threads, one attribute — FOUR TIMES NOW
 
 1. `_last_engine`: the speculative transcription overwrote the Mac's
    answer. The Mac answered three turns and was credited with one.
 2. `_t_tts`: the background chunk renderer overwrote the first chunk's
    timings. One turn logged `speak=0.67` beside `synth=3.02`.
 3. `_t_tts` again, in the diagnostic added to catch (1).
+4. `_t_tts` again, from the PREWARM thread. `render_to_cache()` records
+   onto `self._t_tts`, the turn log prints that as `hit`, and the
+   prewarm calls it hundreds of times on its own schedule — so its
+   misses landed on whatever turn was in flight. `"Acknowledged."` was
+   in the cache, the turn hit it, and the prewarm wrote a miss over the
+   row a moment later. **I went looking for a cache bug that was a
+   reporting bug**, with the lesson already written in this file three
+   times above.
 
-All three are the same shape: a method that records onto `self`,
-called concurrently from two threads, last writer wins. The fix is
+All four are the same shape: a method that records onto `self`, called
+concurrently from two threads, last writer wins. The fix is
 `threading.local()` and `_recording()`, not a flag on `self` — a flag
-on `self` is the same bug with more steps.
+on `self` is the same bug with more steps. **Any method that writes a
+diagnostic onto `self` needs `_recording()` before it is called from a
+new thread, not after somebody notices the numbers are impossible.**
+
+### git in `dose-agent/repo` runs in a QUEUE JOB, never from the mount
+
+The folder bridge refuses deletes. git writes `.git/index.lock`, does
+its work, and then cannot remove it — so `git merge --ff-only` printed
+`Updating 43551e0..ce014fc` and left HEAD exactly where it was, and
+left three lock files that would have blocked the next job's commit.
+
+Reading with `git log` / `git status` through the mount is fine and
+also leaves a lock. Anything that writes belongs in a queue job, which
+runs as the real user.
+
+**And check what a bundle is cut against.** `push38` and `push39` were
+both cut from a base the Mac's clone does not have, so every fetch said
+`Repository lacks these prerequisite commits` and every push said
+`Everything up-to-date` — two lines that read like success while GitHub
+sat four commits behind a Pi that had the code. `git bundle verify`
+before trusting either one.
 
 ### Still open
 
