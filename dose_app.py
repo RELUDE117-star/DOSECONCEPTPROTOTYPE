@@ -3301,7 +3301,57 @@ class DoseApp:
         except Exception:
             return None
 
+    # ── THE DESKTOP ICON ASKS FOR AN UPDATE ─────────────────────────
+    #
+    # Ryan: "make sure it set up for this one that you are adding
+    # directly into my desktop on the raspberry pi that it auto
+    # updates to the most recent github version when you start it
+    # up".
+    #
+    # Half of that was already true and half was not:
+    #
+    #   * Clicking the icon when the station is DOWN starts the
+    #     service, and _do_update_check runs 2 s later. Covered.
+    #   * Clicking it when the station is already UP does nothing —
+    #     and it must not start a second copy, which is the whole
+    #     reason the launcher exists. So it leaves a request here
+    #     instead, and this consumes it.
+    #
+    # A FILE, not a signal or a socket: the launcher runs as him from
+    # a desktop click, the app runs under systemd, and a file in a
+    # directory they both own is the only channel that needs nothing
+    # configured. Same shape as voice/ptt_request.
+    #
+    # THE BRAKES STILL APPLY. This calls the ordinary update check,
+    # which keeps its persisted 15-minute cooldown and its three-tries
+    # -per-hash limit — the brake that exists because six pushes in an
+    # evening once meant six update-and-restart cycles, each reloading
+    # four speech models off an SD card. A person clicking an icon
+    # must not be able to drive that loop either.
+    UPDATE_REQUEST = "voice/update_request"
+
+    def _consume_update_request(self):
+        """Delete first, then act. A request that is acted on without
+        being removed is a request that fires again next second."""
+        try:
+            path = os.path.join(APP_DIR, self.UPDATE_REQUEST)
+            if not os.path.exists(path):
+                return
+            os.remove(path)
+        except Exception:
+            return
+        if os.environ.get("DOSE_DISABLE_SELF_INSTALL"):
+            return
+        try:
+            self._update_status_text = "Checking for updates..."
+            threading.Thread(target=self._do_update_check,
+                             kwargs={"silent": True},
+                             daemon=True).start()
+        except Exception:
+            pass
+
     def _tick_clock(self):
+        self._consume_update_request()
         self._check_presence_changes()
         self._check_due_doses()
         if self.mode in ("home", "storage"):

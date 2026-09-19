@@ -107,13 +107,40 @@ say() {
     echo "$1"
 }
 
+# ── ASK FOR THE LATEST BUILD, EVERY TIME THE ICON IS CLICKED ────────
+#
+# Ryan: "make sure it set up for this one that you are adding directly
+# into my desktop on the raspberry pi that it auto updates to the most
+# recent github version when you start it up".
+#
+# Half of that was already true. Starting the station runs its own
+# update check two seconds in. What was NOT covered is clicking the
+# icon while it is already running — which must not start a second
+# copy, so it cannot go through the start path at all.
+#
+# So: leave a request. dose_app.py consumes voice/update_request on
+# its one-second tick and runs the ordinary check, WITH its ordinary
+# brakes — the persisted fifteen-minute cooldown and the three-tries
+# -per-hash limit that exist because six pushes in an evening once
+# meant six update-and-restart cycles. Clicking an icon repeatedly
+# must not be able to drive that loop.
+#
+# Written BEFORE the branch below, so it happens on every route: if
+# the app is up it is consumed within a second; if it is starting, it
+# is consumed by the new process on its first tick.
+request_update() {
+    mkdir -p "$APP_DIR/voice" 2>/dev/null
+    : > "$APP_DIR/voice/update_request" 2>/dev/null
+}
+request_update
+
 PID=$(running_pid)
 if [ -n "$PID" ]; then
     # ALREADY RUNNING. This is the whole point of the file.
     if raise_window; then
         exit 0
     fi
-    say "DOSE is already running."
+    say "DOSE is already running. Checking for updates."
     exit 0
 fi
 

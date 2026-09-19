@@ -173,6 +173,33 @@ check("it explains itself on a screen with no terminal",
       "zenity" in LAUNCH or "notify-send" in LAUNCH,
       "a message printed to a tty nobody has is not a message")
 
+print("\n── clicking it asks for the latest build ───────────────────")
+APPPY = open(os.path.join(ROOT, "dose_app.py"), encoding="utf-8").read()
+check("the launcher leaves an update request",
+      "voice/update_request" in LAUNCH)
+check("...on EVERY route, not only when it starts the app",
+      LAUNCH.index("request_update\n") < LAUNCH.index("PID=$(running_pid)"),
+      "clicking it while the station is already up is exactly the "
+      "case the start path cannot cover")
+check("the app consumes it on its tick",
+      "_consume_update_request" in APPPY
+      and APPPY.index("self._consume_update_request()")
+      < APPPY.index("self._check_presence_changes()"))
+check("...deleting the file BEFORE acting",
+      APPPY.split("def _consume_update_request(")[1].index("os.remove(path)")
+      < APPPY.split("def _consume_update_request(")[1].index("_do_update_check"),
+      "a request acted on without being removed fires again next "
+      "second, forever")
+check("...and it goes through the ordinary check, brakes and all",
+      "_do_update_check" in
+      APPPY.split("def _consume_update_request(")[1][:1400],
+      "the persisted cooldown and the three-tries-per-hash limit "
+      "exist because six pushes once meant six restart cycles; an "
+      "icon must not be able to drive that loop")
+check("...and still obeys DOSE_DISABLE_SELF_INSTALL",
+      "DOSE_DISABLE_SELF_INSTALL" in
+      APPPY.split("def _consume_update_request(")[1][:1400])
+
 print("\n── and the old autostart lesson is still in force ──────────")
 check("the autostart entry is still retired under systemd",
       "Retired the desktop autostart entry" in SH)
