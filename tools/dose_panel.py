@@ -120,7 +120,32 @@ def server_running():
         return False
 
 
+def _vault():
+    """tools/dose_vault.py, if it is beside us. Optional: a panel that
+    cannot import it must still render, saying so."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import dose_vault
+        return dose_vault
+    except Exception:
+        return None
+
+
 def status():
+    v = _vault()
+    # WHETHER A PERSON IS REQUIRED, not whether a file exists.
+    #
+    # This panel said "Paired token: yes" and meant "there is a file".
+    # The file was mode 0600, which stops another user of the Mac and
+    # stops nothing running as Ryan — a script, a downloaded binary,
+    # an agent, me. `cat` was the whole attack and the panel called it
+    # yes.
+    protected = {}
+    for name in ("mac-token", "github-token"):
+        try:
+            protected[name] = bool(v and v.supported() and v.present(name))
+        except Exception:
+            protected[name] = False
     st = {
         "lan": lan_address(),
         "panel": "127.0.0.1:%d" % PANEL_PORT,
@@ -131,6 +156,9 @@ def status():
         "gh_tail": "",
         "pi_host": PI_HOST,
         "pi_addr": PI_ADDR,
+        "vault_ok": bool(v and v.supported()),
+        "mac_token_locked": protected.get("mac-token", False),
+        "gh_token_locked": protected.get("github-token", False),
     }
     if st["gh_token"]:
         try:
@@ -211,6 +239,15 @@ placeholder="paste a token — it is stored 0600 and never shown again"></div>
 <div class=acts><button onclick="saveTok()">Save</button>
 <button class=ghost onclick="act('gh_push')">Copy it to the station</button></div>
 </div>
+<div class=card><h2>Secrets</h2><div id=vault></div>
+<div class=acts><button onclick="act('lock_secrets')">Require my password</button></div>
+<p class=note>Locked means the token lives in this Mac&rsquo;s keychain with
+no application trusted to read it. Anything that wants it &mdash; a script, an
+app, an AI, me &mdash; makes a password box appear on this screen, and nothing
+gets it unless you type your password here. Nothing in DOSE knows that
+password; macOS holds it. If you ever click &ldquo;Always Allow&rdquo; on that
+box, the protection is gone for whatever asked.</p>
+</div>
 <div class=card><h2>Terminal</h2>
 <div class=row><span class=k>SSH to the station</span>
 <span class=v><code>ssh dose-pi</code></span></div>
@@ -239,6 +276,11 @@ async function refresh(){
  rows('srv',[['Running',pill(s.server_running)],
    ['Listening on',esc(s.lan)+':'+String(s.server_port)],['Paired token',pill(s.server_token)]]);
  rows('gh',[['Stored',pill(s.gh_token)],['Ends with',s.gh_tail?'&middot;&middot;&middot;'+esc(s.gh_tail):'&mdash;']]);
+ const lk=b=>b?'<span class="pill yes">locked</span>'
+              :'<span class="pill nope">readable by anything running as you</span>';
+ rows('vault',s.vault_ok
+   ?[['Station token',lk(s.mac_token_locked)],['GitHub token',lk(s.gh_token_locked)]]
+   :[['Keychain','<span class="pill nope">not available here</span>']]);
 }
 async function act(a){
  const o=document.getElementById('out');o.textContent='working…';
@@ -437,7 +479,66 @@ def a_show_notes():
         return "not installed yet — re-run install_dose_app.sh"
 
 
+def a_lock_secrets():
+    """Move the secrets into the keychain, where a person has to let
+    them out.
+
+    Ryan asked for this in as many words: "you physically and not an
+    autumn or ai needs to manually type in a password on the MacBook
+    itself in order to ever get access to any of the token".
+
+    What it replaces is two files at mode 0600. That stops another
+    USER of this Mac and stops nothing running as him, which is
+    everything that matters — a script, a downloaded binary, an agent,
+    me. Afterwards, any read puts a macOS dialog on this screen and
+    waits for his password.
+
+    It does NOT delete the plaintext. Moving it aside and letting him
+    delete it once he has seen this work is the right way round; the
+    other way round is how somebody loses a token at midnight.
+    """
+    v = _vault()
+    if v is None or not v.supported():
+        return ("This needs macOS and /usr/bin/security. Nothing was "
+                "changed.")
+    out = []
+    for name, path in (("mac-token", SRV_TOKEN),
+                       ("github-token", GH_TOKEN)):
+        if v.present(name):
+            out.append("%s: already protected" % name)
+            continue
+        if not os.path.exists(path):
+            out.append("%s: nothing stored yet — skipped" % name)
+            continue
+        try:
+            with open(path) as f:
+                val = f.read().strip()
+        except Exception as e:
+            out.append("%s: could not read it (%s)" % (name, e))
+            continue
+        ok, msg = v.put(name, val)
+        out.append("%s: %s" % (name, msg))
+        if ok:
+            try:
+                os.replace(path, path + ".was-plaintext")
+                out.append("    the old file is now %s.was-plaintext — "
+                           "delete it yourself once you have seen this "
+                           "work" % os.path.basename(path))
+            except Exception as e:
+                out.append("    could not move the old file aside: %s" % e)
+    out.append("")
+    out.append("From now on, reading either one puts a password box on "
+               "this Mac. Nothing here knows that password — macOS "
+               "holds it, and it is yours.")
+    out.append("If you ever click 'Always Allow' on that box, this "
+               "protection is gone for whatever asked.")
+    out.append("Restart the speech server so it picks up the protected "
+               "token.")
+    return "\n".join(out)
+
+
 ACTIONS = {
+    "lock_secrets": a_lock_secrets,
     "show_notes": a_show_notes,
     "pi_check": a_pi_check,
     "pi_restart": a_pi_restart,
