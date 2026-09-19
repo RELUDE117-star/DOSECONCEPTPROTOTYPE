@@ -2782,7 +2782,8 @@ class DoseVoice:
         except Exception:
             return bytes(buf)
 
-    def _better_transcribe(self, audio_bytes, vosk_text, allow_cloud=True):
+    def _better_transcribe(self, audio_bytes, vosk_text, allow_cloud=True,
+                           allow_remote=True):
         """Work out what was actually said, trying harder when the
         first answer means nothing.
 
@@ -2854,7 +2855,14 @@ class DoseVoice:
         # it answers in a fraction of the time, and it is skipped
         # instantly when it is not there: a laptop leaving the house
         # must not make a medicine cabinet slower, let alone deaf.
-        if allow_cloud and _remote_stt is not None:
+        # allow_remote, NOT allow_cloud. The speculative pass sets
+        # allow_cloud=False because spending a metered free-tier quota
+        # on a transcript that may be thrown away is wasteful — and
+        # that reasoning has nothing to do with a Mac sitting idle on
+        # this LAN. It has no quota, it is doing nothing between
+        # turns, and letting the speculation use it is what turns the
+        # remaining 0.8-1.0 s of STT into a cache hit.
+        if allow_remote and _remote_stt is not None:
             try:
                 if _remote_stt.available():
                     t_r = time.time()
@@ -8239,12 +8247,24 @@ class DoseVoice:
                     # stamping its name on the turn. The Mac answered
                     # three turns; the log credited it with one.
                     _TL.speculative = True
-                    # speculative pass stays LOCAL — it may be discarded
-                    # if more speech arrives, and spending free cloud
-                    # quota on a throwaway is wasteful. The real pass in
-                    # finish() gets the cloud.
+                    # NO CLOUD, BUT YES THE MAC.
+                    #
+                    # This pass stays off the metered cloud because it
+                    # may be discarded if more speech arrives, and
+                    # spending a free-tier quota on a throwaway is
+                    # wasteful. That reasoning has nothing to do with
+                    # a Mac sitting idle on this LAN: it has no quota,
+                    # it is doing nothing between turns, and the whole
+                    # point of speculating is to have the answer
+                    # already in hand when the person stops talking.
+                    #
+                    # With it local, every turn in the device's log
+                    # shows `spec_hit 0` and pays 0.8-1.0 s of STT
+                    # after the endpoint fires. With it on the Mac,
+                    # that work happens DURING the pause.
                     box["text"] = self._better_transcribe(
-                        snapshot, hint, allow_cloud=False)
+                        snapshot, hint, allow_cloud=False,
+                        allow_remote=True)
                 except Exception:
                     box["text"] = ""
                 finally:

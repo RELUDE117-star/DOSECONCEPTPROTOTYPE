@@ -222,8 +222,23 @@ check("it is tried before the local models",
       and DVC.index("_remote_stt.available()")
       # NOT the exact call text: it gained a `budget` argument.
       < DVC.index("fast, feng = self._fast_transcribe("))
+# NOT the guard's exact text — it now reads `allow_remote`, because
+# the speculative pass must be allowed to use the Mac (no quota, idle
+# between turns) while still staying off the metered cloud. The
+# property is that the attempt is wrapped, not how the flag is spelled.
+_bt = DVC.split("def _better_transcribe")[1]
+_bt = _bt[:_bt.index("\n    def ")]
 check("the whole attempt is inside a try",
-      "if allow_cloud and _remote_stt is not None:" in DVC)
+      "_remote_stt is not None:" in _bt
+      # the try that FOLLOWS the guard, not the first one in the
+      # method — there is an earlier one around the audio-length
+      # floor, and index() would find that instead.
+      and _bt.index("_remote_stt is not None:")
+      < _bt.index("try:", _bt.index("_remote_stt is not None:"))
+      < _bt.index("_remote_stt.available()"),
+      "guard, then try, then the call — a network call outside the "
+      "try is a medicine cabinet that stops talking when a laptop "
+      "sleeps")
 check("a remote answer still has to be usable",
       "if rtext and self._usable(rtext):" in DVC)
 check("the turn log says when the Mac answered",
