@@ -1904,6 +1904,42 @@ count in the same window is the cross-check: six phrases should
 produce six to twelve requests, and `requests: 1` is the tell that
 nothing else in the row set is about this run.
 
+## THE STATION ALREADY ANSWERED. MY TEST CALLED IT A FAILURE.
+
+The conversation run, spoken aloud through the station's own speaker
+(job 264):
+
+    how are you  -> "Functioning at one hundred percent."      SHRUGGED
+    good morning -> "Good to hear your voice, Ryan."           SHRUGGED
+    thank you    -> "You're welcome, Ryan."                    SHRUGGED
+    who are you  -> "Designation: Dose. I am an A I assistant" SHRUGGED
+
+    answered like a person: 0    shrugged: 4
+
+Four human, in-character answers, graded as failures — because my
+check required `intent == "chat"`, meaning MY module. The station's
+own personality layer sits above the new one in `respond()` and got
+there first, which is correct: those lines are better tuned than
+anything the new module would have said.
+
+Had I believed the grade, the next job would have "fixed" a station
+that was already doing the thing, by moving my layer above handlers
+that were working. **A test that measures WHO answered instead of
+WHETHER it answered will send you to break the good path.** The
+criterion is `fallback` — the station saying "I didn't catch that"
+to something it heard perfectly. Anything else is an answer.
+
+What the run DID prove, from the Mac's own log:
+
+    -> (3 words, 12 chars)  reply=chat/how_are_you
+    -> (2 words, 10 chars)  reply=chat/thanks
+    -> (3 words, 12 chars)  reply=chat/who_are_you
+    -> (4 words, 28 chars)  reply=defer/medical
+
+The Mac composes conversation and declines medication, over TLS, with
+no transcript on its disk. Both acceptance runs PASS at 100%
+understood, worst turn 1.39 s and 1.5 s.
+
 ## `ast.parse` IS NOT A COMPILE CHECK
 
 Every job in this project gates an install with

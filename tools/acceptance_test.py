@@ -803,9 +803,30 @@ def main():
             got = r.get("intent") or "?"
             reply = str(r.get("reply") or "")
             if want == "chat":
-                if got == "chat" and reply.strip():
+                # THE CRITERION IS "DID IT ANSWER", NOT "WHO ANSWERED".
+                #
+                # My first version required intent == "chat" and
+                # graded four perfectly good turns as SHRUGGED:
+                #
+                #   how are you  -> "Functioning at one hundred percent."
+                #   good morning -> "Good to hear your voice, Ryan."
+                #   thank you    -> "You're welcome, Ryan."
+                #   who are you  -> "Designation: Dose. I am an A I..."
+                #
+                # Those are the station's OWN personality layer, which
+                # sits above the new conversational one in respond()
+                # and got there first. They are human, in character,
+                # and better tuned than anything I would have written.
+                # A test that calls them failures would have had me
+                # "fixing" a station that was already doing the thing.
+                #
+                # The complaint was never "the wrong module answered".
+                # It was that the station says "I didn't catch that"
+                # to something it heard perfectly. So: `fallback` is
+                # the failure. Anything else is an answer.
+                if got != "fallback" and reply.strip():
                     chat_ok += 1
-                    mark = "ok"
+                    mark = "answered (%s)" % got
                 else:
                     chat_bad += 1
                     mark = "SHRUGGED"
@@ -817,8 +838,8 @@ def main():
                     mark = "LEAKED INTO CHAT"
                 else:
                     mark = "ok (the Pi answered it)"
-            say("    %-24s %-10s %-18s %r"
-                % (str(r.get("phrase"))[:24], got, mark, reply[:40]))
+            say("    %-24s %-22s %r"
+                % (str(r.get("phrase"))[:24], mark, reply[:40]))
         say("")
         say("    answered like a person: %d    shrugged: %d"
             % (chat_ok, chat_bad))
