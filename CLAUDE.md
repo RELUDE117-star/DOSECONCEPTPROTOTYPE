@@ -1940,6 +1940,46 @@ The Mac composes conversation and declines medication, over TLS, with
 no transcript on its disk. Both acceptance runs PASS at 100%
 understood, worst turn 1.39 s and 1.5 s.
 
+## THE ROOM WAS NOT A LABORATORY AGAIN, AND THE LOG SHOWS IT WITHOUT
+## SHOWING A SINGLE WORD
+
+An acceptance run at 23:15 reported `understood 25%`. The Mac's log,
+which now prints shape instead of transcripts:
+
+    2.84s of audio  -> (16 words, 78 chars)
+    7.68s of audio  -> (30 words, 150 chars)
+    8.94s of audio  -> (59 words, 294 chars)
+    11.42s of audio -> (44 words, 215 chars)
+
+The harness plays phrases of **one to two seconds**. Nine seconds of
+continuous speech carrying fifty-nine words is not a medication
+command — it is a person talking, and the heartbeat agreed:
+`signal: live`, `voice gate: loud 34`. Ryan was awake and typing to
+me while it ran.
+
+**A run taken while somebody is speaking is not a measurement of the
+station.** That sentence was already in this file, from job 255. The
+right response is to stop testing, not to tune against it — and
+certainly not to "fix" a 25% score produced by a room with a person
+in it.
+
+Two things worth keeping from that run:
+
+- **Zero rescues, zero inventions, zero empty turns.** The gates did
+  not fire because nothing needed them, which is the correct
+  behaviour and not evidence either way about whether they work.
+- **The shape-only log was enough to diagnose it.** Word count beside
+  audio length told the whole story without a single transcript. The
+  privacy change did not cost diagnosability; it improved it.
+
+And one correction: a job of mine flagged "16 words in 2.84s" as
+impossible using the rescue's 4-words-a-second ceiling. That ceiling
+governs the RESCUE path only, where the alternative is a
+hallucination on silence. Applying it to ordinary transcripts is
+wrong — overlapping speakers genuinely produce six words a second,
+and calling that impossible would have sent the next session hunting
+a bug in the recogniser.
+
 ## AND THEN THE RESCUE STARTED INVENTING WORDS
 
 The fix below shipped and the device caught it in one run:
