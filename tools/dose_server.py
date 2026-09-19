@@ -633,9 +633,29 @@ class Handler(BaseHTTPRequestHandler):
                   "reply": say, "reply_kind": kind, "reply_why": why})
 
 
+# ANY LINE THAT ENDS IN QUOTED WORDS. Not a list of the formats I
+# remember writing.
+#
+# The first version of this matched `stt[model] ... ->` and the prompt
+# echo line, because those are the two shapes in the current source.
+# It redacted 102 lines and reported success, and 261 were still
+# there — written by an OLDER build whose format had no brackets:
+#
+#     stt 2.50s of audio in 0.68s -> 'What time is it?'
+#
+# A redaction that only knows today's format is not a redaction. The
+# whole point of this file is the log that accumulated over WEEKS,
+# across builds, which is exactly the material least likely to match
+# the pattern I am looking at while I write it.
+#
+# So: an arrow followed by a quoted string, anywhere, whatever came
+# before it. Over-matching here costs a log line's readability.
+# Under-matching leaves his medication on disk.
+# The arrow OR the prompt-echo colon: the echo line has no arrow and
+# carries the transcript just as plainly. Caught by the round-trip
+# test below rather than by me remembering it.
 TRANSCRIPT_LINE = re.compile(
-    r"^(?P<head>.*?(?:stt\[[^\]]*\][^>]*->|dropped a prompt echo:)\s*)"
-    r"(?P<body>['\"].*)$")
+    r"^(?P<head>.*?(?:->|prompt echo:)\s*)(?P<body>['\"].*)$")
 
 
 def redact_log():

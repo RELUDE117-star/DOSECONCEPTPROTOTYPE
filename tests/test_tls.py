@@ -165,6 +165,42 @@ check("the fingerprint is computed from the file, both ends alike",
 check("the certificate tool reaches no network",
       not any(w in CRT for w in ("urllib", "socket", "http")))
 
+print("\n── AND THE LOG REDACTION, AGAINST OLD FORMATS ─────────────")
+# It reported "redacted 102 transcript lines" and 261 were still
+# there. The pattern matched the two shapes in the CURRENT source —
+# `stt[model] ... ->` and the prompt echo — and an older build had
+# written thousands of lines with no brackets at all:
+#
+#     stt 2.50s of audio in 0.68s -> 'What time is it?'
+#
+# A redaction that only knows today's format is not a redaction, and
+# the material it exists for is precisely the log that accumulated
+# across builds. So this checks the PATTERN against formats this
+# project has actually written, including ones it no longer writes.
+import importlib.util                                      # noqa: E402
+_spec = importlib.util.spec_from_file_location(
+    "_srv_for_redact", os.path.join(ROOT, "tools", "dose_server.py"))
+_srv = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_srv)
+CASES = [
+    # (must be redacted?, line)
+    (True,  "13:18:50  stt 2.50s of audio in 0.68s -> 'What time is it?'"),
+    (True,  "10:00:00  stt[base.en] 1.0s in 0.2s -> \"Did I take my aspirin?\""),
+    (True,  "10:00:00  dropped a prompt echo: 'Medication reminder device.'"),
+    (False, "21:54:50  stt[distil-small.en] 0.9s in 0.7s -> (4 words, 16 chars)"),
+    (False, "10:00:00  stt[small.en] 1.0s in 0.2s -> (nothing)  reply=none/x"),
+    (False, "10:00:00  DOSE server on https://192.168.4.21:8765  (/stt small.en)"),
+    (False, "10:00:00  token released from the keychain by someone at this Mac"),
+]
+for want, line in CASES:
+    got = bool(_srv.TRANSCRIPT_LINE.match(line))
+    check("%s: %s" % ("redacts" if want else "keeps  ", line[26:62]),
+          got == want,
+          "got %s" % ("redact" if got else "keep"))
+check("the original is moved aside, never deleted",
+      "with-transcripts" in SRV and "I have not deleted it" in SRV,
+      "a redaction he cannot check is not a redaction")
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:

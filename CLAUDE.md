@@ -1940,6 +1940,34 @@ The Mac composes conversation and declines medication, over TLS, with
 no transcript on its disk. Both acceptance runs PASS at 100%
 understood, worst turn 1.39 s and 1.5 s.
 
+## A redaction that knows only today's format is not a redaction
+
+`--redact-log` reported
+
+    redacted 102 transcript lines
+
+and **261 were still there.** The pattern matched the two shapes in
+the current source — `stt[model] ... ->` and the prompt-echo line —
+while an older build had written thousands with no brackets at all:
+
+    stt 2.50s of audio in 0.68s -> 'What time is it?'
+
+The material this exists for is *precisely* the log that accumulated
+over weeks, across builds — which is the material least likely to
+match the format sitting on screen while the pattern is written.
+Worse, the count made it look finished: 102 is a plausible,
+satisfying number.
+
+Now: an arrow (or `prompt echo:`) followed by a quoted string,
+whatever precedes it. Over-matching costs a log line's readability;
+under-matching leaves his medication on disk. `tests/test_tls.py`
+runs the pattern against formats this project has actually written,
+including ones it no longer writes.
+
+**And check the whole file afterwards, not the tail.** Job 260
+verified the redaction with `awk` from a marker onward and reported
+`0`, correctly, about the eleven lines it looked at.
+
 ## `ast.parse` IS NOT A COMPILE CHECK
 
 Every job in this project gates an install with
