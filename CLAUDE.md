@@ -2141,6 +2141,64 @@ and run it in the container before staging as well as on the device
 before installing. `ast.parse` stays useful for READING a file's
 structure in a test; it is not a substitute for compiling it.
 
+## THE DESKTOP ICON WAS A BUTTON THAT MADE THE DUPLICATE
+
+**2026-09-19.** Ryan, unprompted, diagnosing it himself:
+
+    "the app that you open on the pi versus the app that I open on
+     the pi through dose.sh seem to be different and sometimes both of
+     them are on at the same time ... this could be a cause of one of
+     the issues we were having that two sessions are going on at the
+     same time which is why their could be glitches"
+
+He is right, and the file at the top of this document — "TWO COPIES OF
+THE APP WERE RUNNING" — describes exactly what he was experiencing.
+That fix covered the AUTOSTART path. **It never covered the obvious
+one**, and DOSE.sh was writing the shortcut that made it:
+
+    Exec=/bin/bash $APP_DIR/DOSE.sh
+
+DOSE.sh starts the application. So the icon on his desktop was a
+button that started a second full instance whenever the service was
+already up — 2.5 GB on a 3.8 GB board, two copies of every speech
+model, two processes on one USB microphone.
+
+**And the entry had no `Icon=` line at all.** A blank-looking shortcut
+is why he was running DOSE.sh by hand in the first place. The missing
+logo and the duplicate instance were the same bug wearing two faces.
+
+Three changes, and the third is the one that matters most:
+
+- `tools/dose_launch.sh` is what the shortcut runs. Already running →
+  raise the window, start nothing. Not running → `systemctl --user
+  start`, which is the documented single start path. No unit at all
+  (a board that has never been set up) → DOSE.sh, as a last resort.
+- The entry gets `Icon=`, pointing at `~/.local/share/icons/dose.png`,
+  **copied** there at launch rather than referenced inside the
+  checkout — an Icon path into a directory every update rewrites is
+  one reshuffle from a blank square. Ryan sent the image he wanted and
+  it turned out **byte-identical to `tools/mac_app/dose_icon_1024.png`**,
+  already in the repo; `dose_logo.png` is a DIFFERENT picture and my
+  first version preferred it. "The logo" named two files here — worth
+  checking rather than assuming.
+- **DOSE.sh itself refuses to be the second copy.** The guard lives in
+  the thing he actually runs, not only in the launcher, because a fix
+  that covers just the path I was thinking about is the shape of every
+  duplicate-instance bug this project has had. Systemd is exempt
+  (`INVOCATION_ID` set — the unit already guarantees one).
+
+Also: the first-run copy list named `dose_logo.png` and not the icon
+or the launcher, so a fresh board would have had neither. The branch
+updater syncs all of `tools/`, so this only bit the very first
+install — which is exactly the run nobody watches.
+
+`tests/test_single_instance.py` (31 checks). Two of its own bugs are
+worth remembering: it sliced a heredoc at `EOF` and caught the OPENING
+`<< EOF`, making every check fail on correct code; and it compared two
+filenames across the whole of DOSE.sh and matched an unrelated
+install-copy line 15,000 characters away. **Assert the property from
+the line it is about.**
+
 ## Known limitations / TODO
 - `arecord -D default` fails with `Host is down` — the PipeWire ALSA plugin is
   not serving this user. Not blocking (the pinned `plughw:5,0` route works),

@@ -8,6 +8,69 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$HOME/dose-home-station"
 RAW_URL="https://raw.githubusercontent.com/relude117-star/doseconceptprototype/claude/quirky-brown-vkHwi"
 
+# ── ONE STATION. NOT TWO. ────────────────────────────────────────────
+#
+# Ryan, describing the symptom before anybody had a name for it:
+#
+#     "the app that you open on the pi versus the app that I open on
+#      the pi through dose.sh seem to be different and sometimes both
+#      of them are on at the same time"
+#
+# He is describing the failure this file's own comments already
+# document at length — see "THIS LINE RAN TWO COPIES OF THE APP"
+# below, and the table in CLAUDE.md: 2.5 GB of a 3.8 GB board, two
+# copies of every speech model, and two processes fighting over one
+# USB microphone, which is where pages of `AlsaOpen failed` came from.
+#
+# That was fixed for the AUTOSTART path. It was never fixed for the
+# obvious one: a person double-clicking the shortcut, or running this
+# script in a terminal, while systemd already has the station up. The
+# desktop shortcut this very file writes did exactly that, because it
+# pointed straight back here.
+#
+# So the guard lives HERE, in the thing he actually runs, rather than
+# only in the launcher — because a fix that only covers the path I was
+# thinking about is the shape of every duplicate-instance bug this
+# project has had.
+#
+# Systemd is exempt: when it starts us, INVOCATION_ID is set, and the
+# unit already guarantees one copy. A human gets told, and nothing
+# starts.
+if [ -z "$INVOCATION_ID" ]; then
+    _dose_other=""
+    for _d in /proc/[0-9]*; do
+        _p="${_d#/proc/}"
+        [ "$_p" = "$$" ] && continue
+        # comm, not the command line: a shell that merely CONTAINS the
+        # words "dose_app.py" has comm `bash`. Eight self-matching
+        # patterns in this project say to check this way.
+        case "$(cat "$_d/comm" 2>/dev/null)" in python*) ;; *) continue;; esac
+        case "$(tr '\0' ' ' < "$_d/cmdline" 2>/dev/null)" in
+            *dose_app.py*) _dose_other="$_p"; break;;
+        esac
+    done
+    if [ -n "$_dose_other" ]; then
+        echo ""
+        echo "  DOSE is ALREADY RUNNING (pid $_dose_other)."
+        echo ""
+        echo "  Not starting a second copy. Two instances share one"
+        echo "  microphone and neither of them gets it — that is the"
+        echo "  cause of most 'it glitches' on this board."
+        echo ""
+        echo "  The running one is the real station. To restart it:"
+        echo "      systemctl --user restart dose-home-station"
+        echo ""
+        if command -v wmctrl >/dev/null 2>&1; then
+            wmctrl -a "DOSE" 2>/dev/null
+        fi
+        if [ -t 0 ]; then
+            echo "  Press any key to close..."
+            read -n 1 -s -t 20
+        fi
+        exit 0
+    fi
+fi
+
 # NEVER BLOCK, AND NEVER DIE, WITHOUT A TERMINAL.
 #
 # This script is launched two ways: from a desktop icon with a terminal
@@ -217,6 +280,20 @@ cp "$SCRIPT_DIR/dose_voice.py" "$APP_DIR/dose_voice.py" 2>/dev/null || true
 cp "$SCRIPT_DIR/dose_nlu.py" "$APP_DIR/dose_nlu.py" 2>/dev/null || true
 cp "$SCRIPT_DIR/DOSE.sh" "$APP_DIR/DOSE.sh" 2>/dev/null || true
 cp "$SCRIPT_DIR/dose_logo.png" "$APP_DIR/dose_logo.png" 2>/dev/null || true
+# THE DESKTOP ICON AND THE LAUNCHER, both under tools/.
+#
+# This local-copy list is what a first run from a checkout installs,
+# and it named dose_logo.png only — so the icon Ryan actually asked
+# for (tools/mac_app/dose_icon_1024.png) and the launcher that stops
+# the duplicate instance could both be missing on a fresh board. The
+# branch updater syncs all of tools/, so this only bites the very
+# first install, which is exactly the run nobody is watching.
+mkdir -p "$APP_DIR/tools/mac_app"
+cp "$SCRIPT_DIR/tools/mac_app/dose_icon_1024.png" \
+   "$APP_DIR/tools/mac_app/dose_icon_1024.png" 2>/dev/null || true
+cp "$SCRIPT_DIR/tools/dose_launch.sh" \
+   "$APP_DIR/tools/dose_launch.sh" 2>/dev/null || true
+chmod +x "$APP_DIR/tools/dose_launch.sh" 2>/dev/null || true
 cp "$SCRIPT_DIR/demo_qr.png" "$APP_DIR/demo_qr.png" 2>/dev/null || true
 chmod +x "$APP_DIR"/*.py "$APP_DIR"/*.sh 2>/dev/null || true
 touch "$APP_DIR/.ready"
@@ -522,15 +599,64 @@ echo ""
 
 # ── Create desktop shortcut ──
 mkdir -p "$HOME/Desktop"
+# EXEC THE LAUNCHER, NOT THIS SCRIPT.
+#
+# This entry used to read `Exec=/bin/bash $APP_DIR/DOSE.sh`, so
+# clicking the station's own icon while the service was running
+# started a SECOND full instance — the exact fault documented below
+# under "THIS LINE RAN TWO COPIES OF THE APP", reached by the one
+# route nobody had closed. tools/dose_launch.sh raises the running
+# window instead, and asks systemd to start it only when nothing is
+# running.
+#
+# AND IT NOW HAS AN ICON. There was no `Icon=` line at all, which is
+# why the desktop had a blank-looking shortcut and why Ryan ended up
+# running DOSE.sh by hand — which is what created the duplicate in the
+# first place. The missing logo and the two instances were the same
+# bug wearing two faces.
+# THE ICON HE POINTED AT, INSTALLED SOMEWHERE STABLE.
+#
+# Ryan sent the exact image he wants on the desktop — the blue
+# rounded square with the white mark. It turned out to be BYTE
+# IDENTICAL to tools/mac_app/dose_icon_1024.png, the Mac app's icon,
+# which was already in this repo. dose_logo.png is a different
+# picture, and my first version of this entry preferred it. Worth
+# checking rather than assuming: "the logo" named two files here.
+#
+# It is COPIED to ~/.local/share/icons rather than referenced inside
+# the checkout, because the checkout is rewritten by every update and
+# an Icon= line pointing into it is one reshuffle away from a blank
+# square — which is the state that had him running DOSE.sh by hand in
+# the first place.
+mkdir -p "$HOME/.local/share/icons"
+for _src in "$APP_DIR/tools/mac_app/dose_icon_1024.png" \
+            "$APP_DIR/dose_logo.png"; do
+    if [ -f "$_src" ]; then
+        cp -f "$_src" "$HOME/.local/share/icons/dose.png" 2>/dev/null && break
+    fi
+done
+DOSE_ICON="$HOME/.local/share/icons/dose.png"
+[ -f "$DOSE_ICON" ] || DOSE_ICON="$APP_DIR/tools/mac_app/dose_icon_1024.png"
 cat > "$HOME/Desktop/DOSE.desktop" << EOF
 [Desktop Entry]
 Type=Application
-Name=DOSE Home Station
-Exec=/bin/bash $APP_DIR/DOSE.sh
+Version=1.0
+Name=DOSE
+GenericName=Home Station
+Comment=Open the DOSE Home Station
+Exec=/bin/bash $APP_DIR/tools/dose_launch.sh
+Icon=$DOSE_ICON
 Terminal=false
-StartupNotify=false
+StartupNotify=true
+Categories=Utility;
 EOF
 chmod +x "$HOME/Desktop/DOSE.desktop"
+# ALSO IN THE MENU. A desktop file is easy to lose behind a
+# full-screen kiosk; the applications menu always has it.
+mkdir -p "$HOME/.local/share/applications"
+cp "$HOME/Desktop/DOSE.desktop" \
+   "$HOME/.local/share/applications/dose.desktop" 2>/dev/null || true
+update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 gio set "$HOME/Desktop/DOSE.desktop" metadata::trusted true 2>/dev/null || true
 dbus-launch gio set "$HOME/Desktop/DOSE.desktop" metadata::trusted true 2>/dev/null || true
 
