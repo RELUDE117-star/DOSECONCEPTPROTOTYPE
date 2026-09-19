@@ -2539,8 +2539,22 @@ class DoseVoice:
             loud = getattr(self, "_vad_loud", 0)
             voice = getattr(self, "_vad_voice", 0)
             pct = (100.0 * voice / loud) if loud else 0.0
-            model = "silero" if getattr(self, "_vad", None) is not None \
-                else "energy only (Silero absent — fails open)"
+            # WHAT IT WILL USE, NOT WHETHER IT HAS WARMED UP YET.
+            #
+            # This asked `self._vad is not None`, and the session is
+            # built lazily on the first is_speech() call — so a
+            # freshly restarted station printed "Silero absent — fails
+            # open" while the model sat on disk, ready. That is a line
+            # that would have sent the next person looking for a
+            # missing download. The file is the fact; the session is a
+            # detail of when.
+            if getattr(self, "_vad", None) is not None:
+                model = "silero"
+            elif os.path.exists(os.path.join(VOICE_DIR,
+                                             "silero_vad.onnx")):
+                model = "silero (on disk, loads on the first voice)"
+            else:
+                model = "energy only — silero_vad.onnx is NOT on disk"
             return ("voice gate:     loud %d   called speech %d (%.0f%%)"
                     "   floor %.0f   model: %s"
                     % (loud, voice, pct, getattr(self, "_nfloor", 0.0),
