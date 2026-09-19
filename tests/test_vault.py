@@ -119,6 +119,40 @@ check("present() does not ask for the value",
       '"-w"' not in pres,
       "-w is what makes the keychain release the secret; a status "
       "page that prompts is a status page nobody can leave open")
+# AND THAT WAS NOT ENOUGH. Leaving out -w does not make the call
+# free: on Ryan's Mac the item's access control covers the LOOKUP
+# too. The panel refreshes every five seconds and asks about two
+# secrets, so within a minute of protecting them he had a password
+# box appearing over and over — "it keeps reasking a bunch of tiems
+# is that normal" — and the obvious way to stop that is "Always
+# Allow", the single click that gives the protection away.
+check("...and by default does not call the keychain AT ALL",
+      "if not ask_keychain:" in pres and "return name in _marked()" in pres,
+      "a status display that nags somebody into disarming their own "
+      "lock is worse than no status display")
+check("the real check is available, but only when asked for",
+      "ask_keychain=False" in pres)
+# Look at the CODE, not the docstring — which says the word "value"
+# in the course of promising not to hold one.
+_mk = SRC.split("def _mark(")[1]
+_mk = _mk[_mk.index('"""', _mk.index('"""') + 3):_mk.index("\ndef ")]
+check("the marker holds names and times, never a value",
+      "Never contains a value" in SRC and "value" not in _mk,
+      _mk[:120])
+check("it is written when a secret is protected",
+      "_mark(name, True)" in SRC)
+check("...and cleared when one is forgotten",
+      "_mark(name, False)" in SRC)
+PANEL = open(os.path.join(ROOT, "tools", "dose_panel.py"),
+             errors="ignore").read()
+check("the panel's five-second refresh does not ask the keychain",
+      "REFRESHES EVERY FIVE SECONDS" in PANEL
+      and "ask_keychain=True" not in PANEL.split("def status(")[1][:1800])
+check("...and the button that DOES ask says so on its face",
+      "Check for real (will ask)" in PANEL)
+check("...and warns that a Deny reads as unprotected",
+      "the check being denied" in PANEL,
+      "otherwise a denied check looks like the secret vanished")
 get = SRC.split("def get(")[1]
 get = get[:get.index("\ndef ")]
 check("...and get() does", '"-w"' in get)

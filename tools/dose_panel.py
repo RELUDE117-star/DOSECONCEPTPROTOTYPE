@@ -140,6 +140,19 @@ def status():
     # stops nothing running as Ryan — a script, a downloaded binary,
     # an agent, me. `cat` was the whole attack and the panel called it
     # yes.
+    # THIS PAGE REFRESHES EVERY FIVE SECONDS. It must not ask the
+    # keychain anything.
+    #
+    # It used to call present(), on the reasoning that asking whether
+    # an ITEM exists is not asking for its VALUE. On Ryan's Mac the
+    # access control covers the lookup too, so within a minute of him
+    # protecting his tokens he had a password box appearing over and
+    # over — and the obvious way to make that stop is "Always Allow",
+    # which is the single click that gives the protection away.
+    #
+    # A status display that nags somebody into disarming their own
+    # lock is worse than no status display. present() reads a marker
+    # file by default now; the real check is behind a button.
     protected = {}
     for name in ("mac-token", "github-token"):
         try:
@@ -240,8 +253,12 @@ placeholder="paste a token — it is stored 0600 and never shown again"></div>
 <button class=ghost onclick="act('gh_push')">Copy it to the station</button></div>
 </div>
 <div class=card><h2>Secrets</h2><div id=vault></div>
-<div class=acts><button onclick="act('lock_secrets')">Require my password</button></div>
-<p class=note>Locked means the token lives in this Mac&rsquo;s keychain with
+<div class=acts><button onclick="act('lock_secrets')">Require my password</button>
+<button class=ghost onclick="act('verify_secrets')">Check for real (will ask)</button></div>
+<p class=note>This card never asks your keychain anything on its own &mdash;
+it reads a note saying what was locked and when. Only the check button asks
+for real, and it will put a password box up when you press it.
+Locked means the token lives in this Mac&rsquo;s keychain with
 no application trusted to read it. Anything that wants it &mdash; a script, an
 app, an AI, me &mdash; makes a password box appear on this screen, and nothing
 gets it unless you type your password here. Nothing in DOSE knows that
@@ -537,8 +554,32 @@ def a_lock_secrets():
     return "\n".join(out)
 
 
+def a_verify_secrets():
+    """Ask the keychain for real. THIS PROMPTS, once per secret, and
+    that is the point of pressing it."""
+    v = _vault()
+    if v is None or not v.supported():
+        return "This needs macOS and /usr/bin/security."
+    out = ["Asking macOS directly. Expect a password box for each one —",
+           "that box appearing IS the protection working.", ""]
+    for name in ("mac-token", "github-token"):
+        try:
+            ok = v.present(name, ask_keychain=True)
+        except Exception as e:
+            out.append("%s: could not check (%s)" % (name, e))
+            continue
+        out.append("%s: %s" % (name, "in your keychain and locked"
+                               if ok else "NOT protected"))
+    out.append("")
+    out.append("If you clicked Deny, it reads as not protected — that is "
+               "the check being denied, not the secret being gone. "
+               "Press it again and allow it to see the real answer.")
+    return "\n".join(out)
+
+
 ACTIONS = {
     "lock_secrets": a_lock_secrets,
+    "verify_secrets": a_verify_secrets,
     "show_notes": a_show_notes,
     "pi_check": a_pi_check,
     "pi_restart": a_pi_restart,

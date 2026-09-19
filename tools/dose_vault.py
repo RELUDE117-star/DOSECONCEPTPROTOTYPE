@@ -85,6 +85,7 @@ import argparse
 import os
 import secrets
 import subprocess
+import time
 import sys
 
 SERVICE_PREFIX = "dose."
@@ -142,6 +143,7 @@ def put(name, value):
         return False, "keychain call failed: %r" % (e,)
     if r.returncode != 0:
         return False, (r.stderr or r.stdout or "unknown error").strip()[:160]
+    _mark(name, True)
     return True, "stored; reading it now needs a password typed on this Mac"
 
 
@@ -167,17 +169,75 @@ def get(name):
     return r.stdout.strip(), ""
 
 
-def present(name):
-    """Is it in the keychain? Asks about the ITEM, not its value, so
-    this does not prompt and can be called by a status page."""
+# A NOTE ON DISK SAYING WHAT WAS LOCKED, AND WHEN.
+#
+# It holds NO secret — just names and timestamps — and it exists
+# because asking the keychain "is this item there?" turned out not to
+# be free.
+MARKER = os.path.join(os.path.expanduser("~"), ".dose-server",
+                      "protected.json")
+
+
+def _marked():
+    try:
+        import json
+        with open(MARKER) as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def _mark(name, on=True):
+    """Record that a secret was protected. Never contains a value."""
+    try:
+        import json
+        d = _marked()
+        if on:
+            d[name] = time.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            d.pop(name, None)
+        os.makedirs(os.path.dirname(MARKER), exist_ok=True)
+        fd = os.open(MARKER, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(d, f, indent=1)
+    except Exception:
+        pass
+
+
+def present(name, ask_keychain=False):
+    """Is it protected?
+
+    ASKING THE KEYCHAIN IS NOT FREE, WHICH I ASSUMED IT WAS.
+
+    This used to run `security find-generic-password` without -w and
+    call that harmless, on the reasoning that asking about the ITEM is
+    not asking for its VALUE. On Ryan's Mac it is: the item's access
+    control covers the lookup too, so the lookup prompts.
+
+    The panel refreshes every five seconds and asks about two
+    secrets. Within a minute of him protecting them he had a password
+    box appearing over and over — "it keeps reasking a bunch of
+    tiems is that normal" — and the obvious way to make it stop is
+    "Always Allow", which is the one click that gives the protection
+    away. A status display that nags somebody into disarming their own
+    lock is worse than no status display.
+
+    So the default answer comes from a marker file that holds names
+    and times and no secrets. `ask_keychain=True` does the real check,
+    for the one place that should: a button he presses on purpose.
+    """
     if not supported():
         return False
+    if not ask_keychain:
+        return name in _marked()
     try:
         r = subprocess.run(
             [SECURITY, "find-generic-password",
              "-a", _account(), "-s", _service(name)],
-            capture_output=True, text=True, timeout=15)
-        return r.returncode == 0
+            capture_output=True, text=True, timeout=60)
+        ok = r.returncode == 0
+        _mark(name, ok)
+        return ok
     except Exception:
         return False
 
@@ -192,6 +252,8 @@ def forget(name):
             capture_output=True, text=True, timeout=20)
     except Exception as e:
         return False, repr(e)
+    if r.returncode == 0:
+        _mark(name, False)
     return r.returncode == 0, (r.stderr or "").strip()[:120]
 
 
