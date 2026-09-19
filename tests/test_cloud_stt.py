@@ -176,11 +176,23 @@ v._med_names = lambda: []
 for a, val in (("_raw_vosk", ""), ("_raw_fast", ""), ("_raw_slow", ""),
                ("_fw_conf", 0.0), ("_fast_choice", "whisper")):
     setattr(v, a, val)
+# A REAL TURN'S WORTH OF AUDIO, NOT 4000 BYTES.
+#
+# These buffers were AUDIO — 0.125 s at 16 kHz — because the
+# subject here is WHICH recogniser answers, not how much audio there
+# is. Then the engine gained a floor: below MIN_TURN_AUDIO_S it
+# answers without running any recogniser at all, because the device
+# spent 9.90 s on 0.36 s of noise and returned nothing. These tests
+# then all failed, correctly, on a buffer no real turn could produce.
+# The shortest utterance in the device's log that a model got right
+# carried 0.88 s.
+AUDIO = b"x" * int(1.5 * 16000 * 2)
+
 v._cloud_enabled = lambda: False
 v._fast_transcribe = lambda a, budget=None: ("open storage", "whisper-tiny.en")
 v._whisper_transcribe = lambda a: ""
 v._trim_silence = lambda a, keep_ms=140: a
-got = v._better_transcribe(b"x" * 4000, "")
+got = v._better_transcribe(AUDIO, "")
 ok(got == "open storage",
    "cloud OFF -> local path still answers (%r)" % got)
 
@@ -196,7 +208,7 @@ v2._cloud_transcribe = lambda a: ("what time is it", "cloud:groq", 0.4)
 v2._fast_transcribe = lambda a, budget=None: ("WRONG local", "whisper-tiny.en")
 v2._whisper_transcribe = lambda a: ""
 v2._trim_silence = lambda a, keep_ms=140: a
-got2 = v2._better_transcribe(b"x" * 4000, "")
+got2 = v2._better_transcribe(AUDIO, "")
 ok(got2 == "what time is it" and v2._last_engine == "cloud:groq",
    "cloud ON + online -> cloud transcript wins (%r via %s)"
    % (got2, getattr(v2, "_last_engine", "?")))
@@ -213,7 +225,7 @@ v3._cloud_transcribe = lambda a: ("", "cloud", 0.0)   # failed
 v3._fast_transcribe = lambda a, budget=None: ("open settings", "whisper-tiny.en")
 v3._whisper_transcribe = lambda a: ""
 v3._trim_silence = lambda a, keep_ms=140: a
-got3 = v3._better_transcribe(b"x" * 4000, "")
+got3 = v3._better_transcribe(AUDIO, "")
 ok(got3 == "open settings",
    "cloud FAILED -> local fallback answers, no crash (%r)" % got3)
 
@@ -248,7 +260,7 @@ def _hanging(*a, **k):
 _cc.cloud_transcribe = _hanging
 _cc.available_providers = lambda anonymous_ok=False: ["groq"]
 t0 = _t.time()
-got4 = v4._better_transcribe(b"x" * 4000, "")
+got4 = v4._better_transcribe(AUDIO, "")
 elapsed = _t.time() - t0
 _cc.cloud_transcribe = _real_ct
 ok(got4 == "open storage",

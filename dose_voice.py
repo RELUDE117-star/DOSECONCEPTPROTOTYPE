@@ -388,6 +388,13 @@ STT_LOCAL_CEILING = float(os.environ.get("DOSE_STT_LOCAL_CEILING", "8.0"))
 # 0.2 s of wall clock is a wasted pass and a guaranteed abandon; below
 # this the turn is better served by the live transcript it already has.
 STT_LOCAL_FLOOR = float(os.environ.get("DOSE_STT_LOCAL_FLOOR", "1.5"))
+# The least audio that could hold a question. Below this no recogniser
+# is run at all: the device spent 9.90 s on 0.36 s of noise and
+# returned nothing, which is the worst trade in the log. Measured
+# against the turns that worked — every correct one carried at least
+# 0.88 s of trimmed audio, and the shortest good utterance, "Okay.",
+# had 1.9 s of buffer behind it.
+MIN_TURN_AUDIO_S = float(os.environ.get("DOSE_MIN_TURN_AUDIO", "0.5"))
 # The most audio a single turn may hand the recogniser. Transcription
 # cost is linear in length, so the worst turn is the longest one: the
 # device logged "fast": 25.02 on a buffer that had been accumulating
@@ -2790,6 +2797,42 @@ class DoseVoice:
             return vosk_text
         t_start = time.time()
         audio_bytes = self._trim_silence(audio_bytes)
+        # NOT ENOUGH AUDIO TO CONTAIN A QUESTION.
+        #
+        # From the device: 0.36 s of audio at peak 2260 was handed to
+        # a recogniser that spent 9.90 s on it and returned nothing.
+        # A third of a second is not a sentence — it is a chair, a
+        # cough, or the tail of the station's own reply — and no model
+        # is going to find a question in it, however long it looks.
+        #
+        # Measured against the turns that WORKED, so this cannot eat a
+        # real one: the shortest good utterance in the log is "Okay."
+        # at 1.9 s of buffer, and every correct turn carried at least
+        # 0.88 s of trimmed audio. The bar is half a second.
+        try:
+            _secs = len(audio_bytes) / 2.0 / float(SAMPLE_RATE)
+        except Exception:
+            _secs = 0.0
+        if audio_bytes and _secs < MIN_TURN_AUDIO_S:
+            self._too_short = getattr(self, "_too_short", 0) + 1
+            # ONE GUARD PER WRITE, like every other write in this
+            # method. A single `if _recording():` around a block is
+            # equally correct and the suite cannot see it — it checks
+            # that each write is guarded by reading the line above it.
+            # Rewriting the test to understand blocks would make it
+            # weaker at catching the bug it exists for, which has now
+            # happened four times.
+            if _recording():
+                self._t_fast = time.time() - t_start
+            if _recording():
+                self._t_slow = 0.0
+            if _recording():
+                self._last_engine = "too short"
+            if _recording():
+                self._stt_note = (
+                    "%.2fs of audio — below %.2fs, answered without "
+                    "running a recogniser" % (_secs, MIN_TURN_AUDIO_S))
+            return vosk_text or ""
         self._raw_vosk = vosk_text or ""
         self._raw_fast = ""
         self._raw_slow = ""
@@ -2817,6 +2860,7 @@ class DoseVoice:
                     t_r = time.time()
                     rtext = _remote_stt.transcribe(
                         self._wav_bytes(audio_bytes))
+                    r_secs = time.time() - t_r
                     if rtext and self._usable(rtext):
                         if _recording():
                             self._t_fast = time.time() - t_start
@@ -2826,9 +2870,47 @@ class DoseVoice:
                             self._last_engine = "mac"
                         if _recording():
                             self._stt_note = (
-                                "answered by the Mac in %.2fs"
-                                % (time.time() - t_r))
+                                "answered by the Mac in %.2fs" % r_secs)
                         return rtext
+                    # THE MAC ANSWERED AND THE ANSWER WAS NO GOOD.
+                    #
+                    # This used to fall silently through to the Pi's
+                    # own models, and that is where every long turn in
+                    # the log comes from. From the device:
+                    #
+                    #   heard '[unk]'  7.6s of audio  fast  9.01  abandoned
+                    #   heard '[unk]'  0.5s of audio  fast  9.90  tiny.en
+                    #   heard '[unk] it yes'          fast 10.95  abandoned
+                    #
+                    # against 0.75-1.11 s on every one of the forty
+                    # turns the Mac did answer. There is no middle.
+                    #
+                    # The Pi's tiny.en is not a second opinion on the
+                    # Mac's small.en — it is a WEAKER model, and it is
+                    # the offline fallback, not a court of appeal. Nine
+                    # seconds to be told the same thing by something
+                    # less able is the worst outcome available, and it
+                    # is the one the person actually stands there for.
+                    #
+                    # So: a Mac that answered has answered. Say "I
+                    # didn't catch that" in a second instead of taking
+                    # ten to say it.
+                    if rtext is not None and _remote_stt.available():
+                        self._mac_unusable = getattr(
+                            self, "_mac_unusable", 0) + 1
+                        if _recording():
+                            self._t_fast = time.time() - t_start
+                        if _recording():
+                            self._t_slow = 0.0
+                        if _recording():
+                            self._last_engine = "mac (unclear)"
+                        if _recording():
+                            self._stt_note = (
+                                "the Mac answered %r in %.2fs and it "
+                                "did not parse — not paying the Pi's "
+                                "weaker model to agree"
+                                % (str(rtext)[:40], r_secs))
+                        return rtext or ""
             except Exception:
                 pass
 

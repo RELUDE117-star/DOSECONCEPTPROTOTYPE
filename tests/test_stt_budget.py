@@ -411,6 +411,51 @@ check("and the arithmetic bounds the stage: budget + ceiling is the "
       "worst case, not budget x steps",
       _worst <= 16.0, "%.1fs" % _worst)
 
+print("\n── the two paths that cost nine seconds ────────────────────")
+# From the device's own log, every turn the Mac answered took
+# 0.75-1.11 s, forty-odd of them. Every turn it did not took 9.01,
+# 9.90, 10.95, 105.14. There is no middle, and both causes are here.
+
+# 1. AUDIO TOO SHORT TO HOLD A QUESTION. 0.36 s at peak 2260 was
+#    handed to a recogniser that spent 9.90 s and returned nothing.
+check("there is a floor on how little audio is worth running a model on",
+      hasattr(dose_voice, "MIN_TURN_AUDIO_S"))
+check("...and it is below the shortest utterance that ever worked",
+      0 < dose_voice.MIN_TURN_AUDIO_S <= 0.88,
+      "the device's shortest correct turn carried 0.88s of trimmed "
+      "audio; a floor above that would eat a real question")
+check("...and it is settable on the device",
+      "DOSE_MIN_TURN_AUDIO" in CODE)
+_bt = CODE.split("def _better_transcribe")[1]
+_bt = _bt[:_bt.index("\n    def ")]
+check("the floor is checked BEFORE any recogniser runs",
+      _bt.index("MIN_TURN_AUDIO_S") < _bt.index("_remote_stt.available()"),
+      "a floor applied after the expensive call saves nothing")
+check("...and it answers from the live transcript rather than nothing",
+      "return vosk_text or \"\"" in _bt)
+check("...and says so in the row",
+      "answered without" in _bt and "running a recogniser" in _bt)
+
+# 2. THE MAC ANSWERED AND THE ANSWER DID NOT PARSE. This fell through
+#    to the Pi's tiny.en — a WEAKER model — for nine seconds, to reach
+#    the same conclusion.
+check("an unusable Mac answer does not fall through to the Pi",
+      "_mac_unusable" in _bt,
+      "tiny.en is the offline fallback, not a court of appeal on "
+      "small.en")
+check("...and that outcome is counted",
+      _bt.count("_mac_unusable") >= 2)
+check("...and named in the turn log, not silent",
+      "did not parse" in _bt)
+check("...only while the Mac is actually there",
+      "rtext is not None and _remote_stt.available()" in _bt,
+      "a Mac that VANISHED mid-turn must still fall back locally — "
+      "that is the offline case and it has to keep working")
+check("the local models are still reached when the Mac is absent",
+      _bt.index("_mac_unusable")
+      < _bt.index("fast, feng = self._fast_transcribe("),
+      "the fallback path must still exist below it")
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:
