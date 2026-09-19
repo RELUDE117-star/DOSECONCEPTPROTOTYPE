@@ -48,10 +48,12 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import secrets
 import socket
 import sys
 import time
+import ssl
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -60,6 +62,27 @@ HOME = os.path.expanduser("~")
 STATE_DIR = os.path.join(HOME, ".dose-server")
 TOKEN_FILE = os.path.join(STATE_DIR, "token")
 LOG_FILE = os.path.join(STATE_DIR, "server.log")
+# ── TLS ─────────────────────────────────────────────────────────────
+#
+# Ryan: "jsut make sure its encrypted", and in the same breath "The
+# MAC has to hear the audio in order to do the computing so please
+# make sure it stays that way".
+#
+# Both. The Mac still receives every byte of audio — that is the
+# whole reason a turn takes 0.85s instead of nine. What changes is
+# that the bytes cross his Wi-Fi inside TLS, so the audio, and
+# therefore the words, are readable by the two machines and nobody
+# else with a packet capture.
+#
+# The certificate is created by tools/dose_cert.py, NOT here. This
+# file's one hard rule, with a test behind it, is that it runs no
+# program and opens no path it does not own — and it stays true.
+CERT_FILE = os.path.join(STATE_DIR, "server.crt")
+KEY_FILE = os.path.join(STATE_DIR, "server.key")
+
+
+def tls_ready():
+    return os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE)
 
 # A three-second utterance at 16 kHz mono is about 96 KB. Twenty
 # seconds of it is 640 KB. Two megabytes is generous and still small
@@ -131,6 +154,73 @@ def log(msg):
             f.write(line + "\n")
     except Exception:
         pass
+
+
+# ── WHAT HE SAID DOES NOT GO ON THIS MACHINE'S DISK ─────────────────
+#
+# Ryan drew the line himself, and it is the right line:
+#
+#     "Keeping all sensitive information like medical on the pi where
+#      its hold completely locally and then any unique talking info
+#      thats not sensistve through the mac"
+#
+# This server has to SEE the words — transcribing them is the whole
+# job, and it is the reason a turn takes 0.85s instead of nine. What
+# it must not do is KEEP them. And it was keeping them: every
+# transcript went into ~/.dose-server/server.log, in full, forever.
+#
+#     stt[small.en] 1.80s of audio in 0.67s -> 'Did I take my aspirin today?'
+#
+# That line is a medication record. It was useful — reading those
+# logs is how a bad test run turned out to be a person talking in the
+# room rather than a fault — and being useful is exactly how a health
+# record accumulates in a place nobody thinks of as one.
+#
+# So: the metadata always (how long, how fast, how many words — which
+# is what diagnosis actually needs), and the WORDS only when somebody
+# turns them on deliberately, for one session, knowing what the log
+# becomes. Off is the default and there is no way to reach it from
+# the network.
+LOG_TEXT = os.environ.get("DOSE_SERVER_LOG_TEXT", "").strip().lower() \
+    in ("1", "true", "yes", "on")
+
+
+def _say(text):
+    """A transcript, rendered for the log — without the transcript.
+
+    Returns the words themselves ONLY under DOSE_SERVER_LOG_TEXT.
+    Otherwise it returns shape: how many words, how many characters,
+    and whether anything came back at all. Every diagnosis this
+    project has actually needed from these lines — was it empty, was
+    it the prompt echoing, was somebody else talking — survives that,
+    because they were all questions about SHAPE.
+    """
+    t = (text or "").strip()
+    if LOG_TEXT:
+        return repr(t[:60]) + "  [DOSE_SERVER_LOG_TEXT is on]"
+    if not t:
+        return "(nothing)"
+    return "(%d words, %d chars)" % (len(t.split()), len(t))
+
+
+def _load_composer():
+    """tools/dose_reply.py, if it is beside us.
+
+    Optional, exactly like the vault: a Mac that has not been updated
+    yet must keep transcribing. When it is missing every turn comes
+    back `reply_kind: "none"` and the Pi answers with its own
+    `respond()`, which is the behaviour that existed before any of
+    this — so the worst case is "no worse than yesterday".
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from dose_reply import compose
+        return compose
+    except Exception:
+        return None
+
+
+_compose = _load_composer()
 
 
 def _vault():
@@ -228,7 +318,8 @@ def _resolve_token():
     Split out from token() so the caching is visible and so a test
     can assert that the request path never reaches this."""
     v = _vault()
-    if v is not None and v.supported() and v.present("mac-token"):
+    held = bool(v is not None and v.supported() and v.present("mac-token"))
+    if held:
         val, err = v.get("mac-token")
         if val:
             log("token released from the keychain by someone at this Mac "
@@ -244,11 +335,43 @@ def _resolve_token():
                 return t, "file"
     except Exception:
         pass
+
+    # MINTING A NEW TOKEN HERE UNPAIRS THE STATION, SILENTLY.
+    #
+    # This branch existed for one honest case: a Mac that has never
+    # been paired, where any random secret is as good as any other
+    # and the panel is about to show it to him.
+    #
+    # But it also ran every time the keychain REFUSED. Ryan spent an
+    # evening pressing Deny on a dialog that would not stop — and
+    # each Deny fell through to here, found the plaintext file gone
+    # (the protection step moves it aside), minted a brand-new
+    # secret, and wrote it to disk. The Pi still holds the original.
+    # So every Deny quietly re-keyed the server against a station
+    # that could no longer talk to it, and the symptom is a 401 that
+    # looks exactly like the token never worked.
+    #
+    # A secret that is PRESENT but withheld is not a missing secret.
+    # If the keychain holds the item and would not release it, the
+    # honest outcome is no token and a server that says so — the
+    # station falls back to its own models and keeps working, which
+    # is slower and entirely correct. Inventing a new shared secret
+    # for a pairing that already exists is not a fallback, it is a
+    # break.
+    if held:
+        log("the keychain HOLDS the token and did not release it. "
+            "NOT minting a new one — that would re-key this server "
+            "against a station that is already paired. Restart the "
+            "server and answer the dialog.")
+        return "", "withheld"
+
     t = secrets.token_urlsafe(32)
     os.makedirs(STATE_DIR, exist_ok=True)
     fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(t + "\n")
+    log("no token anywhere — minted a new one. The station must be "
+        "paired again before it can be answered.")
     return t, "new file"
 
 
@@ -375,7 +498,7 @@ def transcribe(wav_bytes, model_name=None):
         # Empty is the honest answer, and it is also the useful one:
         # the Pi treats an unusable transcript as a reason to ask
         # /stt, where the stronger model gets a proper try.
-        log("dropped a prompt echo: %r" % text[:60])
+        log("dropped a prompt echo: %s" % _say(text))
         text = ""
     took = time.time() - t0
     _STATS["audio_seconds"] += secs
@@ -477,10 +600,97 @@ class Handler(BaseHTTPRequestHandler):
             self._deny(400, "not usable audio: %s" % str(e)[:80])
             return
         _STATS["requests"] += 1
-        log("stt[%s] %.2fs of audio in %.2fs -> %r"
-            % (model_name, secs, took, text[:60]))
+
+        # THE REPLY RIDES BACK WITH THE TRANSCRIPT. Not a second
+        # request — Ryan asked for the Mac to decide what to say, and
+        # the honest measurement is that deciding is already free on
+        # the Pi (`think: 0.00`), so a second round trip would make
+        # the station slower in exchange for nothing. In this
+        # response it costs a few hundred microseconds of regex and
+        # nothing on the wire.
+        #
+        # `compose()` answers conversation and NOTHING ELSE. Anything
+        # touching medication comes back "defer" and the Pi answers
+        # it from its own data, offline, as it always has. That
+        # split is Ryan's:
+        #
+        #     "Keeping all sensitive information like medical on the
+        #      pi ... and then any unique talking info thats not
+        #      sensistve through the mac"
+        say, kind, why = "", "none", "composer unavailable"
+        if _compose is not None:
+            try:
+                say, kind, why = _compose(text)
+            except Exception as e:
+                say, kind, why = "", "none", "composer failed: %s" % \
+                    str(e)[:60]
+        # `why` is a category name, never his words. `_say()` keeps
+        # the transcript itself off this disk.
+        log("stt[%s] %.2fs of audio in %.2fs -> %s  reply=%s/%s"
+            % (model_name, secs, took, _say(text), kind, why))
         self._ok({"text": text, "audio": round(secs, 2),
-                  "took": round(took, 3), "model": model_name})
+                  "took": round(took, 3), "model": model_name,
+                  "reply": say, "reply_kind": kind, "reply_why": why})
+
+
+TRANSCRIPT_LINE = re.compile(
+    r"^(?P<head>.*?(?:stt\[[^\]]*\][^>]*->|dropped a prompt echo:)\s*)"
+    r"(?P<body>['\"].*)$")
+
+
+def redact_log():
+    """Take the transcripts out of this Mac's log, keeping everything else.
+
+    The log was written before the rule existed, so it holds months
+    of lines like
+
+        stt[small.en] 1.80s of audio in 0.67s -> 'Did I take my aspirin today?'
+
+    which is a medication record in a file nobody thinks of as one.
+    `_say()` stops new ones; this deals with the ones already there.
+
+    IT DOES NOT DELETE ANYTHING. The original is moved aside to
+    `server.log.with-transcripts` and left for Ryan — same rule as
+    the plaintext token: I will not destroy a file of his to tidy up
+    after myself, and a redaction he cannot check is not a
+    redaction. Deleting that copy is one command and it is his to
+    run.
+    """
+    # LOG_FILE, not an argument. The one rule this file has never
+    # bent is that every path it opens is a constant it owns, and
+    # test_dose_server.py reads that off the syntax tree — a
+    # redaction helper is not worth the exception, and the exception
+    # is the kind that gets reused later by something reachable from
+    # the network.
+    if not os.path.exists(LOG_FILE):
+        print("no log at %s — nothing to redact" % LOG_FILE)
+        return 0
+    kept, redacted = [], 0
+    with open(LOG_FILE, errors="replace") as f:
+        for line in f:
+            m = TRANSCRIPT_LINE.match(line.rstrip("\n"))
+            if m:
+                body = m.group("body")
+                words = len(re.findall(r"[A-Za-z']+", body))
+                kept.append("%s(%d words — redacted)" % (m.group("head"),
+                                                         words))
+                redacted += 1
+            else:
+                kept.append(line.rstrip("\n"))
+    aside = LOG_FILE + ".with-transcripts"
+    if os.path.exists(aside):
+        aside = "%s.%d" % (aside, int(time.time()))
+    os.rename(LOG_FILE, aside)
+    fd = os.open(LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(kept) + "\n")
+    print("redacted %d transcript lines in %s" % (redacted, LOG_FILE))
+    print("the ORIGINAL, still containing them, is at:")
+    print("    %s" % aside)
+    print("I have not deleted it. Delete it yourself when you have "
+          "looked:")
+    print("    rm %s" % aside)
+    return 0
 
 
 def serve(host=None, port=8765, preload=True):
@@ -506,8 +716,43 @@ def serve(host=None, port=8765, preload=True):
                 log("model %s not available yet: %s" % (name, e))
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
-    log("DOSE server on http://%s:%d  (/stt %s, /stt-fast %s)"
-        % (host, port, MODEL_NAME, FAST_MODEL_NAME))
+
+    # WRAP THE LISTENING SOCKET, OR SAY PLAINLY THAT IT IS NOT WRAPPED.
+    #
+    # No silent downgrade, in either direction. A server that quietly
+    # serves plain HTTP when its certificate is missing is a server
+    # that is one deleted file away from broadcasting his medication
+    # to the network with nothing on screen to say so. So the state
+    # goes in the log and in --status, in words, every single start.
+    scheme = "http"
+    if tls_ready():
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            # TLS 1.2 is the floor. Everything below it is broken and
+            # both ends here are modern; there is no old client to
+            # accommodate, so there is no reason to accept one.
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            ctx.load_cert_chain(CERT_FILE, KEY_FILE)
+            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+            scheme = "https"
+        except Exception as e:
+            # REFUSE. Not "carry on in the clear" — he asked for this
+            # to be encrypted, and a station that keeps working by
+            # quietly dropping the thing he asked for is the failure
+            # this project has written down three times in other
+            # forms. The Pi falls back to its own models, which is
+            # slower and completely safe.
+            log("TLS is configured but could not be started: %s" % e)
+            log("REFUSING to serve in the clear. Fix the certificate "
+                "(python3 tools/dose_cert.py --status) or remove it "
+                "deliberately.")
+            return 2
+    else:
+        log("NO CERTIFICATE — serving plain HTTP. The audio crosses "
+            "your network unencrypted. python3 tools/dose_cert.py "
+            "--make")
+    log("DOSE server on %s://%s:%d  (/stt %s, /stt-fast %s)"
+        % (scheme, host, port, MODEL_NAME, FAST_MODEL_NAME))
     log("paired device: %s" % (ALLOW_PEER or "any address on this LAN"))
     log("token is in %s — install it on the Pi, never anywhere else" % TOKEN_FILE)
     try:
@@ -527,10 +772,14 @@ def main():
                     help="print the shared secret, for installing on the Pi")
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--no-preload", action="store_true")
+    ap.add_argument("--redact-log", action="store_true",
+                    help="strip transcripts out of this Mac's server log")
     a = ap.parse_args()
     if a.token:
         print(token())
         return 0
+    if a.redact_log:
+        return redact_log()
     if a.status:
         v = _vault()
         protected = bool(v is not None and v.supported()
@@ -543,6 +792,12 @@ def main():
              # a plaintext file anything running as Ryan could read,
              # and it looked reassuring. Whether a person has to
              # approve the read is the thing worth reporting.
+             "tls": tls_ready(),
+             "encryption": ("the audio is encrypted in transit (TLS, "
+                            "with a certificate the station pins)"
+                            if tls_ready() else
+                            "NOT ENCRYPTED — the audio crosses your "
+                            "network in the clear"),
              "token_protected": protected,
              "token_protection": (
                  "keychain — a person must approve each read on this Mac"

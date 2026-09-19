@@ -40,12 +40,103 @@ import ipaddress
 import json
 import os
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONF = os.path.join(APP_DIR, "dose_server.conf")
+
+# ── THE PINNED CERTIFICATE ──────────────────────────────────────────
+#
+# Ryan: "jsut make sure its encrypted".
+#
+# The audio still goes to the Mac — that is the point of the whole
+# arrangement — and now it goes inside TLS. This file is the Mac's
+# certificate, copied here during pairing. It is the ONLY certificate
+# this station will accept: not a certificate authority, not the
+# system trust store, this exact file.
+#
+# That is deliberately stronger than ordinary HTTPS. There are two
+# machines and they are both his; a CA exists to vouch for strangers,
+# and there are no strangers here. Pinning means that any of the
+# hundreds of authorities a normal client trusts being compromised
+# changes nothing — the station will not accept a certificate it was
+# not handed by hand during pairing.
+#
+# NO HOSTNAME IS CHECKED, on purpose. The Mac's address comes from
+# DHCP, so a name baked into the certificate is a thing that silently
+# stops matching the day the router hands out a different lease. The
+# identity check here is the certificate itself, which is a stronger
+# statement than a name anyway.
+CERT = os.path.join(APP_DIR, "dose_server.crt")
+
+# ONCE THIS STATION HAS A CERTIFICATE, IT WILL NOT SPEAK PLAIN HTTP.
+#
+# The dangerous shape is a client that tries TLS, fails, and "helpfully"
+# retries in the clear — anybody able to break the handshake gets the
+# audio just by breaking it. So: certificate present means https and
+# only https. No certificate means this station was paired before
+# encryption existed, and it keeps working over http so an upgrade
+# cannot silently take a working cabinet offline — with the state
+# printed in the heartbeat rather than assumed.
+_SSL = {"ctx": None, "at": 0.0, "have": False}
+
+
+def _ssl_ctx():
+    """The pinned trust context, rebuilt if the file changes."""
+    now = time.time()
+    if _SSL["ctx"] is not None and now - _SSL["at"] < 60:
+        return _SSL["ctx"]
+    _SSL["at"] = now
+    _SSL["ctx"] = None
+    _SSL["have"] = False
+    if not os.path.exists(CERT):
+        return None
+    try:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        # The Mac is identified by its certificate, not by a name.
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        ctx.load_verify_locations(cafile=CERT)
+        _SSL["ctx"] = ctx
+        _SSL["have"] = True
+    except Exception as e:
+        # A certificate that will not load is NOT a reason to fall
+        # back to plaintext. available() reports the station as
+        # unpaired instead, and it uses its own models — slower, and
+        # safe.
+        _STATE["last_error"] = "certificate unusable: %s" % str(e)[:60]
+    return _SSL["ctx"]
+
+
+def _opener():
+    """A URL opener with no proxies and the pinned certificate.
+
+    No proxies, ever. A proxy is a third machine, and there is no
+    third machine in this arrangement — it would also be a machine
+    that terminates the TLS this exists to provide.
+    """
+    handlers = [urllib.request.ProxyHandler({})]
+    ctx = _ssl_ctx()
+    if ctx is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    return urllib.request.build_opener(*handlers)
+
+
+def encrypted():
+    """Whether this station is talking to the Mac over TLS. For the
+    heartbeat, so the answer to 'is the audio encrypted' is read off
+    the device rather than taken on anybody's word."""
+    _ssl_ctx()
+    return _SSL["have"]
+
+
+def _url(host, port, path):
+    return "%s://%s:%d/%s" % ("https" if encrypted() else "http",
+                              host, port, path)
 
 # THE MAC IS THE RECOGNISER. THE PI IS THE PARACHUTE.
 #
@@ -187,11 +278,10 @@ def probe(force=False):
     _STATE["health_at"] = now
     host, port, token = conf
     req = urllib.request.Request(
-        "http://%s:%d/health" % (host, port), method="GET",
+        _url(host, port, "health"), method="GET",
         headers={"Authorization": "Bearer " + token})
     try:
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}))
+        opener = _opener()
         t0 = time.time()
         with opener.open(req, timeout=HEALTH_TIMEOUT) as r:
             r.read(4096)
@@ -209,6 +299,15 @@ def probe(force=False):
 def transcribe(wav_bytes, fast=False):
     """WAV in, text out, or "" if the Mac is not there.
 
+    The plain text, for every caller that only wants the words. The
+    Mac may also send back a suggested REPLY; `transcribe_full()`
+    returns that as well. Deliberately a RETURN VALUE and not
+    something stashed on a module attribute for the caller to pick up
+    afterwards — this project has now had four separate bugs of
+    exactly that shape (see CLAUDE.md, "Two threads, one attribute"),
+    and the speculative pass and the final pass call this function
+    concurrently on purpose.
+
     Never raises. A remote recogniser that can throw into the middle of
     a turn is a remote recogniser that can make the cabinet worse than
     having none.
@@ -224,13 +323,36 @@ def transcribe(wav_bytes, fast=False):
     which is why the fast route answers the pass that runs DURING the
     pause, and anything that does not parse is asked again properly.
     """
+    return transcribe_full(wav_bytes, fast=fast)[0]
+
+
+def transcribe_full(wav_bytes, fast=False):
+    """WAV in, (text, reply, reply_kind) out.
+
+    THE REPLY RIDES HOME WITH THE TRANSCRIPT. Ryan asked for the Mac
+    to decide what the station says. The honest measurement is that
+    deciding is already free on the Pi — `think: 0.00` in every turn
+    row — so asking the Mac in a SECOND request would cost a whole
+    round trip (0.85s measured) to replace something that costs
+    nothing. In the same response it costs nothing at all.
+
+    `reply_kind` is the contract:
+
+        "chat"   the Mac composed this; say it
+        "defer"  medication — the Pi answers from its own data
+        "none"   nobody had a line; the Pi's respond() decides
+
+    An older Mac that has not been updated sends no reply field at
+    all, which reads as "none", which is the behaviour that existed
+    before any of this. That is the intended failure.
+    """
     conf = _conf()
     if conf is None or time.time() < _STATE["down_until"]:
-        return ""
+        return "", "", "none"
     if not wav_bytes or len(wav_bytes) > MAX_UPLOAD:
-        return ""
+        return "", "", "none"
     host, port, token = conf
-    url = "http://%s:%d/%s" % (host, port, "stt-fast" if fast else "stt")
+    url = _url(host, port, "stt-fast" if fast else "stt")
     req = urllib.request.Request(
         url, data=wav_bytes, method="POST",
         headers={"Authorization": "Bearer " + token,
@@ -242,20 +364,31 @@ def transcribe(wav_bytes, fast=False):
     budget = TIMEOUT if _STATE["warmed"] else WARM_TIMEOUT
     t0 = time.time()
     try:
-        # No proxies, ever. A proxy is a third machine, and there is no
-        # third machine in this arrangement.
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}))
+        opener = _opener()
         with opener.open(req, timeout=budget) as r:
             body = r.read(64 * 1024)
         data = json.loads(body.decode("utf-8", "replace"))
         text = (data.get("text") or "").strip()
+        reply = (data.get("reply") or "").strip()
+        kind = (data.get("reply_kind") or "none").strip()
+        # A kind this end does not understand is not a licence to
+        # speak. Anything unrecognised falls back to the Pi.
+        if kind not in ("chat", "defer", "none"):
+            kind = "none"
+        # AND THE THING HE WARNED ABOUT, ENFORCED HERE TOO:
+        # "if it says nothing and the response is nothing it might
+        #  seem like it answered but really it was a null value".
+        # An empty string with kind "chat" would make the station
+        # open its mouth and emit silence, and the row would say it
+        # replied. It is not a chat answer if there is nothing in it.
+        if kind == "chat" and not reply:
+            kind = "none"
         _STATE["warmed"] = True
         _mark_ok((time.time() - t0) * 1000)
         if text:
             _STATE["hits"] += 1
             _STATE["last_error"] = ""
-        return text
+        return text, reply, kind
     except urllib.error.HTTPError as e:
         # The server is RUNNING — it just said no. That is a
         # configuration problem (usually a stale token), and hammering
@@ -270,7 +403,7 @@ def transcribe(wav_bytes, fast=False):
             _mark_down(str(e.reason or e))
     except Exception as e:
         _mark_down(str(e))
-    return ""
+    return "", "", "none"
 
 
 def stats():
@@ -278,6 +411,7 @@ def stats():
     answerable by reading one line, not by trusting anybody's word."""
     now = time.time()
     return {"hits": _STATE["hits"], "misses": _STATE["misses"],
+            "encrypted": encrypted(),
             "timeouts": _STATE["timeouts"],
             "paired": _conf() is not None,
             "fails_in_a_row": _STATE["fails"],

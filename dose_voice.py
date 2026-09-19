@@ -43,6 +43,29 @@ try:
 except Exception:
     _remote_stt = None
 
+# The conversational layer, shared with the Mac. THE SAME FILE runs on
+# both machines: the Mac composes a reply and sends it back attached to
+# the transcript, and this end carries the identical module so a closed
+# laptop costs the station its recogniser and not its manners. Two
+# copies of a list of phrases would drift and the drift would be
+# silent — a line the Mac produces that this end never pre-rendered is
+# 2.2-3.4s of synthesis on the critical path, forever, and nobody
+# would ever know why it got slower.
+#
+# It is also, deliberately, incapable of stating a fact. See
+# tools/dose_reply.py and tests/test_reply.py.
+try:
+    import dose_reply as _reply_mod
+except Exception:
+    try:
+        import os as _os_r
+        import sys as _sys_r
+        _sys_r.path.insert(0, _os_r.path.join(
+            _os_r.path.dirname(_os_r.path.abspath(__file__)), "tools"))
+        import dose_reply as _reply_mod
+    except Exception:
+        _reply_mod = None
+
 # ── audioop shim ──────────────────────────────────────────────────────
 # Python 3.13 REMOVED the stdlib 'audioop' module. Every audio
 # measurement here (rms/max/mul/tomono/ratecv) depends on it — without
@@ -2803,6 +2826,10 @@ class DoseVoice:
         # and the reason finish() needs this to decide whether the
         # speculative answer is worth reusing.
         _TL.engine = ""
+        # Same reset, same reason: a reply left over from the previous
+        # turn on this thread would be spoken on this one.
+        _TL.mac_reply = ""
+        _TL.mac_reply_kind = "none"
         audio_bytes = self._trim_silence(audio_bytes)
         # NOT ENOUGH AUDIO TO CONTAIN A QUESTION.
         #
@@ -2887,11 +2914,46 @@ class DoseVoice:
                     # The real pass still gets small.en, so anything
                     # the fast model could not parse — a drug name,
                     # an unusual sentence — is asked again properly.
-                    rtext = _remote_stt.transcribe(
-                        self._wav_bytes(audio_bytes), fast=fast_remote)
+                    # AND WHAT IT THINKS THE STATION SHOULD SAY.
+                    #
+                    # Ryan: "the response needs to go through the Mac
+                    # as well of what it's supposed to say and then it
+                    # jsut tells the pi what to say."
+                    #
+                    # It rides back in THIS response. A second request
+                    # to ask what to say would cost a whole round trip
+                    # (0.85s measured) to replace a decision that
+                    # already costs nothing on this board — every turn
+                    # row reads `think: 0.00`.
+                    #
+                    # The Mac only ever composes CONVERSATION. Anything
+                    # about medication comes back "defer" and is
+                    # answered here, from this device's own data, with
+                    # the Mac shut. That is Ryan's split and it is also
+                    # the only version that survives a closed laptop.
+                    #
+                    # _TL, not self: this method runs on two threads at
+                    # once by design, and a field on self is the bug
+                    # this project has now had four times.
+                    if hasattr(_remote_stt, "transcribe_full"):
+                        rtext, rsay, rkind = _remote_stt.transcribe_full(
+                            self._wav_bytes(audio_bytes), fast=fast_remote)
+                    else:
+                        rtext = _remote_stt.transcribe(
+                            self._wav_bytes(audio_bytes), fast=fast_remote)
+                        rsay, rkind = "", "none"
+                    _TL.mac_reply = rsay if rkind == "chat" else ""
+                    _TL.mac_reply_kind = rkind
                     r_secs = time.time() - t_r
                     if rtext and self._usable(rtext):
                         _TL.engine = "mac"
+                        # KEYED BY THE TRANSCRIPT, not guarded by a
+                        # flag. respond() will only use this if the
+                        # words match exactly, so the speculative
+                        # thread and the real one cannot poison each
+                        # other's turn no matter which finishes last.
+                        if rkind == "chat" and rsay:
+                            self._mac_say = (rtext, rsay)
                         if _recording():
                             self._t_fast = time.time() - t_start
                         if _recording():
@@ -4964,6 +5026,23 @@ class DoseVoice:
             "Negative, Ryan.",
             "Partially.",
         ]
+        # EVERY LINE THE CONVERSATIONAL LAYER CAN SAY.
+        #
+        # Generated from dose_reply's own tables, never copied. This
+        # is the whole reason its replies are a closed list instead of
+        # a model: a reply that is not in the cache costs a Piper
+        # render on the critical path, measured at 2.2-3.4s inside
+        # this application, and a station that takes three seconds to
+        # say "Hello, Ryan" is not more human than one that says
+        # nothing — it is worse at the only thing it is for.
+        #
+        # The Mac composes from the same tables, so anything it can
+        # send back is already rendered here before it arrives.
+        if _reply_mod is not None:
+            try:
+                lines += list(_reply_mod.corpus())
+            except Exception:
+                pass
         seen, out = set(), []
         for ln in lines:
             if ln and ln not in seen:
@@ -8307,6 +8386,16 @@ class DoseVoice:
                     # thread cannot write it, which is the right rule
                     # and the reason a separate channel is needed.
                     box["by"] = getattr(_TL, "engine", "")
+                    # THE REPLY TRAVELS WITH THE TRANSCRIPT IT BELONGS
+                    # TO. When finish() reuses this speculation it is
+                    # reusing the whole answer, and leaving the reply
+                    # behind would mean the station reused the words
+                    # and then decided what to say all over again —
+                    # with the Mac's suggestion sitting in a variable
+                    # on a thread that has ended.
+                    box["reply"] = getattr(_TL, "mac_reply", "")
+                    box["reply_kind"] = getattr(_TL, "mac_reply_kind",
+                                                "none")
                 except Exception:
                     box["text"] = ""
                 finally:
@@ -11128,9 +11217,66 @@ class DoseVoice:
                                    "arg": kind}
             return reply, keep
 
+        # ── CONVERSATION, BEFORE THE SHRUG ──────────────────────────
+        #
+        # Ryan, after watching it answer four scripted questions
+        # perfectly:
+        #
+        #     "What if it just wants to talk and say how are you. It
+        #      should be able to handle any conversation. And respond
+        #      like a human if you want to continue talking"
+        #
+        # Everything above this line is the station's real job and it
+        # keeps absolute priority — medication, safety, teaching, the
+        # crisis paths. What follows is only reached when all of that
+        # has declined, which is precisely where the station used to
+        # say "I didn't catch that" to somebody it had heard perfectly.
+        # That sentence is a lie when the transcript is correct, and it
+        # is the most common thing this station says that is not true.
+        #
+        # THE MAC'S ANSWER FIRST, WHEN IT SENT ONE.
+        #
+        # "the response needs to go through the Mac as well of what
+        #  it's supposed to say and then it jsut tells the pi what to
+        #  say."
+        #
+        # It arrives attached to the transcript, in the same response,
+        # so it costs nothing. And it is KEYED BY THAT TRANSCRIPT: a
+        # reply is only used for the exact words it was composed for.
+        # Two threads write this field by design (the speculative pass
+        # and the real one), and every previous attempt to guard such
+        # a field with a flag became the bug it was guarding against —
+        # four times, all recorded in CLAUDE.md. A stale value cannot
+        # be spoken here because it cannot match.
+        mac = getattr(self, "_mac_say", None)
+        if mac and isinstance(mac, tuple) and len(mac) == 2 \
+                and (mac[0] or "").strip().lower() == (t or "").strip().lower() \
+                and (mac[1] or "").strip():
+            self._last_exchange = {"text": t, "intent": "chat",
+                                   "arg": "mac"}
+            self._chat_by = "mac"
+            return mac[1].strip(), True
+        # AND THE SAME MODULE, LOCALLY, WHEN IT DID NOT.
+        #
+        # dose_reply.py is carried on both machines on purpose. A
+        # closed laptop already costs this station its good recogniser;
+        # it must not also cost it the ability to be spoken to like a
+        # person. Same tables, same answer, microseconds.
+        if _reply_mod is not None:
+            try:
+                say, kind, _why = _reply_mod.compose(t)
+                if kind == "chat" and say.strip():
+                    self._last_exchange = {"text": t, "intent": "chat",
+                                           "arg": "local"}
+                    self._chat_by = "pi"
+                    return say.strip(), True
+            except Exception:
+                pass
+
         # fallback — BT never pretends to understand
         self._last_exchange = {"text": t, "intent": "fallback",
                                "arg": None}
+        self._chat_by = ""
         return random.choice([
             "I didn't catch that, Ryan. If I misheard, say: "
             "that's wrong — and teach me.",

@@ -251,12 +251,16 @@ check("there is a hard upload cap",
 check("it never calls a shell", not ({"subprocess", "os"} & {
     c.split(".")[0] for c in REM_CALLS if "." in c} & {"subprocess"}))
 
-# available() and transcribe() must not be able to raise into a turn.
-for fn in ("transcribe", "available"):
+# Nothing here may raise into a turn. transcribe() is now a thin
+# delegate; the work — and therefore the catching — moved into
+# transcribe_full(), which returns (text, reply, reply_kind) so the
+# Mac's suggested reply rides home with the transcript instead of
+# costing a second round trip.
+for fn in ("transcribe_full", "available"):
     f = [n for n in ast.walk(REM)
          if isinstance(n, ast.FunctionDef) and n.name == fn][0]
-    if fn == "transcribe":
-        check("transcribe() catches everything",
+    if fn == "transcribe_full":
+        check("transcribe_full() catches everything",
               any(isinstance(h.type, ast.Name) and h.type.id == "Exception"
                   for n in ast.walk(f) for h in getattr(n, "handlers", [])))
 
