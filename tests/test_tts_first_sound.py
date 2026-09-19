@@ -281,6 +281,60 @@ check("barge-in does not depend on that queue, so nothing is lost",
       < SRC.index("got_final = rec.AcceptWaveform(data)"),
       "barge-in runs in ingest() and returns before the queue")
 
+print("\n── the prewarm caches what _speak ASKS for ─────────────────")
+# 32 clips sat in voice/cache all evening while every render logged
+# `'hit': 0`, including replies identical across three separate runs.
+#
+# prewarm_replies() rendered each fixed line WHOLE. _speak() never
+# renders a whole line — it splits it and renders chunks[0], so the
+# key it looks up is the OPENING FRAGMENT. For every line long enough
+# to be split, the prewarmed entry could not be found. A cache whose
+# keys are not the keys anybody looks up is a directory of files.
+check("the prewarm chunks each line the way _speak does",
+      "self._split_first(self._sentences(line))" in SRC,
+      "whole lines are not what render_to_cache is asked for")
+check("...and renders every chunk, not just the first",
+      "for c in chunks:" in SRC and "self.render_to_cache(c)" in SRC,
+      "the later ones are played seconds after and cost nothing to "
+      "have ready")
+check("_speak still looks up the first chunk",
+      "first = self.render_to_cache(chunks[0])" in SRC)
+
+# The invariant OPENINGS of replies that are otherwise assembled fresh
+# every time. "Current inventory: New Medication, 26; ..." can never be
+# cached whole, but its first 18 characters never change — and the
+# opening is the only part on the critical path.
+check("the invariant openings of variable replies are prewarmed",
+      '"Current inventory:",' in SRC
+      and '"No medications are in view today, Ryan.",' in SRC,
+      "the slowest reply the station has, made to start instantly")
+
+
+def _first(text):
+    return pipeline(text)[0]
+
+
+check("the inventory reply opens with exactly that cached fragment",
+      _first("Current inventory: New Medication, 26; Metformin, 12.")
+      == "Current inventory:",
+      _first("Current inventory: New Medication, 26; Metformin, 12."))
+# NOT "however the list changes" — that claim was too strong and the
+# code is right to refuse it. A SHORT inventory is spoken whole,
+# because it is short; only a long one splits, and then it splits at
+# the invariant prefix. Both are the good outcome, for different
+# reasons, and the test should say so rather than demand one shape.
+check("a LONG inventory opens with the cached invariant fragment",
+      _first("Current inventory: New Medication, 26; Metformin, 12.")
+      == "Current inventory:",
+      _first("Current inventory: New Medication, 26; Metformin, 12."))
+check("...and a short one is spoken whole, being short enough not to "
+      "need the trick",
+      _first("Current inventory: Aspirin, 4.")
+      == "Current inventory: Aspirin, 4.")
+check("the slowest case is the one that gets the cached opening",
+      len("Current inventory: New Medication, 26; Metformin, 12.")
+      > len("Current inventory: Aspirin, 4."))
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:

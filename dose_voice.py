@@ -367,10 +367,46 @@ TEST_HOOKS = os.environ.get("DOSE_TEST_HOOKS", "").strip().lower() in (
     "1", "true", "yes", "on")
 # The longest FIRST spoken fragment. Only this chunk is rendered before
 # any sound comes out, so this number IS the station's time-to-first-
-# sound on an uncached reply. Around forty characters is roughly two
-# seconds of speech, which Piper renders in well under one on this
-# board — and the remainder renders on a worker while it plays.
-TTS_FIRST_CHUNK_MAX = int(os.environ.get("DOSE_TTS_FIRST_MAX", "42"))
+# sound on an uncached reply.
+#
+# IT WAS 42, AND "PIPER RENDERS THAT IN WELL UNDER ONE SECOND" WAS
+# MEASURED IN THE WRONG PROCESS.
+#
+# Standalone, yes. Inside the application, the device's own turn rows
+# say otherwise, and they scale almost linearly with the length of
+# this chunk:
+#
+#     13 chars   0.95 s
+#     21 chars   2.30 s
+#     29 chars   2.19 s
+#     31 chars   2.32 s
+#     38 chars   3.95 s
+#
+# So this constant is not a style choice, it is the latency, and
+# halving it roughly halves the wait before the station starts
+# talking. The seam is inaudible — _split_first() cuts at the
+# strongest boundary available and Piper pauses at a comma anyway —
+# and the remainder still renders on a worker while the opening plays,
+# so nothing is lost but silence.
+#
+# BUT NOT AS LOW AS LATENCY ALONE WOULD WANT.
+#
+# Twenty-two looked right on the numbers and the test suite refused
+# it, correctly: at 22 the full stop in "I didn't catch that, Ryan.
+# Tap the logo and try again." falls OUTSIDE the window, so an earlier
+# COMMA wins the break and the station opens mid-thought. The same
+# narrowing stopped long single-clause replies splitting at all.
+#
+# Those are speech-quality properties, measured and pinned in
+# tests/test_tts_first_sound.py, and they are not worth half a second.
+# Thirty-two keeps every one of them — the full stop is still inside
+# the window, the overshoot still reaches a comma at 48 — while
+# cutting a quarter off the opening fragment.
+#
+# The real win is not here anyway. It is the cache: a hit costs
+# 0.0002 s against 2.4 s, and prewarm_replies() now caches the chunks
+# _speak() actually looks up rather than whole lines it never asks for.
+TTS_FIRST_CHUNK_MAX = int(os.environ.get("DOSE_TTS_FIRST_MAX", "32"))
 # ...and the shortest. Below this a reply opens with a stutter, which
 # sounds broken in a way that being half a second slower does not.
 TTS_FIRST_CHUNK_MIN = int(os.environ.get("DOSE_TTS_FIRST_MIN", "12"))
@@ -4529,6 +4565,27 @@ class DoseVoice:
         for n in self._med_names():
             lines.append("I want to be certain before I answer, Ryan — "
                          "did you mean %s?" % n)
+        # THE INVARIANT OPENINGS OF THE VARIABLE REPLIES.
+        #
+        # Most of what this station says is assembled at the moment it
+        # answers — an inventory, a time, a medication name — so the
+        # whole line can never be cached. But the OPENING of several of
+        # them never changes, and the opening is the only part on the
+        # critical path: the rest renders on a worker while it plays.
+        #
+        # "Current inventory: New Medication, 26; Metformin, 12."
+        # splits to "Current inventory:" — eighteen characters that are
+        # identical every single time somebody asks. Rendering it once
+        # at startup turns the slowest reply the station has into one
+        # that starts speaking immediately.
+        lines += [
+            "Current inventory:",
+            "No medications are in view today, Ryan.",
+            "Nothing further is scheduled today, Ryan.",
+            "The time is",
+            "You have",
+            "Yes, Ryan.", "No, Ryan.",
+        ]
         seen, out = set(), []
         for ln in lines:
             if ln and ln not in seen:
@@ -5303,12 +5360,37 @@ class DoseVoice:
                     time.sleep(3.0)
                     break
                 time.sleep(0.5)
+            # CACHE WHAT _speak() WILL ACTUALLY ASK FOR.
+            #
+            # This cached each whole line. _speak() does not render
+            # whole lines — it splits them and renders chunks[0] first,
+            # so the cache key it looks up is the OPENING FRAGMENT. For
+            # every line long enough to be split, the prewarmed entry
+            # could never be found.
+            #
+            # The device said so all evening and I read past it: 32
+            # clips sitting in voice/cache and `'hit': 0` on every
+            # single render, including replies identical across three
+            # runs. A cache whose keys are not the keys anybody looks
+            # up is a directory of files.
+            #
+            # Now each line is chunked exactly as _speak() chunks it,
+            # and every chunk is rendered — the opening because it is
+            # on the critical path, the rest because they are played
+            # seconds later and cost nothing to have ready.
             n = 0
             for line in self._fixed_lines():
                 if self._stop.is_set():
                     return
-                if self.render_to_cache(line):
-                    n += 1
+                try:
+                    chunks = self._split_first(self._sentences(line))
+                except Exception:
+                    chunks = [line]
+                for c in chunks:
+                    if self._stop.is_set():
+                        return
+                    if self.render_to_cache(c):
+                        n += 1
             self._prewarmed = n
         threading.Thread(target=work, daemon=True,
                          name="tts-prewarm").start()
