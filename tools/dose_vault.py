@@ -216,11 +216,39 @@ def main(argv):
         return 3
 
     if a.status or not any((a.new, a.imp, a.get, a.forget)):
-        print("DOSE vault — secrets that need a person at this Mac")
+        # LEAD WITH THE ANSWER, NOT THE TITLE.
+        #
+        # This printed "DOSE vault — secrets that need a person at
+        # this Mac" and then a list of names, and Ryan read it as an
+        # inventory of what had been put in his keychain. It was the
+        # opposite: every line said NOT, and the names underneath were
+        # instructions for if he ever wanted to. He asked "Wait you
+        # accessed my passwords vault and already added it in" — a
+        # reasonable reading of a badly shaped page, about the one
+        # subject where being misread is worst.
+        #
+        # So: a verdict on the first line, in plain words, before any
+        # list of anything.
+        here = [n for n in KNOWN if present(n)]
+        missing = [n for n in KNOWN if n not in here]
         print()
+        if not here:
+            print("NOTHING IS PROTECTED YET.")
+            print("All of these are still ordinary files that anything")
+            print("running as you can read. Nothing has been added to")
+            print("your keychain.")
+        elif not missing:
+            print("PROTECTED: all of these are in your keychain, and")
+            print("reading any of them needs your password typed here.")
+        else:
+            print("PARTLY PROTECTED: %d in your keychain, %d still "
+                  "plain files." % (len(here), len(missing)))
+        print()
+        print("where each one is now:")
         for name, why in sorted(KNOWN.items()):
-            where = "keychain" if present(name) else "NOT in the keychain"
-            print("  %-16s %-22s %s" % (name, where, why))
+            where = ("IN your keychain" if present(name)
+                     else "plain file — not protected")
+            print("  %-16s %-28s %s" % (name, where, why))
         print()
         print("A read prompts on this machine. Nothing here stores or")
         print("knows your password — macOS holds that decision.")
@@ -233,7 +261,10 @@ def main(argv):
         # one that creates the item — the server looks it up by name.
         # So the names are printed rather than buried, and an item he
         # makes in Keychain Access or Passwords works identically.
-        print("To add or manage these yourself, the names are:")
+        print("-" * 58)
+        print("IF you ever want to do this by hand, these are the names")
+        print("it WOULD use. Nothing below has been created.")
+        print()
         print()
         for name in sorted(KNOWN):
             print("    %-16s service %-22s account %s"

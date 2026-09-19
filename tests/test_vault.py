@@ -155,6 +155,27 @@ check("...and reading, which is the repeated operation, never "
 check("'Always Allow' defeating this is written down",
       "Always Allow" in SRC)
 
+print("\n── the status page cannot be read as an inventory ──────────")
+# It printed a title, then a list of names, and Ryan read it as what
+# had been PUT in his keychain. It was the opposite — every line said
+# NOT, and the names were instructions. "Wait you accessed my
+# passwords vault and already added it in" is a fair reading of a
+# badly shaped page, on the one subject where being misread is worst.
+check("the verdict comes before any list",
+      SRC.index("NOTHING IS PROTECTED YET.")
+      < SRC.index("where each one is now:"))
+check("...and says it in words, not a state name",
+      "still ordinary files that anything" in SRC
+      and "Nothing has been added to" in SRC)
+check("a partly-done state is named rather than implied",
+      "PARTLY PROTECTED" in SRC)
+check("the names are labelled as a thing that has NOT happened",
+      "Nothing below has been created." in SRC)
+check("an unprotected item says so on its own line",
+      "plain file — not protected" in SRC,
+      "'NOT in the keychain' in a column reads as a category, not a "
+      "warning")
+
 print("\n── it will not delete a secret of his ──────────────────────")
 check("--import moves the plaintext aside rather than deleting it",
       "was-plaintext" in SRC)
