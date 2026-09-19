@@ -1490,15 +1490,48 @@ both cut from a base the Mac's clone does not have, so every fetch said
 sat four commits behind a Pi that had the code. `git bundle verify`
 before trusting either one.
 
-### Still open
+### THE HARNESS WAS THE FAULT, TWICE. The station was fine.
 
-- **The acceptance harness reported "NO TURN RECORDED in 45s" for all
-  four turns while those four turns were being written.** The rows land
-  about 50 s apart, which is suspiciously close to its own timeout.
-  Either endpointing is slow in this room or the harness's detection is
-  wrong — **do not guess; measure the `endpoint` field.** The room is
-  loud: `blocks with signal: 6657 of 16041` (41%), against a calibration
-  profile recorded at `floor 7`.
+**Four jobs went into proving this station deaf. It was not.** A plain
+440 Hz tone through its own speaker, service running:
+
+```
+live level:  peak 16798
+voice gate:  loud 172   called speech 172 (100%)
+signal:      live
+```
+
+Capture, energy gate, Silero, speaker — all fine. Two separate faults
+in `tools/acceptance_test.py` produced `VERDICT: FAIL` against a
+working station, three runs in a row, while the owner was saying it
+worked well. **Sixth time in this project that he read his device
+better than my instrument did.**
+
+**1. The hook.** Live turns are started by writing
+`voice/ptt_request`, which the app only consumes when
+`DOSE_TEST_HOOKS=1` is set for the service. It was removed at the end
+of an earlier job and not put back. Writing the file always succeeds —
+it is a file — so the harness could not tell, and reported "engine
+never entered 'listening'". It now checks whether the hook was
+CONSUMED, names the switch, and when every live turn was blocked that
+way the verdict is **NOT RUN**, not FAIL. *A test that could not run
+did not fail.*
+
+**2. `turns.jsonl` IS CAPPED AND THE HARNESS COUNTED LINES.**
+`_log_turn()` keeps the last `TURN_LOG_MAX` (60) lines and rewrites the
+file, so **once the log is full the line count never rises again**. The
+harness waited for `count() > before` — which after 60 turns is false
+forever, on any station, however fast. It printed "NO TURN RECORDED in
+45s" for four phrases while the station answered every one of them in
+1.49–1.63 s, with the rows sitting at the bottom of the file it was
+reading. It compares the LAST ROW's content now.
+
+This file previously blamed the 45 s timeout ("the rows land about
+50 s apart, which is suspiciously close to its own timeout"). That was
+a coincidence, and believing it cost several jobs. **When a measurement
+and the owner disagree, suspect the measurement first.**
+
+### Still open
 - Turn totals are 3.7–6.0 s against a 2 s goal. STT is no longer the
   cost (0.84 s); whatever remains is endpointing, the language layer and
   time-to-first-sound, and none of it has been broken down yet.

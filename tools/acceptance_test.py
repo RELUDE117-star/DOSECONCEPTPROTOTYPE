@@ -369,11 +369,29 @@ def live_turns(items, app_dir, pad=0.6):
     rows = []
 
     def count():
+        """DO NOT COUNT LINES. turns.jsonl IS CAPPED.
+
+        _log_turn() keeps the last TURN_LOG_MAX (60) lines and rewrites
+        the whole file, so once the log is full the line count NEVER
+        RISES AGAIN. This waited for `count() > before` and would have
+        reported "NO TURN RECORDED in 45s" for the rest of the device's
+        life, no matter how fast or correct the station was.
+
+        It did exactly that for four phrases in a row while the station
+        answered every one of them in 1.49-1.63 s — the rows were in
+        the file, at the bottom, where this was not looking. CLAUDE.md
+        blamed the 45 s timeout ("the rows land about 50 s apart, which
+        is suspiciously close to its own timeout"). That was a
+        coincidence and it cost several jobs.
+
+        The identity of the last row is what changes. Return it.
+        """
         try:
             with open(turns) as f:
-                return sum(1 for _ in f)
+                lines = f.read().splitlines()
+            return lines[-1] if lines else ""
         except Exception:
-            return 0
+            return ""
 
     for phrase, src in items:
         before = count()
@@ -436,17 +454,18 @@ def live_turns(items, app_dir, pad=0.6):
         t0 = time.time()
         row = None
         while time.time() - t0 < 45:
-            if count() > before:
+            now = count()
+            if now and now != before:
                 try:
-                    with open(turns) as f:
-                        row = json.loads(f.readlines()[-1])
+                    row = json.loads(now)
                 except Exception:
                     row = None
                 break
             time.sleep(0.5)
         if row is None:
             say("    %-30s NO TURN RECORDED in 45s" % phrase)
-            rows.append({"phrase": phrase, "live": False})
+            rows.append({"phrase": phrase, "live": False,
+                         "reason": "no new row"})
             continue
         say("    %-30s heard %r" % (phrase, str(row.get("heard"))[:34]))
         say("        endpoint %.2fs  fast %.2fs  slow %.2fs  think %.2fs "
