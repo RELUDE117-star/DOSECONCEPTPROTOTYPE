@@ -233,6 +233,23 @@ check("a local speculation still defers to a Mac that is up",
       "not going_remote" in DVC,
       "reusing whisper-tiny.en when an M1 is idle on the LAN is the "
       "bug this whole path exists to avoid")
+# TWO MODELS, PICKED BY ROUTE. The speculation fires 0.18s into a
+# pause and the endpointer fires at 0.45s, so it has about a quarter
+# of a second to come back. Measured on the Mac with identical audio:
+# base.en 0.21s, small.en 0.57s, and identical output on every command
+# phrase this station is asked. One fits in that window; one does not.
+check("the speculative pass asks for the fast model",
+      "fast_remote=True" in DVC,
+      "0.57s cannot finish inside a 0.25s window, and that is the "
+      "whole difference between a 0.45s turn and a 1.1s one")
+check("...and the real pass does not",
+      "fast_remote=False" in DVC or "fast_remote=False)" in DVC
+      or "fast_remote = False" in DVC,
+      "a drug name the fast model heard as 'medformin' has to be "
+      "asked again properly")
+check("...and which model runs is chosen by the URL, not the body",
+      '"stt-fast" if fast else "stt"' in src,
+      "nothing in the request selects behaviour on that machine")
 check("the row says WHICH branch ran, not just that it missed",
       "_spec_why" in DVC and "spec_why" in DV,
       "`spec_hit 0` covers never-started, audio-changed and refused, "

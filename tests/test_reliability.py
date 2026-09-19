@@ -179,7 +179,7 @@ class ListenEngine(DoseVoice):
         pass
 
     def _better_transcribe(self, audio, hint, allow_cloud=True,
-                           allow_remote=True):
+                           allow_remote=True, fast_remote=False):
         n = len(audio)
         time.sleep(self.recog_time)
         self.calls.append(n)
@@ -412,7 +412,7 @@ class WholeUtteranceEngine(ListenEngine):
     """Records the transcript the policy finally committed."""
 
     def _better_transcribe(self, audio, hint, allow_cloud=True,
-                           allow_remote=True):
+                           allow_remote=True, fast_remote=False):
         self.calls.append(hint)
         return hint          # whatever the listener accumulated
 

@@ -2783,7 +2783,7 @@ class DoseVoice:
             return bytes(buf)
 
     def _better_transcribe(self, audio_bytes, vosk_text, allow_cloud=True,
-                           allow_remote=True):
+                           allow_remote=True, fast_remote=False):
         """Work out what was actually said, trying harder when the
         first answer means nothing.
 
@@ -2872,8 +2872,23 @@ class DoseVoice:
             try:
                 if _remote_stt.available():
                     t_r = time.time()
+                    # THE FAST ROUTE FOR THE PASS THAT HAS TO
+                    # FINISH FIRST.
+                    #
+                    # The speculation fires 0.18 s into a pause and
+                    # the endpointer fires at 0.45 s, so it has about
+                    # a quarter of a second to come back. Measured on
+                    # the Mac: base.en 0.21 s, small.en 0.57 s, and
+                    # identical output on every command phrase this
+                    # station is asked. One fits in the window and one
+                    # does not, which is the whole difference between
+                    # a 0.45 s turn and a 1.1 s one.
+                    #
+                    # The real pass still gets small.en, so anything
+                    # the fast model could not parse — a drug name,
+                    # an unusual sentence — is asked again properly.
                     rtext = _remote_stt.transcribe(
-                        self._wav_bytes(audio_bytes))
+                        self._wav_bytes(audio_bytes), fast=fast_remote)
                     r_secs = time.time() - t_r
                     if rtext and self._usable(rtext):
                         _TL.engine = "mac"
@@ -8285,7 +8300,7 @@ class DoseVoice:
                     # that work happens DURING the pause.
                     box["text"] = self._better_transcribe(
                         snapshot, hint, allow_cloud=False,
-                        allow_remote=True)
+                        allow_remote=True, fast_remote=True)
                     # WHO ANSWERED IT, so finish() can tell whether
                     # this is worth reusing. Not self._last_engine —
                     # that is guarded by _recording() precisely so this

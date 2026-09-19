@@ -67,12 +67,38 @@ LOG_FILE = os.path.join(STATE_DIR, "server.log")
 MAX_BODY = int(os.environ.get("DOSE_SERVER_MAX_BODY", 2 * 1024 * 1024))
 MAX_SECONDS = float(os.environ.get("DOSE_SERVER_MAX_SECONDS", "30"))
 MODEL_NAME = os.environ.get("DOSE_SERVER_MODEL", "small.en")
+# THE FAST MODEL, FOR THE PASS THAT RUNS WHILE HE IS STILL TALKING.
+#
+# Measured on this Mac, same audio, same settings, six clips:
+#
+#     small.en          median 0.57s   every command phrase exact
+#     distil-small.en   median 0.44s   every command phrase exact
+#     base.en           median 0.21s   every command phrase exact
+#     tiny.en           median 0.12s   every command phrase exact
+#
+# They agree completely on what the station is actually asked. They
+# differ on the hard one — "a little dizzy after the metformin" came
+# back as "medformin" from base.en and "med foreman" from tiny.en,
+# while small.en and distil-small.en got the drug name right.
+#
+# So: base.en answers the speculative pass, which fires 0.18s into a
+# pause and has to finish before the endpointer does at 0.45s. 0.21s
+# fits; 0.57s does not, which is why turns without an internal pause
+# were costing a second. If that transcript does not parse into an
+# intent — which is exactly the case where the drug name matters —
+# the station asks again on /stt and small.en answers properly.
+#
+# NOT A MODEL NAME IN THE REQUEST. The route is a constant, chosen
+# here, like /stt. The Pi picks one of two URLs and never sends a
+# name, so "no route takes a path, a filename, a command, a model
+# name or a shell fragment" stays literally true.
+FAST_MODEL_NAME = os.environ.get("DOSE_SERVER_FAST_MODEL", "base.en")
 
 # The device that may ask. Empty means "any private address", which is
 # still a LAN-only rule; setting it pins the server to one machine.
 ALLOW_PEER = os.environ.get("DOSE_SERVER_PEER", "").strip()
 
-_MODEL = [None]
+_MODEL = {}          # name -> loaded model, both resident
 _STATS = {"requests": 0, "audio_seconds": 0.0, "infer_seconds": 0.0,
           "refused": 0, "started": time.time()}
 
@@ -132,18 +158,32 @@ def is_private(addr):
     return ip.is_private and not ip.is_multicast and not ip.is_reserved
 
 
-def load_model():
-    if _MODEL[0] is not None:
-        return _MODEL[0]
+def load_model(name=None):
+    """Load one of the TWO models this file names, and keep it.
+
+    `name` is never taken from a request — the callers pass
+    MODEL_NAME or FAST_MODEL_NAME, both constants above. It is a
+    parameter only so the two routes can share this function.
+    """
+    name = name or MODEL_NAME
+    if name not in (MODEL_NAME, FAST_MODEL_NAME):
+        raise ValueError("unknown model")      # belt and braces
+    if _MODEL.get(name) is not None:
+        return _MODEL[name]
     from faster_whisper import WhisperModel
     t0 = time.time()
     # int8 on the Pi is a compromise for a slow CPU. This machine has
-    # eight performance cores and sixteen gigabytes; int8_float32 keeps
-    # the accuracy and is still comfortably fast here.
-    _MODEL[0] = WhisperModel(MODEL_NAME, device="cpu",
-                             compute_type="int8_float32")
-    log("model %s loaded in %.1fs" % (MODEL_NAME, time.time() - t0))
-    return _MODEL[0]
+    # eight performance cores and sixteen gigabytes.
+    #
+    # cpu_threads is stated because CTranslate2 picks its own default
+    # and this box has eight performance cores. Worth about ten
+    # percent, measured — not the answer to anything on its own, but
+    # free.
+    _MODEL[name] = WhisperModel(name, device="cpu",
+                                compute_type="int8_float32",
+                                cpu_threads=8)
+    log("model %s loaded in %.1fs" % (name, time.time() - t0))
+    return _MODEL[name]
 
 
 PROMPT = ("Medication reminder device. Commands: what time is it, "
@@ -152,15 +192,18 @@ PROMPT = ("Medication reminder device. Commands: what time is it, "
           "go to user, next dose.")
 
 
-def transcribe(wav_bytes):
-    """WAV in, text out. The only thing this program does."""
+def transcribe(wav_bytes, model_name=None):
+    """WAV in, text out. The only thing this program does.
+
+    `model_name` comes from the ROUTE, never from the body.
+    """
     w = wave.open(BytesIO(wav_bytes), "rb")
     frames, rate = w.getnframes(), w.getframerate()
     secs = frames / float(rate or 16000)
     w.close()
     if secs > MAX_SECONDS:
         raise ValueError("audio too long: %.1fs" % secs)
-    model = load_model()
+    model = load_model(model_name)
     t0 = time.time()
     segs, _info = model.transcribe(
         BytesIO(wav_bytes), language="en", beam_size=1,
@@ -223,14 +266,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
             up = time.time() - _STATS["started"]
             self._ok({"ok": True, "model": MODEL_NAME,
+                      "fast_model": FAST_MODEL_NAME,
                       "uptime": round(up), "requests": _STATS["requests"],
                       "rtf": round(_STATS["infer_seconds"]
                                    / max(0.001, _STATS["audio_seconds"]), 3)})
             return
         self._deny(404, "no such route")
 
+    # TWO ROUTES, TWO CONSTANTS. Not one route with a parameter:
+    # the request body stays pure audio and nothing in it selects
+    # anything. See FAST_MODEL_NAME.
+    ROUTES = {"/stt": MODEL_NAME, "/stt-fast": FAST_MODEL_NAME}
+
     def do_POST(self):
-        if self.path != "/stt":
+        model_name = self.ROUTES.get(self.path)
+        if model_name is None:
             self._deny(404, "no such route")
             return
         if not self._allowed():
@@ -248,14 +298,15 @@ class Handler(BaseHTTPRequestHandler):
             self._deny(400, "short body")
             return
         try:
-            text, secs, took = transcribe(body)
+            text, secs, took = transcribe(body, model_name)
         except Exception as e:
             self._deny(400, "not usable audio: %s" % str(e)[:80])
             return
         _STATS["requests"] += 1
-        log("stt %.2fs of audio in %.2fs -> %r" % (secs, took, text[:60]))
+        log("stt[%s] %.2fs of audio in %.2fs -> %r"
+            % (model_name, secs, took, text[:60]))
         self._ok({"text": text, "audio": round(secs, 2),
-                  "took": round(took, 3), "model": MODEL_NAME})
+                  "took": round(took, 3), "model": model_name})
 
 
 def serve(host=None, port=8765, preload=True):
@@ -265,13 +316,18 @@ def serve(host=None, port=8765, preload=True):
         return 2
     t = token()
     if preload:
-        try:
-            load_model()
-        except Exception as e:
-            log("model not available yet: %s" % e)
+        # BOTH, and the fast one FIRST. It is the one a turn waits on,
+        # and a station asking for it while it is still loading pays
+        # the whole load on the critical path.
+        for name in (FAST_MODEL_NAME, MODEL_NAME):
+            try:
+                load_model(name)
+            except Exception as e:
+                log("model %s not available yet: %s" % (name, e))
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
-    log("DOSE server on http://%s:%d  (model %s)" % (host, port, MODEL_NAME))
+    log("DOSE server on http://%s:%d  (/stt %s, /stt-fast %s)"
+        % (host, port, MODEL_NAME, FAST_MODEL_NAME))
     log("paired device: %s" % (ALLOW_PEER or "any address on this LAN"))
     log("token is in %s — install it on the Pi, never anywhere else" % TOKEN_FILE)
     try:

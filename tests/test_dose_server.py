@@ -107,6 +107,8 @@ check("it imports no process or serialisation machinery",
 
 print("\n── it listens where it is told, and nowhere else ───────────")
 SRV_STR = set(strings(SRV))
+SRV_TEXT = open(os.path.join(ROOT, "tools", "dose_server.py"),
+                errors="ignore").read()
 check("it never binds every interface", "0.0.0.0" not in SRV_STR)
 check("the bind address is checked for being private",
       "is_private" in set(calls(SRV)))
@@ -127,9 +129,33 @@ check("audio length has a ceiling too",
           for n in ast.walk(SRV)))
 
 routes = [s for s in SRV_STR if s.startswith("/")]
-check("exactly two routes exist: /stt and /health",
-      set(r for r in routes if r.count("/") == 1) == {"/stt", "/health"},
+# THREE NOW, AND STILL NOT ONE THAT TAKES A NAME.
+#
+# /stt-fast runs base.en — 0.21s against small.en's 0.57s, measured
+# on the Mac with identical audio, and identical output on every
+# command phrase the station is actually asked. The speculative pass
+# fires 0.18s into a pause and must finish before the endpointer at
+# 0.45s: 0.21 fits, 0.57 does not.
+#
+# It is a SECOND ROUTE rather than a parameter on the first one
+# precisely so the request body stays pure audio. The Pi picks one of
+# two URLs; it never sends a model name, a path or anything else that
+# selects behaviour here.
+check("exactly three routes exist: /stt, /stt-fast and /health",
+      set(r for r in routes if r.count("/") == 1)
+      == {"/stt", "/stt-fast", "/health"},
       sorted(set(routes)))
+check("the model for a route is chosen HERE, from two constants",
+      "ROUTES = {" in SRV_TEXT
+      and '"/stt": MODEL_NAME' in SRV_TEXT
+      and '"/stt-fast": FAST_MODEL_NAME' in SRV_TEXT)
+check("...and load_model refuses any name that is not one of them",
+      'if name not in (MODEL_NAME, FAST_MODEL_NAME):' in SRV_TEXT,
+      "belt and braces: nothing can reach it from a request, and it "
+      "still checks")
+check("the request body is still only audio",
+      "json.loads" not in SRV_TEXT.split("def do_POST")[1],
+      "nothing in the body selects anything")
 
 print("\n── the control panel is not on the network at all ──────────")
 PAN_STR = set(strings(PAN))

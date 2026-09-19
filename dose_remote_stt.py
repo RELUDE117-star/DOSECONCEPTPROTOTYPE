@@ -206,12 +206,23 @@ def probe(force=False):
         return False
 
 
-def transcribe(wav_bytes):
+def transcribe(wav_bytes, fast=False):
     """WAV in, text out, or "" if the Mac is not there.
 
     Never raises. A remote recogniser that can throw into the middle of
     a turn is a remote recogniser that can make the cabinet worse than
     having none.
+
+    `fast` picks the OTHER ROUTE, not a parameter in the body. The
+    Mac names its two models itself and this end picks one of two
+    URLs; nothing about which model runs is carried in the request.
+
+    Measured on that Mac, identical audio: /stt-fast (base.en) 0.21s,
+    /stt (small.en) 0.57s, and identical output on every command
+    phrase the station is actually asked. They part company on drug
+    names — "metformin" came back as "medformin" from the fast one —
+    which is why the fast route answers the pass that runs DURING the
+    pause, and anything that does not parse is asked again properly.
     """
     conf = _conf()
     if conf is None or time.time() < _STATE["down_until"]:
@@ -219,7 +230,7 @@ def transcribe(wav_bytes):
     if not wav_bytes or len(wav_bytes) > MAX_UPLOAD:
         return ""
     host, port, token = conf
-    url = "http://%s:%d/stt" % (host, port)
+    url = "http://%s:%d/%s" % (host, port, "stt-fast" if fast else "stt")
     req = urllib.request.Request(
         url, data=wav_bytes, method="POST",
         headers={"Authorization": "Bearer " + token,
