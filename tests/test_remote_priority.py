@@ -250,6 +250,20 @@ check("...and the real pass does not",
 check("...and which model runs is chosen by the URL, not the body",
       '"stt-fast" if fast else "stt"' in src,
       "nothing in the request selects behaviour on that machine")
+# ONE IN FLIGHT. With a person talking in the room, _last_voice_ts
+# moves constantly and a speculation fires on every change — each one
+# a request to a Mac that has ONE model and queues them. The device
+# measured the pile-up, with a stranger's words in the transcripts:
+#
+#     2.62s of audio in 3.87s
+#     2.62s of audio in 6.19s
+#     2.94s of audio in 9.88s
+#
+# against half a second when asked once.
+check("a new speculation waits for the last one to finish",
+      '_busy = bool(spec and not spec["done"].is_set())' in DVC
+      and "and not _busy:" in DVC,
+      "one model on the Mac, and requests queue behind each other")
 check("the row says WHICH branch ran, not just that it missed",
       "_spec_why" in DVC and "spec_why" in DV,
       "`spec_hit 0` covers never-started, audio-changed and refused, "

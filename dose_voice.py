@@ -8528,8 +8528,31 @@ class DoseVoice:
             quiet = time.time() - lv
 
             # (a) they have paused — start recognising in the background
+            # ONE IN FLIGHT AT A TIME.
+            #
+            # With somebody talking in the room, _last_voice_ts moves
+            # constantly, so this fires a fresh speculation every time
+            # it changes — and each one is a request to the Mac. They
+            # do not run in parallel there: one model, and the
+            # requests queue. The device measured the pile-up, with a
+            # person audible in the transcripts:
+            #
+            #   2.62s of audio in 3.87s
+            #   2.62s of audio in 6.19s
+            #   2.94s of audio in 9.88s
+            #
+            # Three seconds of speech taking ten to transcribe, on a
+            # machine that does it in half a second when asked once.
+            # The queue was the whole of it.
+            #
+            # So a new one starts only when the last has finished. The
+            # cost of skipping is that finish() may do a full pass
+            # instead of reusing — one request — which is exactly what
+            # it did before any of this existed.
+            _busy = bool(spec and not spec["done"].is_set())
             if quiet >= SPECULATE_AFTER and spec.get("voice_ts") != lv \
-                    and len(buf) > SAMPLE_RATE:      # >0.5 s of audio
+                    and len(buf) > SAMPLE_RATE \
+                    and not _busy:                   # >0.5 s of audio
                 spec = speculate(bytes(buf),
                                  getattr(self, "_partial", ""), lv)
 
