@@ -637,6 +637,14 @@ def _save_med_data(data):
         os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
         with open(DATA_PATH, "w") as f:
             json.dump(data, f, indent=2)
+        # Owner-only. This file holds drug names, schedules and now
+        # free-text notes the user dictated about their own
+        # medications — the most sensitive thing on the device. It was
+        # being written world-readable by whatever umask happened to
+        # be in force. One chmod, no behaviour change, and it closes a
+        # gap that no amount of transport encryption covers: the data
+        # AT REST on the station itself.
+        os.chmod(DATA_PATH, 0o600)
     except Exception:
         pass
 
@@ -1556,12 +1564,24 @@ class DoseApp:
                       width=350)
 
 
-        # MEDICATION INFO — real guidance for the loaded drug
+        # MEDICATION INFO — real guidance for the loaded drug, and
+        # YOUR OWN NOTES first when there are any.
+        #
+        # Notes dictated by voice have to be visible on the screen or
+        # they are write-only: the user says something, the station
+        # says "saved", and there is nowhere to check that what it
+        # saved is what they said. Newest first, because the reason
+        # somebody adds a note is usually the thing they just learned.
         info_y = 196
-        c.create_text(px, info_y, text="MEDICATION INFO",
+        notes = [n.get("text", "") for n in (md.get("notes") or [])
+                 if n.get("text")]
+        c.create_text(px, info_y,
+                      text="YOUR NOTES" if notes else "MEDICATION INFO",
                       font=self.font_label, fill=t["muted"], anchor="nw")
         info_lines = MED_INFO.get(md.get("name", "").strip().lower(),
                                   MED_INFO_DEFAULT)
+        if notes:
+            info_lines = list(reversed(notes)) + list(info_lines)
         ly = info_y + 28
         try:
             line_h = self.font_body.metrics("linespace")

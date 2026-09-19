@@ -637,7 +637,28 @@ for _src in "$APP_DIR/tools/mac_app/dose_icon_1024.png" \
 done
 DOSE_ICON="$HOME/.local/share/icons/dose.png"
 [ -f "$DOSE_ICON" ] || DOSE_ICON="$APP_DIR/tools/mac_app/dose_icon_1024.png"
-cat > "$HOME/Desktop/DOSE.desktop" << EOF
+# ── THE "EXECUTE IN TERMINAL" DIALOG KEPT COMING BACK ───────────────
+#
+# Ryan: "when i press it and then hit execute in terminal it takes
+# forever for the app to start". That dialog is the file manager
+# refusing to trust the .desktop file. It was trusted on 2026-09-19 at
+# 09:20 — measured, `metadata::trusted: true` — and by 09:47 it was
+# untrusted again. Two causes, both here:
+#
+#  1. THIS BLOCK REWROTE THE FILE ON EVERY SINGLE START. Replacing a
+#     .desktop file discards its gio metadata, so every restart of the
+#     station un-trusted its own icon. It now writes only when the
+#     content would actually change.
+#
+#  2. THE RE-TRUST WENT TO THE WRONG BUS. `gio set` writes into the
+#     DESKTOP SESSION's metadata store, reached over that session's
+#     D-Bus. DOSE.sh normally runs under systemd, which has no
+#     DBUS_SESSION_BUS_ADDRESS — and the `dbus-launch` fallback below
+#     it spawned a BRAND NEW private bus, wrote the flag there, and
+#     threw it away. It could never have worked. The user manager's
+#     own bus at /run/user/UID/bus is the real one.
+_dose_desktop_body() {
+cat << EOF
 [Desktop Entry]
 Type=Application
 Version=1.0
@@ -650,15 +671,38 @@ Terminal=false
 StartupNotify=true
 Categories=Utility;
 EOF
-chmod +x "$HOME/Desktop/DOSE.desktop"
+}
+
+_dose_trust() {     # $1 = .desktop path
+    [ -e "$1" ] || return 1
+    local bus="$DBUS_SESSION_BUS_ADDRESS"
+    [ -n "$bus" ] || bus="unix:path=/run/user/$(id -u)/bus"
+    DBUS_SESSION_BUS_ADDRESS="$bus" \
+        gio set "$1" metadata::trusted true 2>/dev/null
+}
+
+_DESK="$HOME/Desktop/DOSE.desktop"
+mkdir -p "$HOME/Desktop"
+_dose_desktop_body > "$_DESK.new"
+if [ -f "$_DESK" ] && cmp -s "$_DESK.new" "$_DESK"; then
+    rm -f "$_DESK.new"
+    echo "[dose] desktop entry unchanged — trust flag preserved"
+else
+    mv -f "$_DESK.new" "$_DESK"
+    chmod +x "$_DESK"
+    echo "[dose] desktop entry written"
+fi
+# Trust it every start regardless: cheap, idempotent, and the flag can
+# also be cleared by things outside this script.
+_dose_trust "$_DESK"
+
 # ALSO IN THE MENU. A desktop file is easy to lose behind a
 # full-screen kiosk; the applications menu always has it.
 mkdir -p "$HOME/.local/share/applications"
-cp "$HOME/Desktop/DOSE.desktop" \
-   "$HOME/.local/share/applications/dose.desktop" 2>/dev/null || true
-update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-gio set "$HOME/Desktop/DOSE.desktop" metadata::trusted true 2>/dev/null || true
-dbus-launch gio set "$HOME/Desktop/DOSE.desktop" metadata::trusted true 2>/dev/null || true
+if ! cmp -s "$_DESK" "$HOME/.local/share/applications/dose.desktop"; then
+    cp "$_DESK" "$HOME/.local/share/applications/dose.desktop" 2>/dev/null || true
+    update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+fi
 
 # ── Autostart on boot — ONLY IF SYSTEMD IS NOT DOING IT ──────────────
 #

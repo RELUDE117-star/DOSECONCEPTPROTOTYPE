@@ -326,6 +326,29 @@ COMMAND_VOCAB = {
         "i have a new prescription", "add something new",
         "register a new bottle",
     ),
+    # Both of these WRITE to medication data, so the phrases here only
+    # ever open a confirm flow — they never reach a save on their own.
+    # "change a setting" is deliberately absent: it belongs to
+    # nav:settings and the two are one vowel apart when misheard.
+    "chsched": (
+        "change the schedule", "change my schedule",
+        "change a schedule", "change the time", "change the dose time",
+        "reschedule a medication", "move the time",
+        "change when i take it", "update the schedule",
+        "set a different time", "change my dose time",
+        "make it a different time",
+    ),
+    "addnote": (
+        "add a note", "add more notes", "add a note to a medication",
+        "make a note", "leave a note", "write a note",
+        "note something down", "add another note",
+        "save a note about a medication", "take a note",
+    ),
+    "notes": (
+        "read my notes", "what are my notes", "what did i note",
+        "read the notes back", "what notes do i have",
+        "read my notes for this one",
+    ),
 }
 
 # Every id above must be one _dispatch can actually act on. "help",
@@ -347,7 +370,8 @@ COMMAND_WORDS = (
 
 assert all(k.startswith("nav:") or k in {
     "time", "date", "remaining_today", "next_dose", "taken_today",
-    "count", "adherence", "addmed"} for k in COMMAND_VOCAB), \
+    "count", "adherence", "addmed", "chsched", "addnote",
+    "notes"} for k in COMMAND_VOCAB), \
     "COMMAND_VOCAB contains an intent _dispatch cannot handle"
 
 # ── THE RECOGNISER ───────────────────────────────────────────────────
@@ -1400,6 +1424,55 @@ def parse_spoken_time(text):
         # sensible default: 1-6 assumed evening, otherwise morning
         ampm = "PM" if 1 <= hour <= 6 else "AM"
     return f"{hour}:{minute:02d} {ampm}"
+
+
+# Joining words that tell you WHICH of two spoken times is the new one.
+_INSTEAD_RX = re.compile(r"\b(?:instead of|rather than|in place of|"
+                         r"not at|and not)\b")
+_FROM_TO_RX = re.compile(r"\bfrom\b(?P<old>.+?)\bto\b(?P<new>.+)$")
+
+
+def parse_time_change(text):
+    """'change it to 4 pm instead of 4:20' -> ('4:00 PM', '4:20 PM').
+
+    Which of the two times is the NEW one is not a detail. English
+    puts it in opposite places in the two phrasings people actually
+    use:
+
+        "change it TO 4 pm INSTEAD OF 4:20"    new first, old second
+        "change it FROM 4:20 TO 4 pm"          old first, new second
+
+    Taking whichever time appears first in the sentence gets one of
+    those right and the other exactly backwards — and "backwards" here
+    means moving a medication reminder to the time it was already at
+    and leaving the one the user wanted untouched, while telling them
+    it worked. So the joining word decides, never the word order.
+
+    Returns (new_time, old_time, new_segment, old_segment). Times are
+    "4:00 PM" strings and either may be None. AM/PM is NOT settled
+    here: the caller runs _ampm_explicit() on new_segment and ASKS
+    when it is missing, because parse_spoken_time() will happily
+    default 4 to PM and a morning pill is not an evening pill.
+    """
+    t = (text or "").lower()
+    new_seg, old_seg = t, None
+    m = _INSTEAD_RX.search(t)
+    if m:
+        new_seg, old_seg = t[:m.start()], t[m.end():]
+    else:
+        m = _FROM_TO_RX.search(t)
+        if m:
+            new_seg, old_seg = m.group("new"), m.group("old")
+        else:
+            # No joining word: there is at most one time in here and
+            # it is the one being asked for. Cut at the last "to" so a
+            # medication name is never read as a clock.
+            i = t.rfind(" to ")
+            if i >= 0:
+                new_seg = t[i + 4:]
+    return (parse_spoken_time(new_seg),
+            parse_spoken_time(old_seg) if old_seg else None,
+            new_seg, old_seg)
 
 
 _TIME_RX = re.compile(r"\b(\d{1,2}):([0-5]\d)\s?([AP]M)\b")
@@ -10651,6 +10724,12 @@ class DoseVoice:
             return self._intent_dispense(arg)
         if intent_id == "addmed":
             return self._flow_start_addmed()
+        if intent_id == "chsched":
+            return self._flow_start_chsched(arg)
+        if intent_id == "addnote":
+            return self._flow_start_addnote(arg)
+        if intent_id == "notes":
+            return self._intent_notes(arg)
         if intent_id == "time":
             ts = self._fmt_now(datetime.now())
             return f"The time is {ts}.", False
@@ -10778,11 +10857,94 @@ class DoseVoice:
                     pass
             return (intent_id, name)
 
+        # EVERY ONE OF THESE CARRIES A VERB. It used to also match a
+        # bare " new medication ", and on the actual station — where
+        # one slot is literally named "New Medication" — that turned
+        # every sentence about that drug into an intake request:
+        #
+        #   "change the schedule for New Medication to 4 pm"
+        #       -> "Understood. New medication intake. First: what is
+        #          the medication called?"
+        #   "dispense my New Medication"      -> same
+        #   "what are my notes for New Medication" -> same
+        #
+        # and once inside the intake flow every following utterance
+        # was swallowed by it, so "what time is it" came back as "A
+        # number, Ryan. How many pills are in the bottle?". One
+        # over-greedy phrase, six broken intents. Found by running the
+        # flows against the medications actually loaded in Ryan's
+        # station rather than against the tidy names in my fixtures.
         if has(" add a new medication", " add new medication",
-               " add a medication", " add medication", " new medication ",
+               " add a medication", " add medication",
                " add a new pill", " add a prescription",
-               " register a medication", " add a med ", " add a new med "):
+               " register a medication", " register a new medication",
+               " add a med ", " add a new med ",
+               " put in a new medication", " set up a new medication",
+               " i have a new medication", " i have a new prescription",
+               " start a new medication"):
             return ("addmed", None)
+
+        # ── EDITING A MEDICATION: TIMES AND NOTES ─────────────────
+        #   Ryan, in his own words:
+        #     "make sure the voice should be able to do more like say
+        #      I want to change a schedule to 4 pm instead of 420 for
+        #      this medication it should be able to do that"
+        #     "if you say I want to add more notes to a medications
+        #      it should be able to do that"
+        #
+        #   Both of these WRITE. The safety line in this file has
+        #   always been that voice can never dispense, never decrement
+        #   a count, never log a dose — and that line does not move.
+        #   Changing when a reminder fires and writing down something
+        #   you want to remember are on the other side of it: neither
+        #   one releases a pill, and both are already editable on the
+        #   screen by anyone standing in front of the station.
+        #
+        #   What they still get is a confirm step, read back in full,
+        #   before anything is saved. Nothing here reaches storage on
+        #   a single utterance.
+        #
+        #   Checked BEFORE the clock: "change the time to 4 pm"
+        #   contains " the time ", which the what-time-is-it rule
+        #   below matches, and answering a reschedule request with the
+        #   current time is a shrug wearing a useful face.
+        note_m = re.search(
+            r"\b(?:add|adding|make|making|leave|write|put|save|store|"
+            r"append|attach|jot|take)\b[^?]*?\bnotes?\b", t)
+        if note_m and not has(" what ", " read ", " tell me "):
+            # The medication and the note text are NOT pulled out of
+            # this sentence. "Add a note to my lisinopril saying it
+            # makes me tired" is one utterance carrying two pieces of
+            # free text, and splitting it wrong writes the wrong words
+            # under the wrong drug. Two short questions cannot.
+            m = re.search(r"\bnotes?\b(?:\s+(?:to|on|for|about|against)"
+                          r"\s+(?:my |the |this |that )?"
+                          r"(?P<med>[a-z][a-z ]*?))?\s*$", t)
+            spoken_med = (m.group("med") or "").strip() if m else ""
+            return ("addnote", spoken_med or None)
+
+        if re.search(r"\b(?:what|which|read|tell me|any)\b[^?]*?"
+                     r"\bnotes?\b", t):
+            m = re.search(r"\bnotes?\b(?:\s+(?:for|on|about))?\s+"
+                          r"(?:my |the |this |that )?"
+                          r"(?P<med>[a-z][a-z ]*?)\s*$", t)
+            return ("notes", (m.group("med").strip() if m else None))
+
+        # "reschedule my metformin" stands on its own — the word IS
+        # the request. It needs saying separately because "schedule"
+        # inside "reschedule" has no word boundary in front of it, so
+        # the noun test below never sees it, and the most direct way
+        # anyone would phrase this fell straight through.
+        resched = bool(re.search(r"\breschedul\w*\b", t)) or (
+            re.search(r"\b(?:change|changing|move|moving|switch|"
+                      r"shift|update|adjust|set|make)\b", t)
+            and re.search(r"\b(?:schedule|scheduled|dose time|"
+                          r"dosing time|time|times|reminder|alarm|"
+                          r"when i take|when it)\b", t))
+        if resched and not re.search(
+                r"\b(?:add|new|register|set up)\b.*"
+                r"\b(?:medication|med|pill|prescription)\b", t):
+            return ("chsched", t.strip())
 
         m = re.search(r"(?:dispense|give me)(?: my| the| some)? (.+)", t)
         if m:
@@ -11272,9 +11434,12 @@ class DoseVoice:
             return ("I can report which doses remain today, what to "
                     "take next, pill counts, schedules, and your "
                     "adherence score. I can add a new medication by "
-                    "voice, and if I get something wrong, say: that "
-                    "is wrong — and I will learn. I never dispense: "
-                    "that is always your hands, Ryan."), False
+                    "voice, change when one is due — say: change my "
+                    "schedule to four PM — and keep notes on any of "
+                    "them: say, add a note. If I get something "
+                    "wrong, say: that is wrong — and I will learn. I "
+                    "never dispense: that is always your hands, "
+                    "Ryan."), False
 
         # ── functional intents via the shared matcher ──
         route = self._match_builtin(t)
@@ -11683,13 +11848,251 @@ class DoseVoice:
         return ("Understood. New medication intake. First: what is "
                 "the medication called?"), True
 
+    # ── CHANGING A DOSE TIME BY VOICE ─────────────────────────────
+    #   "I want to change a schedule to 4 pm instead of 4:20 for this
+    #    medication."
+    #
+    #   Three things this will not do, and each one is a decision:
+    #     - guess AM from PM. A 4 AM pill is not a 4 PM pill.
+    #     - guess WHICH medication when more than one could be meant.
+    #     - guess WHICH of several daily times was meant.
+    #   Every one of those asks instead, and the whole change is read
+    #   back before a single value is written.
+    def _flow_start_chsched(self, spoken):
+        meds = self._loaded_meds()
+        if not meds:
+            return ("There are no medications loaded to reschedule, "
+                    "Ryan."), False
+
+        new_t, old_t, new_seg, _old_seg = parse_time_change(spoken or "")
+        key = md = None
+        if spoken:
+            # Strip the command words AND every digit before looking
+            # for a drug name. Left in, "4 20" is a three-character
+            # string for the phonetic matcher to score against real
+            # medication names, and it will happily return one.
+            hunt = re.sub(
+                r"\b(?:change|changing|move|moving|switch|shift|"
+                r"reschedule|rescheduled|update|adjust|set|make|the|my|"
+                r"a|an|to|for|instead|of|from|rather|than|i|want|would|"
+                r"like|please|it|this|that|these|those|schedule|"
+                r"scheduled|scheduling|time|times|dose|doses|dosing|"
+                r"reminder|alarm|take|taking|when|at|on|am|pm|oclock|"
+                r"o'clock|morning|evening|afternoon|night|noon|"
+                r"midnight|thirty|fifteen|forty|twenty|one|two|three|"
+                r"four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
+                " ", spoken)
+            hunt = re.sub(r"[0-9]+", " ", hunt).strip()
+            if hunt:
+                key, md = self._find_med(hunt)
+        if md is None and len(meds) == 1:
+            key, md = meds[0]
+
+        flow = {"name": "chsched", "ts": time.time(),
+                "data": {"new": new_t, "old": old_t,
+                         "new_explicit": bool(
+                             new_t and self._ampm_explicit(new_seg or ""))}}
+        self._flow = flow
+        if md is None:
+            flow["step"] = "med"
+            names = ", ".join(m.get("name", "?") for _k, m in meds)
+            return ("Which medication should I reschedule, Ryan? "
+                    "I have " + names + "."), True
+        return self._chsched_pick_dose(flow, key, md)
+
+    def _chsched_pick_dose(self, flow, key, md):
+        """Med is settled. Decide WHICH of its daily times to move."""
+        data = flow["data"]
+        data["key"] = key
+        data["name"] = md.get("name", "that medication")
+        try:
+            self.app._ensure_dose_times(md)
+        except Exception:
+            pass
+        times = list(md.get("dose_times")
+                     or [md.get("schedule_time", "8:00 AM")])
+        data["times"] = times
+        old = data.get("old")
+        if old and old in times:
+            data["idx"] = times.index(old)
+        elif len(times) == 1:
+            # They may have misremembered the time they are replacing.
+            # That is fine — there is only one, and the confirm line
+            # below reads back what it ACTUALLY is right now.
+            data["idx"] = 0
+            data["old"] = times[0]
+        else:
+            flow["step"] = "which"
+            return ("%s is set for %s. Which one should I move?"
+                    % (data["name"], " and ".join(times))), True
+        return self._chsched_advance(flow)
+
+    def _chsched_advance(self, flow):
+        """Time settled or not; AM/PM settled or not. Route onward."""
+        data = flow["data"]
+        if not data.get("new"):
+            flow["step"] = "time"
+            return ("What time should %s move to?"
+                    % data.get("name", "it")), True
+        if not data.get("new_explicit"):
+            flow["step"] = "ampm"
+            clock = data["new"].rsplit(" ", 1)[0]
+            return ("%s — in the morning, or the evening? I never "
+                    "guess with medication times." % clock), True
+        flow["step"] = "confirm"
+        return self._chsched_confirm_line(data), True
+
+    @staticmethod
+    def _chsched_confirm_line(data):
+        return ("Confirm the change: move %s from %s to %s. "
+                "Is that correct?"
+                % (data.get("name", "that medication"),
+                   data.get("old", "its current time"),
+                   data.get("new", "?")))
+
+    def _save_sched_change(self, data):
+        """Runs on the UI thread. Writes one dose time and saves.
+
+        Chronological order and schedule_time are maintained exactly
+        the way the on-screen time editor maintains them (_te_commit),
+        because two code paths writing the same field in two shapes is
+        how a schedule ends up disagreeing with itself."""
+        app = self.app
+        md = app.med_data.get(data.get("key"))
+        if md is None or not md.get("loaded"):
+            return False
+        try:
+            app._ensure_dose_times(md)
+        except Exception:
+            pass
+        times = list(md.get("dose_times") or ["8:00 AM"])
+        idx = data.get("idx", 0)
+        if not (0 <= idx < len(times)):
+            return False
+        times[idx] = data["new"]
+
+        def _key(ts):
+            try:
+                dt = datetime.strptime(ts, "%I:%M %p")
+                return dt.hour * 60 + dt.minute
+            except Exception:
+                return 0
+        times = sorted(times, key=_key)
+        md["dose_times"] = times
+        md["times_per_day"] = len(times)
+        md["schedule_time"] = times[0]
+        app._save_med()
+        try:
+            app._draw_frame()
+        except Exception:
+            pass
+        return True
+
+    # ── NOTES ON A MEDICATION ─────────────────────────────────────
+    #   "if you say I want to add more notes to a medications it
+    #    should be able to do that"
+    #
+    #   A note is free text about a drug the user is taking, which
+    #   makes it the most sensitive thing this station stores. It is
+    #   written to the medication file on the Pi and nowhere else: not
+    #   into the voice transcript log, and not into anything the Mac
+    #   sees. tests/test_voice_edit.py holds that line.
+    NOTE_MAX = 200          # one note
+    NOTE_KEEP = 20          # per medication
+
+    def _flow_start_addnote(self, spoken):
+        meds = self._loaded_meds()
+        if not meds:
+            return ("There are no medications loaded to add a note "
+                    "to, Ryan."), False
+        key = md = None
+        if spoken:
+            hunt = re.sub(r"\b(?:a|an|the|my|this|that|medication|"
+                          r"medications|med|meds|pill|pills|one)\b",
+                          " ", spoken).strip()
+            if hunt:
+                key, md = self._find_med(hunt)
+        if md is None and len(meds) == 1:
+            key, md = meds[0]
+        flow = {"name": "addnote", "ts": time.time(), "data": {}}
+        self._flow = flow
+        if md is None:
+            flow["step"] = "med"
+            names = ", ".join(m.get("name", "?") for _k, m in meds)
+            return ("Which medication is the note for, Ryan? I have "
+                    + names + "."), True
+        flow["data"]["key"] = key
+        flow["data"]["name"] = md.get("name", "it")
+        flow["step"] = "text"
+        return ("Ready. What should I note about %s?"
+                % flow["data"]["name"]), True
+
+    def _save_note(self, data):
+        """Runs on the UI thread. Appends one note, oldest dropped."""
+        app = self.app
+        md = app.med_data.get(data.get("key"))
+        if md is None or not md.get("loaded"):
+            return False
+        text = (data.get("text") or "").strip()[:self.NOTE_MAX]
+        if not text:
+            return False
+        notes = list(md.get("notes") or [])
+        notes.append({"text": text, "at": datetime.now().isoformat()})
+        md["notes"] = notes[-self.NOTE_KEEP:]
+        app._save_med()
+        try:
+            app._draw_frame()
+        except Exception:
+            pass
+        return True
+
+    def _intent_notes(self, spoken):
+        meds = self._loaded_meds()
+        key = md = None
+        if spoken:
+            key, md = self._find_med(spoken)
+        if md is None and len(meds) == 1:
+            key, md = meds[0]
+        if md is None:
+            if not meds:
+                return "No medications are loaded, Ryan.", False
+            names = ", ".join(m.get("name", "?") for _k, m in meds)
+            return ("Whose notes, Ryan? I have " + names + "."), True
+        notes = md.get("notes") or []
+        name = md.get("name", "that medication")
+        if not notes:
+            return ("There are no notes on %s yet, Ryan. Say: add a "
+                    "note, and I will take one." % name), False
+        recent = notes[-3:]
+        body = ". ".join(n.get("text", "").rstrip(".") for n in recent)
+        lead = ("Your note on %s: " % name) if len(notes) == 1 else \
+               ("Your %s most recent notes on %s: "
+                % ({2: "two", 3: "three"}.get(len(recent), "latest"),
+                   name))
+        return (lead + body).rstrip(".") + ".", False
+
     def _flow_step(self, raw, t):
         flow = self._flow
 
         if any(p in t for p in (" cancel ", " never mind ",
                                 " nevermind ", " stop ", " forget it ")):
             self._flow = None
-            return "Intake cancelled. Standing by, Ryan.", False
+            # Say what was abandoned. "Intake cancelled" after a
+            # reschedule request tells the user the wrong thing was
+            # dropped, and on a medication device that is the sort of
+            # sentence somebody acts on.
+            return ({"chsched": "Reschedule cancelled — nothing was "
+                                "changed. Standing by, Ryan.",
+                     "addnote": "Note discarded — nothing was saved. "
+                                "Standing by, Ryan."}.get(
+                         flow.get("name"),
+                         "Intake cancelled. Standing by, Ryan.")), False
+
+        if flow["name"] == "chsched":
+            return self._flow_step_chsched(raw, t, flow)
+
+        if flow["name"] == "addnote":
+            return self._flow_step_addnote(raw, t, flow)
 
         if flow["name"] == "correct":
             self._flow = None
@@ -11766,7 +12169,9 @@ class DoseVoice:
             return self._addmed_after_qty(flow, data)
 
         if step == "time":
-            ts = parse_spoken_time(raw)
+            # Same fix as the reschedule flow: "what time should you
+            # take it?" / "seven" was an unbreakable loop here too.
+            ts = self._time_answer(raw)
             if not ts:
                 return ("I need a time, Ryan. For example: "
                         "eight AM, or seven thirty PM."), True
@@ -11818,6 +12223,185 @@ class DoseVoice:
                 return ("Understood, we will start over. What is "
                         "the medication called?"), True
             return "Yes to save, or no to start over, Ryan.", True
+
+        self._flow = None
+        return "Standing by.", False
+
+    @staticmethod
+    def _time_answer(raw):
+        """A time spoken as the ANSWER to 'what time?'.
+
+        parse_spoken_time() refuses a lone number without context —
+        "at seven", "seven pm", "seven o'clock" — and it is right to,
+        because "take one tablet" must never become 1:00. But when the
+        station has just asked "what time should this move to?", the
+        context is the question, and the whole utterance is the
+        answer. "Seven" came back as "I need a time, Ryan" in a loop
+        with no way out of it: the user says a time, is told it is not
+        a time, and says the same time again.
+
+        So the question's context is supplied explicitly, and only
+        here — the general parser is left strict."""
+        return (parse_spoken_time(raw)
+                or parse_spoken_time("at " + (raw or "").strip()))
+
+    def _flow_step_chsched(self, raw, t, flow):
+        data, step = flow["data"], flow["step"]
+
+        if step == "med":
+            key, md = self._find_med(raw)
+            if md is None:
+                names = ", ".join(m.get("name", "?")
+                                  for _k, m in self._loaded_meds())
+                return ("I did not recognise that one, Ryan. I have "
+                        + names + "."), True
+            return self._chsched_pick_dose(flow, key, md)
+
+        if step == "which":
+            times = data.get("times", [])
+            ts = parse_spoken_time(raw)
+            if ts and ts in times:
+                data["idx"] = times.index(ts)
+                data["old"] = ts
+                return self._chsched_advance(flow)
+            low = " " + raw.lower() + " "
+            for word, i in ((" first ", 0), (" 1st ", 0),
+                            (" second ", 1), (" 2nd ", 1),
+                            (" third ", 2), (" 3rd ", 2)):
+                if word in low and i < len(times):
+                    data["idx"], data["old"] = i, times[i]
+                    return self._chsched_advance(flow)
+            if " last " in low and times:
+                data["idx"], data["old"] = len(times) - 1, times[-1]
+                return self._chsched_advance(flow)
+            want = None
+            if " morning " in low:
+                want = "AM"
+            elif any(w in low for w in (" evening ", " night ",
+                                        " afternoon ")):
+                want = "PM"
+            if want:
+                hits = [i for i, x in enumerate(times)
+                        if x.endswith(want)]
+                # Only when it is UNAMBIGUOUS. Two evening doses and
+                # "the evening one" names neither of them.
+                if len(hits) == 1:
+                    data["idx"], data["old"] = hits[0], times[hits[0]]
+                    return self._chsched_advance(flow)
+            return ("Which one, Ryan — %s?" % " or ".join(times)), True
+
+        if step == "time":
+            ts = self._time_answer(raw)
+            if not ts:
+                return ("I need a time, Ryan. For example: four PM, "
+                        "or seven thirty in the morning."), True
+            data["new"] = ts
+            data["new_explicit"] = self._ampm_explicit(raw)
+            return self._chsched_advance(flow)
+
+        if step == "ampm":
+            clock = (data.get("new") or "8:00 AM").rsplit(" ", 1)[0]
+            if any(m in t for m in (" am ", " a m ", " morning ")):
+                data["new"] = clock + " AM"
+            elif any(m in t for m in (" pm ", " p m ", " evening ",
+                                      " night ", " afternoon ")):
+                data["new"] = clock + " PM"
+            else:
+                return ("Morning or evening, Ryan? I never guess "
+                        "with medication times."), True
+            data["new_explicit"] = True
+            flow["step"] = "confirm"
+            return self._chsched_confirm_line(data), True
+
+        if step == "confirm":
+            if any(p in t for p in (" yes ", " yeah ", " yep ",
+                                    " yup ", " confirm ", " correct ",
+                                    " affirmative ", " right ",
+                                    " do it ", " save ", " sure ")):
+                self._flow = None
+                if data.get("old") == data.get("new"):
+                    return ("%s is already set for %s, Ryan — nothing "
+                            "to change." % (data.get("name", "That one"),
+                                            data.get("new"))), False
+                ok = self._ui(lambda: self._save_sched_change(data))
+                if ok:
+                    return ("Done. %s now reminds you at %s instead "
+                            "of %s. From here on today is judged "
+                            "against the new time, Ryan."
+                            % (data["name"], data["new"],
+                               data["old"])), False
+                return ("I could not write that change, Ryan — "
+                        "nothing was saved. Check the storage "
+                        "screen."), False
+            if any(p in t for p in (" no ", " nope ", " wrong ",
+                                    " negative ", " different ",
+                                    " start over ")):
+                data["new"] = None
+                data["new_explicit"] = False
+                return self._chsched_advance(flow)
+            return ("Yes to save that change, or no to pick another "
+                    "time, Ryan."), True
+
+        self._flow = None
+        return "Standing by.", False
+
+    def _flow_step_addnote(self, raw, t, flow):
+        data, step = flow["data"], flow["step"]
+
+        if step == "med":
+            key, md = self._find_med(raw)
+            if md is None:
+                names = ", ".join(m.get("name", "?")
+                                  for _k, m in self._loaded_meds())
+                return ("I did not recognise that one, Ryan. I have "
+                        + names + "."), True
+            data["key"] = key
+            data["name"] = md.get("name", "it")
+            flow["step"] = "text"
+            return ("Ready. What should I note about %s?"
+                    % data["name"]), True
+
+        if step == "text":
+            text = " ".join((raw or "").split())[:self.NOTE_MAX]
+            if len(text) < 2:
+                return ("I did not catch that, Ryan. Say the note "
+                        "again?"), True
+            # A "note" that is just the drug's own name means they
+            # answered the previous question — the one about WHICH
+            # medication — a beat late. Saving it would file a note
+            # that says "Sertraline" under Sertraline, and they would
+            # find it weeks later with no idea what it meant.
+            if text.strip().lower() == data.get("name", "").lower():
+                return ("That is the medication's name, Ryan — what "
+                        "should the note say about it?"), True
+            data["text"] = text
+            flow["step"] = "confirm"
+            # Read back VERBATIM, then ask. A note that is saved
+            # without being read back says whatever the recogniser
+            # heard, and nobody finds out until they read it later
+            # and believe it.
+            return ("Noting for %s: %s. Save that?"
+                    % (data["name"], text)), True
+
+        if step == "confirm":
+            if any(p in t for p in (" yes ", " yeah ", " yep ",
+                                    " yup ", " confirm ", " correct ",
+                                    " affirmative ", " right ",
+                                    " save it ", " save ", " sure ")):
+                self._flow = None
+                ok = self._ui(lambda: self._save_note(data))
+                if ok:
+                    return ("Saved to %s. It stays on this station, "
+                            "Ryan." % data["name"]), False
+                return ("I could not save that note, Ryan — nothing "
+                        "was written."), False
+            if any(p in t for p in (" no ", " nope ", " wrong ",
+                                    " negative ", " again ",
+                                    " start over ")):
+                flow["step"] = "text"
+                return ("Understood, nothing saved. Say the note "
+                        "again?"), True
+            return "Yes to save it, or no to say it again, Ryan.", True
 
         self._flow = None
         return "Standing by.", False

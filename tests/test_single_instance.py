@@ -55,7 +55,10 @@ print("\n── the desktop entry does not launch the app ───────�
 # `entry` came out as four characters and every check below failed on
 # a file that was correct. Take everything after the first newline,
 # then cut at the closing marker.
-entry = SH.split('cat > "$HOME/Desktop/DOSE.desktop"')[1]
+# The body moved into a function, because writing this file on every
+# single start is what kept clearing its "trusted" flag and bringing
+# back the "Execute in Terminal" dialog Ryan kept hitting.
+entry = SH.split("_dose_desktop_body() {")[1]
 entry = entry[entry.index("\n") + 1:]
 entry = entry[:entry.index("\nEOF")]
 exec_line = [ln for ln in entry.splitlines() if ln.startswith("Exec=")]
@@ -67,6 +70,33 @@ check("...not DOSE.sh itself",
       "DOSE.sh" not in (exec_line[0] if exec_line else ""),
       "this is the line that made a second instance every time he "
       "opened his own station from his own desktop")
+
+print("\n── the trust flag survives a restart ───────────────────────")
+# 2026-09-19, measured on the device: trusted at 09:20, untrusted
+# again by 09:47. Rewriting a .desktop file discards its gio
+# metadata, and this script rewrote it on every start — so the
+# station un-trusted its own icon every time it came up, and Ryan got
+# the "Execute in Terminal" dialog again.
+check("the entry is only written when it would CHANGE",
+      'cmp -s "$_DESK.new" "$_DESK"' in SH,
+      "an unconditional rewrite clears metadata::trusted every start")
+check("...and it is re-trusted every start anyway",
+      "_dose_trust " in SH and "metadata::trusted true" in SH)
+check("the re-trust uses the session bus, not a throwaway one",
+      "/run/user/$(id -u)/bus" in SH,
+      "`dbus-launch gio set` spawns a NEW private bus, writes the "
+      "flag into it, and discards it — it could never have worked")
+# STRIP THE COMMENTS FIRST. The eleventh self-matching pattern in
+# this project: the line explaining why dbus-launch was removed
+# contains the word "dbus-launch", so the check failed on code that
+# no longer calls it. The file has a code_only() helper further down
+# for precisely this; this check predates it in the file, so it does
+# the same thing inline.
+SH_CODE = "\n".join(ln for ln in SH.splitlines()
+                    if not ln.lstrip().startswith("#"))
+check("dbus-launch is gone",
+      "dbus-launch" not in SH_CODE,
+      "it looked like a fallback and was a no-op")
 
 print("\n── and it has a logo ───────────────────────────────────────")
 icon = [ln for ln in entry.splitlines() if ln.startswith("Icon=")]

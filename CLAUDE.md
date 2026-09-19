@@ -273,6 +273,39 @@ Piper in the container; the real model has never run through it.
 - Safe headless test on a dev box: `xvfb-run -a python3.12 dose_app.py`
   (needs a display; tkinter). Set `DOSE_DISABLE_SELF_INSTALL=1` first.
 
+## NEVER PLAY A TONE OUT OF THIS STATION. EVER.
+
+2026-09-19. To prove the level meter was fixed I ran, on the Pi:
+
+    speaker-test -t sine -f 440 -l 1 -s 1
+
+Ryan, in the room, at full ALSA volume, with no warning:
+
+    "there was a failure where it maide liek a whale/siren noise and it
+     was really loud like an alarm, make sure that never happens again
+     in testing it scared me"
+
+It was not a failure. It was me. This is a medication device that sits
+in someone's home and is trusted to make noise only when it matters —
+and the one time it screamed, it was a diagnostic that could have been
+done another way. A person who gets frightened by their own medical
+device stops trusting the device.
+
+THE RULE, no exceptions:
+
+- `speaker-test`, and any raw tone, sweep, sine, pink or white noise,
+  is BANNED from every job, script and test that touches this station.
+- The only thing this station may ever play is SPEECH it was meant to
+  say. `DoseVoice.speaker_test()` is the sanctioned check and it
+  speaks a sentence — leave it that way.
+- To prove the microphone or the meter works, use the engine's own
+  numbers: `voice/live.txt` carries peak and rms every second, and
+  `tools/soak.sh` records them over time. If a stimulus is genuinely
+  unavoidable, it is a spoken line at normal volume, and Ryan is told
+  BEFORE the job runs, not after.
+- `tests/test_no_loud_tones.py` enforces the code side. The job side
+  is enforced by reading this paragraph.
+
 ## Tests
 - Non-UI suites run under plain `python3 tests/test_*.py`.
 - UI suites (`test_audit_page`, `test_ui_speed`, `test_overlay_*`, `test_cpu`,
