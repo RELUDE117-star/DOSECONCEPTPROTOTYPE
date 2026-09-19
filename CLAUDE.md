@@ -1323,6 +1323,91 @@ Two more things the device forced:
   until somebody adds a 28th, and that decay does not announce itself:
   the station just gets slower at one sentence and nobody knows why.
 
+### Declared openings: the replies that can never be cached whole
+
+With the prewarm fixed, the device produced its first sub-two-second
+turns — three at `speak 0.00`, totals **1.51 / 1.91 / 2.30 s**. What
+was left were the replies assembled at the moment of answering:
+
+```
+The time is 4:48 PM.                 speak 3.20   total 4.76
+One dose remains today: Atorva...    speak 2.94   total 5.24
+I could not find promotion in ...    speak 3.20   total 5.14
+Negative, Ryan. New Medication ...   speak 1.95   total 3.81
+```
+
+No cache can hold any of them — the minute is different every minute.
+But the OPENING of each never changes, and the opening is the only part
+on the critical path. `"The time is"` has no comma and no full stop
+inside it, so `_split_first()` had nothing to break on and rendered the
+whole line.
+
+`INVARIANT_OPENINGS` is that list, **declared once and used twice**: the
+chunker may break after any of them, and `prewarm_replies()` renders
+every one at startup. Two lists would drift and the failure would be
+silent — a fragment the chunker produces that the cache does not hold
+is rendered from scratch, on the critical path, forever.
+
+**It is a last resort, not a first choice.** Applied ahead of the
+boundary search it turned `"You have two doses left today, Ryan, and
+the next one is at six."` from a clean break at the comma into
+`"You have"`. A real pause a speaker would make beats a prefix that
+happens to be cached.
+
+Two related traps:
+
+- **Short is not the same as cheap.** A test asserted that a short
+  inventory is "short enough not to need the trick". Twenty characters
+  cost 3.20 s because they could not be cached; length does not predict
+  render cost, cacheability does.
+- **`_spoken_constants()` cannot see an f-string.** `"Negative, Ryan."`
+  and `"Partially."` are the first sentences of replies built with
+  `f"..."`, so the syntax-tree harvest skips them (it takes string
+  literals inside list literals). They go in the prewarm list by hand.
+
+### The cache was wiped on every restart
+
+```
+221 ended with  61 clips  ->  222 started and found 35
+223 started with 116      ->  60 s later there were 22
+```
+
+`_purge_foreign_cache()` compares a stamp against
+`basename(self._piper_path)`. The preflight fills that in and **has not
+necessarily run when the purge does**, so the name was `""`, every
+stamp differed from it, and the whole cache went. Every restart threw
+the prewarm away and re-rendered it — minutes of synthesis at 68 °C for
+a directory whose contents were perfectly good.
+
+The path is a filename, not a model load, so it is resolved in the
+purge when missing. If it still cannot be resolved the cache is **left
+alone**: purging is for a voice that CHANGED, and a clip in the wrong
+voice can never be selected anyway — that is what the voice-keyed
+lookup is for. **An unresolved voice is not a different voice.**
+
+### A ceiling on the second step is not a ceiling
+
+```
+reply                          stt      total   engine
+I didn't catch that, Ryan...  105.14   106.32   whisper-tiny.en
+```
+
+A hundred and five seconds for a local pass on at most twelve seconds
+of audio (`STT_MAX_AUDIO_S` was working). The station gave a sensible
+answer to an empty room.
+
+`STT_TURN_BUDGET` existed and did not help: it gates the **base.en
+escalation**, and what ran long was the fast pass underneath it.
+`STT_LOCAL_CEILING` (8 s) now wraps that. faster-whisper cannot be
+cancelled mid-call, so the work runs on a thread and is **abandoned**
+on the deadline — the turn carries on with the live transcript, the
+orphan finishes into nothing, and `_stt_abandoned` counts it. Wasting
+one pass beats making somebody stand at a medication cabinet for a
+hundred seconds.
+
+**Every timed step needs its own ceiling.** A budget that covers the
+expensive-looking step says nothing about the one before it.
+
 ### Two threads, one attribute — FOUR TIMES NOW
 
 1. `_last_engine`: the speculative transcription overwrote the Mac's

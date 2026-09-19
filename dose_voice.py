@@ -2484,6 +2484,43 @@ class DoseVoice:
         "adherence", "did_take", "greeting", "thanks", "repeat", "help",
     ))
 
+    def _cache_line(self):
+        """One heartbeat line about the reply cache: how many clips are
+        on disk, whether anything wiped them this run, and how far the
+        prewarm has got.
+
+        It exists because the cache vanished across three restarts in a
+        row — 61 to 35, 116 to 22, 126 to 0 — and there are three
+        places that can delete a clip (this file's
+        _purge_foreign_cache, dose_app's _retire_other_voices, and
+        DOSE.sh). Working out which one by reasoning cost two device
+        round trips and got the wrong answer twice. The program knows
+        which one it was; this makes it say so.
+        """
+        try:
+            import glob as _g
+            d = os.path.join(VOICE_DIR, "cache")
+            n = len(_g.glob(os.path.join(d, "*.wav")))
+            stamp = ""
+            try:
+                with open(os.path.join(d, ".voice")) as f:
+                    stamp = f.read().strip()
+            except Exception:
+                stamp = "(none)"
+            purged = getattr(self, "_cache_purged", None)
+            if purged:
+                why = "WIPED this run (stamp was %s)" % purged
+            elif getattr(self, "_cache_purge_skipped", False):
+                why = "kept (voice unresolved, left alone)"
+            else:
+                why = "kept"
+            done = getattr(self, "_prewarmed", 0)
+            total = getattr(self, "_prewarm_total", 0)
+            return ("reply cache:    %d clips   %s   prewarm %d/%d   "
+                    "voice=%s" % (n, why, done, total, stamp))
+        except Exception:
+            return "reply cache:    unreadable"
+
     def _remote_line(self):
         """One heartbeat line answering 'is the Mac doing the work'."""
         if _remote_stt is None:
@@ -4095,6 +4132,17 @@ class DoseVoice:
                 # trust, and this project has already learned what that
                 # costs.
                 self._remote_line(),
+                # THE CACHE IS THE WHOLE OF TIME-TO-FIRST-SOUND NOW,
+                # AND IT KEPT DISAPPEARING.
+                #
+                # 126 clips before a restart, 0 after. Twice more
+                # before that. Every restart threw away minutes of
+                # synthesis, and I spent two jobs reasoning about which
+                # of three deleters it was while the program could
+                # simply have said so. Same lesson as
+                # voice/selection.txt: ask the program, do not model
+                # it.
+                self._cache_line(),
                 # The fault this station actually had: blocks arriving
                 # on time, every sample zero. "HEARING: YES" above is
                 # about the DEVICE; this line is about the SIGNAL.
@@ -5481,7 +5529,20 @@ class DoseVoice:
             for node in ast.walk(tree):
                 if not isinstance(node, ast.FunctionDef):
                     continue
-                if node.name not in ("respond", "_quick_answer"):
+                # The reply methods. `respond` holds most of them; the
+                # rest are the intent handlers, one of which produced
+                # the only turn in the 224 run that still rendered:
+                #
+                #   "Nothing remains. Every dose is logged. Protocol
+                #    two is satisfied."   speak 0.98   total 2.34
+                #
+                # beside three at speak 0.00 and 1.39-1.58 s total.
+                # Naming two methods and stopping was an arbitrary
+                # line; a fixed reply is a fixed reply wherever it is
+                # written.
+                if not (node.name in ("respond", "_quick_answer")
+                        or node.name.startswith("_intent_")
+                        or node.name.startswith("_safety")):
                     continue
                 for sub in ast.walk(node):
                     if not isinstance(sub, ast.List):
