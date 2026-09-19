@@ -196,20 +196,65 @@ print("\n── the status page cannot be read as an inventory ─────�
 # NOT, and the names were instructions. "Wait you accessed my
 # passwords vault and already added it in" is a fair reading of a
 # badly shaped page, on the one subject where being misread is worst.
-check("the verdict comes before any list",
-      SRC.index("NOTHING IS PROTECTED YET.")
+# The wording changed when the third state arrived; the PROPERTY did
+# not. Asserting the exact sentence I happened to write that day is
+# the mistake CLAUDE.md names four times — so this asks whether a
+# verdict, whichever one applies, is printed before the list.
+# The literals as they appear in the SOURCE, which is not how they
+# appear on screen — the first is assembled with %-formatting across
+# two lines. Matching the rendered sentence against the source is the
+# same mistake as matching a phrase split across adjacent string
+# literals, which cost three checks earlier tonight.
+_VERDICTS = ("STILL A PLAIN FILE that ",
+             "NOTHING IS EXPOSED.",
+             "THERE ARE NO SECRETS ON THIS MAC")
+check("every branch prints a verdict",
+      all(v in SRC for v in _VERDICTS), _VERDICTS)
+check("...before any list",
+      max(SRC.index(v) for v in _VERDICTS)
       < SRC.index("where each one is now:"))
 check("...and says it in words, not a state name",
-      "still ordinary files that anything" in SRC
-      and "Nothing has been added to" in SRC)
-check("a partly-done state is named rather than implied",
-      "PARTLY PROTECTED" in SRC)
+      "running as you can read" in SRC)
+check("the risky case names the file, so it is actionable",
+      "PLAINTEXT[n]" in SRC)
 check("the names are labelled as a thing that has NOT happened",
       "Nothing below has been created." in SRC)
 check("an unprotected item says so on its own line",
-      "plain file — not protected" in SRC,
+      "plain file — NOT protected" in SRC,
       "'NOT in the keychain' in a column reads as a category, not a "
       "warning")
+
+print("\n── 'not protected' and 'does not exist' are not the same ───")
+# The page said "plain file — not protected" for all three, and for
+# TWO of them there was no file at all. Ryan was told he had two
+# unprotected secrets on his Mac and offered to type his password to
+# fix it — there was nothing to fix. He never saved a GitHub token,
+# and the LAN address is worked out at runtime and never written
+# down.
+#
+# SECOND time this page has misled on the one subject where being
+# misread is worst. The first was reading as an inventory of what had
+# already been taken.
+check("there are three states, not two", "def state_of(" in SRC
+      and '"absent"' in SRC and '"plain"' in SRC
+      and '"protected"' in SRC)
+check("...and it checks whether the file actually exists",
+      "os.path.exists(p)" in SRC.split("def state_of(")[1][:500])
+check("a missing file is not called a risk",
+      "no file — nothing to protect" in SRC)
+check("the verdict counts only the files that EXIST",
+      'state_of(n) == "plain"' in SRC,
+      "counting all-not-in-keychain as exposed is what produced the "
+      "offer to protect nothing")
+check("...and says so when there is nothing exposed",
+      "NOTHING IS EXPOSED." in SRC)
+check("where the plaintext WOULD be is declared, not guessed",
+      "PLAINTEXT = {" in SRC
+      and all(n in SRC.split("PLAINTEXT = {")[1][:400] for n in
+              ("mac-token", "github-token", "server-address")))
+check("the risky case names the actual path",
+      "print(\"    %s\" % PLAINTEXT[n])" in SRC,
+      "'a secret is unprotected' with no path is not actionable")
 
 print("\n── it will not delete a secret of his ──────────────────────")
 check("--import moves the plaintext aside rather than deleting it",

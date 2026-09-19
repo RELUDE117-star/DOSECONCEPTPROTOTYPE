@@ -97,6 +97,44 @@ KNOWN = {
     "github-token": "write access to the repository",
     "server-address": "the LAN address the speech server binds",
 }
+
+# WHERE THE PLAINTEXT WOULD BE, IF IT EXISTED.
+#
+# The status page said "plain file — not protected" for all three,
+# and for two of them THERE IS NO FILE. Ryan was told he had two
+# unprotected secrets sitting on his Mac and offered to type his
+# password to fix it; there was nothing to fix. He never saved a
+# GitHub token in the panel, and the LAN address is worked out at
+# runtime and never written down.
+#
+# "Not protected" and "does not exist" are opposite facts and they
+# read identically in that column. This is the SECOND time this page
+# has been misleading on the one subject where being misread is
+# worst — the first was reading as an inventory of what had already
+# been taken. A status line has to distinguish a risk from the
+# absence of one.
+_HOME = os.path.expanduser("~")
+_STATE = os.path.join(_HOME, ".dose-server")
+PLAINTEXT = {
+    "mac-token": os.path.join(_STATE, "token"),
+    "github-token": os.path.join(_STATE, "github_token"),
+    "server-address": os.path.join(_STATE, "dose_server.conf"),
+}
+
+
+def state_of(name):
+    """Three outcomes, not two.
+
+    'protected'  in the keychain; a person must approve each read
+    'plain'      a readable file on disk — this is the risk
+    'absent'     no file at all — nothing to protect, nothing to do
+    """
+    if present(name):
+        return "protected"
+    p = PLAINTEXT.get(name)
+    if p and os.path.exists(p):
+        return "plain"
+    return "absent"
 SECURITY = "/usr/bin/security"
 
 
@@ -291,25 +329,38 @@ def main(argv):
         #
         # So: a verdict on the first line, in plain words, before any
         # list of anything.
-        here = [n for n in KNOWN if present(n)]
-        missing = [n for n in KNOWN if n not in here]
+        here = [n for n in KNOWN if state_of(n) == "protected"]
+        plain = [n for n in KNOWN if state_of(n) == "plain"]
+        absent = [n for n in KNOWN if state_of(n) == "absent"]
         print()
-        if not here:
-            print("NOTHING IS PROTECTED YET.")
-            print("All of these are still ordinary files that anything")
-            print("running as you can read. Nothing has been added to")
-            print("your keychain.")
-        elif not missing:
-            print("PROTECTED: all of these are in your keychain, and")
-            print("reading any of them needs your password typed here.")
+        if plain:
+            print("%d SECRET%s ON THIS MAC %s STILL A PLAIN FILE that "
+                  "anything" % (len(plain), "" if len(plain) == 1 else "S",
+                                "IS" if len(plain) == 1 else "ARE"))
+            print("running as you can read:")
+            for n in sorted(plain):
+                print("    %s" % PLAINTEXT[n])
+        elif here:
+            print("NOTHING IS EXPOSED.")
+            print("Every secret that actually exists on this Mac is in")
+            print("your keychain, and reading one needs your password")
+            print("typed here.")
         else:
-            print("PARTLY PROTECTED: %d in your keychain, %d still "
-                  "plain files." % (len(here), len(missing)))
+            print("THERE ARE NO SECRETS ON THIS MAC to protect.")
+        if absent:
+            print()
+            print("%d of the three do not exist here at all, so there is"
+                  % len(absent))
+            print("nothing to protect and nothing for you to do about")
+            print("them. They are listed below as 'no file' rather than")
+            print("as a risk.")
         print()
         print("where each one is now:")
         for name, why in sorted(KNOWN.items()):
-            where = ("IN your keychain" if present(name)
-                     else "plain file — not protected")
+            st = state_of(name)
+            where = {"protected": "IN your keychain",
+                     "plain": "plain file — NOT protected",
+                     "absent": "no file — nothing to protect"}[st]
             print("  %-16s %-28s %s" % (name, where, why))
         print()
         print("A read prompts on this machine. Nothing here stores or")
