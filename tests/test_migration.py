@@ -208,13 +208,99 @@ ok("_cache_purge_skipped" in pf
 ok(pf.index("return") < pf.index("if was != now:"),
    "it returns rather than falling through to the delete loop")
 
+# NOT EVERY .onnx IN THE VOICE FOLDER IS A VOICE.
+#
+# The retirement sweep globbed *.onnx and deleted anything that was
+# not hers. silero_vad.onnx lives in the same directory. So on EVERY
+# LAUNCH it deleted the voice-activity model, concluded a voice had
+# been retired, and wiped the whole pre-rendered reply cache. The
+# device's own purge log caught it twice in two minutes:
+#
+#   17:24:28  retired silero_vad.onnx  125 clips
+#   17:26:10  retired silero_vad.onnx   62 clips
+#
+# The cache was the symptom. The real cost was quieter: the VAD model
+# was re-downloaded every boot, so a station with no internet ran with
+# no voice-activity detection, having deleted a model it already had.
+rt = src.split("def _retire_other_voices")[1]
+rt = rt[:rt.index("\n    def ")]
+ok("NON_VOICE_MODELS" in rt,
+   "the models that are not voices are named, not guessed at")
+ok("silero_vad.onnx" in src,
+   "...starting with the one that was being deleted every launch")
+ok('stem + ".json"' in rt or "stem+\".json\"" in rt,
+   "a Piper voice is a .onnx WITH a .onnx.json beside it; nothing "
+   "else in that folder has one")
+ok(rt.index("NON_VOICE_MODELS") < rt.index("os.unlink"),
+   "and both tests run BEFORE anything is deleted")
+ok("silero_vad.onnx) continue" in sh or "silero_vad.onnx)" in sh,
+   "DOSE.sh's retirement loop had the same bug and the same fix")
+ok('[ -e "$STEM.json" ] || continue' in sh,
+   "...including the config-file test")
+
+# The behaviour itself, not just its shape: retire a real voice, keep
+# the VAD model, and only wipe clips when a voice actually went.
+import ast                                                 # noqa: E402
+import glob                                                # noqa: E402
+import tempfile as _tf                                     # noqa: E402
+import textwrap as _tw                                     # noqa: E402
+_d = _tf.mkdtemp()
+for _n in ("en_US-hfc_female-medium.onnx",
+           "en_US-hfc_female-medium.onnx.json",
+           "silero_vad.onnx",
+           "en_US-amy-low.onnx", "en_US-amy-low.onnx.json"):
+    open(os.path.join(_d, _n), "w").close()
+os.makedirs(os.path.join(_d, "cache"))
+for _i in range(5):
+    open(os.path.join(_d, "cache", "say_%d.wav" % _i), "w").close()
+_tree = ast.parse(src)
+_fn = [n for n in ast.walk(_tree)
+       if isinstance(n, ast.FunctionDef)
+       and n.name == "_retire_other_voices"][0]
+_body = _tw.dedent("\n".join(src.splitlines()[_fn.lineno - 1:_fn.end_lineno]))
+_ns = {"os": os}
+exec("class _A:\n"
+     "    VOICE_NAME = 'en_US-hfc_female-medium'\n"
+     "    NON_VOICE_MODELS = ('silero_vad.onnx',)\n"
+     + _tw.indent(_body, "    "), _ns)
+_removed = _ns["_A"]()._retire_other_voices(_d)
+_left = sorted(f for f in os.listdir(_d) if f.endswith((".onnx", ".json")))
+ok("silero_vad.onnx" in _left,
+   "the VAD model SURVIVES a retirement sweep")
+ok("en_US-hfc_female-medium.onnx" in _left, "and so does her voice")
+ok("en_US-amy-low.onnx" in _removed,
+   "while a real foreign voice is still retired on sight")
+ok(len(glob.glob(os.path.join(_d, "cache", "*.wav"))) == 0,
+   "clips rendered in that voice still go with it")
+ok(os.path.exists(os.path.join(_d, "cache_purges.log")),
+   "and the deleter signs the log, so the next person does not have "
+   "to guess which of three it was")
+
+_d2 = _tf.mkdtemp()
+for _n in ("en_US-hfc_female-medium.onnx",
+           "en_US-hfc_female-medium.onnx.json", "silero_vad.onnx"):
+    open(os.path.join(_d2, _n), "w").close()
+os.makedirs(os.path.join(_d2, "cache"))
+for _i in range(7):
+    open(os.path.join(_d2, "cache", "say_%d.wav" % _i), "w").close()
+ok(_ns["_A"]()._retire_other_voices(_d2) == [],
+   "nothing is retired when only her voice and the VAD model are "
+   "present")
+ok(len(glob.glob(os.path.join(_d2, "cache", "*.wav"))) == 7,
+   "AND THE CACHE SURVIVES — this is the whole bug, in one check")
+
 # (d) she is deleted on sight, before any download
 mg = src.split("def migrate_voice")[1].split(
     "def _voice_download_models")[0]
 ok(mg.index("_retire_other_voices") < mg.index("os.path.exists(mine)"),
    "other voices are removed BEFORE checking whether hers is present")
 ok("ON SIGHT" in mg, "deliberately, not as a side effect")
-sh_seg = sh.split("One voice, always hers")[1][:900]
+# NOT A FIXED SLICE — fourth time this trap has fired in this project.
+# It was [:900] and the comment explaining the silero_vad fix pushed
+# the code it checks past the window. Take the block, ending where the
+# next section starts.
+sh_seg = sh.split("One voice, always hers")[1]
+sh_seg = sh_seg[:sh_seg.index("# ── Update, every launch")]
 ok("RETIRED=" in sh_seg and 'if [ -f "$VOICE_DIR/$V_NAME.onnx" ]; then'
    not in sh_seg,
    "the setup script deletes her unconditionally too")

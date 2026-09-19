@@ -5238,6 +5238,11 @@ class DoseApp:
     # because a station that answers in a different voice than the one
     # it was built with is a bug, not a fallback.
     VOICE_NAME = "en_US-hfc_female-medium"
+    # Models that live in the voice folder and are NOT voices. They
+    # share the extension and nothing else, and the retirement sweep
+    # deleted this one on every single launch — see
+    # _retire_other_voices.
+    NON_VOICE_MODELS = ("silero_vad.onnx",)
     VOICE_SUB = "en/en_US/hfc_female/medium"
     # more than one mirror ref, so a single bad path can't block her
     VOICE_REFS = ("v1.0.0", "main")
@@ -5251,17 +5256,47 @@ class DoseApp:
         'voice model missing' branch, so a station that ALREADY had the
         old Amy voice was considered fine and never ran either one. It
         kept the slow voice forever. This runs regardless of whether
-        anything is missing."""
+        anything is missing.
+
+        NOT EVERY .onnx IN THIS FOLDER IS A VOICE.
+        ---------------------------------------------------------------
+        This globbed `*.onnx` and deleted anything that was not hers.
+        `silero_vad.onnx` lives in the same directory. So on EVERY
+        LAUNCH it deleted the voice-activity model, decided a voice had
+        been retired, and wiped the entire pre-rendered reply cache as
+        collateral:
+
+            2026-09-18 17:24:28  retired silero_vad.onnx  125 clips
+            2026-09-18 17:26:10  retired silero_vad.onnx   62 clips
+
+        Two restarts, two minutes apart, both caught by the log that
+        was added to find exactly this. The cache disappearing was the
+        symptom I chased for four jobs; the real cost was quieter — the
+        VAD model was re-downloaded on every boot, so a station with no
+        internet ran without voice-activity detection at all, having
+        deleted a model it already had.
+
+        A Piper voice is a `.onnx` WITH a `.onnx.json` beside it. Nothing
+        else in this folder has one. That test is what distinguishes a
+        voice from a model that merely shares the extension, and
+        NON_VOICE_MODELS names the one we know about besides."""
         import glob as _glob
         removed = []
         keep = self.VOICE_NAME
         for f in _glob.glob(os.path.join(vdir, "*.onnx")) + \
                 _glob.glob(os.path.join(vdir, "*.onnx.json")):
-            if keep in os.path.basename(f):
+            base = os.path.basename(f)
+            if keep in base:
+                continue
+            if base in self.NON_VOICE_MODELS:
+                continue
+            # A voice has its config beside it; silero_vad.onnx does not.
+            stem = f[:-5] if f.endswith(".json") else f
+            if not os.path.exists(stem + ".json"):
                 continue
             try:
                 os.unlink(f)
-                removed.append(os.path.basename(f))
+                removed.append(base)
             except Exception:
                 pass
         if removed:

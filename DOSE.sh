@@ -390,14 +390,27 @@ fi
 # recognise, so an old file is not a fallback that keeps the station
 # talking — it is dead weight. Silence until her voice arrives is the
 # intended behaviour.
+# NOT EVERY .onnx IN THIS FOLDER IS A VOICE — silero_vad.onnx lives
+# here too, and this loop deleted it on every launch, then wiped the
+# whole pre-rendered reply cache because it thought a voice had been
+# retired. The device's own log caught it twice in two minutes. A
+# Piper voice is a .onnx WITH a .onnx.json beside it; the VAD model
+# has no config file, which is the test used here.
 V_NAME="en_US-hfc_female-medium"
 RETIRED=""
 for F in "$VOICE_DIR"/*.onnx "$VOICE_DIR"/*.onnx.json; do
     [ -e "$F" ] || continue
-    case "$(basename "$F")" in
-        $V_NAME*) ;;
-        *) rm -f "$F"; RETIRED="yes" ;;
+    B="$(basename "$F")"
+    case "$B" in
+        $V_NAME*) continue ;;
+        silero_vad.onnx) continue ;;
     esac
+    case "$F" in
+        *.onnx.json) STEM="${F%.json}" ;;
+        *)           STEM="$F" ;;
+    esac
+    [ -e "$STEM.json" ] || continue      # no config: not a voice
+    rm -f "$F"; RETIRED="yes"
 done
 if [ -n "$RETIRED" ]; then
     echo "  Retired an older voice; she is the only one now."
