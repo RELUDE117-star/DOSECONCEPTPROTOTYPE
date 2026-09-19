@@ -1496,6 +1496,90 @@ both cut from a base the Mac's clone does not have, so every fetch said
 sat four commits behind a Pi that had the code. `git bundle verify`
 before trusting either one.
 
+### 0.45 SECONDS — transcribe while he is still talking
+
+**The architecture that got under a second.** Measured on the device,
+end of speech to first sound, with the breakdown that had never been
+instrumented:
+
+```
+heard                  endpt   stt   pre    ui think speak  TOTAL
+what time is it         0.44  0.00  0.44  0.01  0.00  0.00   0.45
+what time is it         0.45  0.00  0.45  0.10  0.00  0.00   0.55
+How many pills...       0.44  0.22  0.00  0.00  0.00  0.00   1.13
+Did I take my aspirin   0.43  1.11  1.54  0.03  0.00  0.00   1.58
+
+medians:  pre 0.45   ui 0.01   think 0.00
+```
+
+`total` is `(t1 - t_stop) + first-chunk render` — the number the owner
+asked about, from "you stop talking" to "it starts talking".
+
+**Everything except the endpoint and the Mac is now free.** `ui` (the
+"thinking" state marshalling onto the Tk thread) is 0.01 s. `think`
+(the whole language layer) is 0.00. `speak` is 0.00 because the reply
+cache and the declared openings carry it. The floor is
+`ENDPOINT_STABLE` at 0.35–0.46 s, and after that the only variable
+left is whether the Mac has finished.
+
+**The change that did it:** the speculative pass — which runs 0.18 s
+into a pause, while the person may still be talking — was pinned to
+the Pi's local models, and its answer was then REFUSED whenever the
+Mac was available:
+
+```
+if not going_remote and spec ...
+```
+
+Both halves were right when written. The speculation ran
+whisper-tiny.en on the Pi, so reusing it would have thrown away a much
+better recogniser on the LAN. Point the speculation at the Mac and
+both invert: its answer IS what a fresh call would return, and
+re-asking is a second round trip for an identical string.
+
+**Two mistakes on the way, both caught by the device:**
+
+- Pointing the speculation at the Mac WITHOUT fixing the reuse test
+  made it **half a second slower** — every turn made two Mac requests
+  and the second queued behind the first. `spec hits: 0`, stt
+  1.08–1.49 s against a 0.85 s baseline.
+- The first reuse test asked `spec["by"] == "mac"` — *who answered it*
+  — which cannot be known when `finish()` runs: the endpoint fires
+  0.35 s after the last voice and the speculation starts at 0.18 s, so
+  it has a sixth of a second of head start on a round trip of nearly a
+  second. The answer was always "nobody". **Ask where it was POINTED,
+  recorded when it started.**
+
+Both counters reading zero — hits AND misses — was the tell that the
+branch was never entered at all rather than entered and lost. The row
+now says which of the four things happened (`spec_why`), because
+"never started", "more speech arrived" and "refused" need three
+different fixes and two attempts went by without knowing which.
+
+**What is left is the Mac's round trip**, and nothing else. When it
+comes back inside the endpoint window, `stt` is 0.00 and the turn is
+0.45 s. When it does not, `stt` is whatever remains of it. `refused`
+in the heartbeat is the Mac answering something that did not parse —
+not a rejection.
+
+### And the nine-second turns before that
+
+Every turn the Mac answered: 0.75–1.11 s, forty-odd of them. Every
+turn it did not: 9.01, 9.90, 10.95, 105.14. **There was no middle**,
+and both causes were the Pi doing expensive work to disagree with a
+Mac that had already answered:
+
+- **An unusable Mac answer fell through to the Pi's own models.**
+  tiny.en is not a second opinion on small.en — it is a WEAKER model,
+  and it is the offline fallback, not a court of appeal. A Mac that
+  answered has answered: say "I didn't catch that" in a second
+  instead of taking ten. The fallback still runs when the Mac is
+  absent or vanishes mid-turn.
+- **0.36 s of audio at peak 2260** went to a recogniser that spent
+  9.90 s on it and returned nothing. `MIN_TURN_AUDIO_S` is 0.5 s, set
+  against the turns that WORKED — the shortest correct one in the log
+  carried 0.88 s of trimmed audio.
+
 ### WHERE IT LANDED — verified on the device, 2026-09-18
 
 Five real turns through the room, measured by the harness after both
