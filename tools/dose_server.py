@@ -226,7 +226,8 @@ def unpin_peer():
 
 _MODEL = {}          # name -> loaded model, both resident
 _STATS = {"requests": 0, "audio_seconds": 0.0, "infer_seconds": 0.0,
-          "refused": 0, "vad_rescued": 0, "bad_token": 0,
+          "refused": 0, "vad_rescued": 0, "vad_invented": 0,
+          "bad_token": 0,
           "started": time.time()}
 
 
@@ -640,6 +641,66 @@ def _is_prompt_echo(text):
     return False
 
 
+# Speech runs about 2-3 words a second; four is fast talking and
+# this is a cabinet, not an auctioneer. Plus one, so a single short
+# word in a very short clip is never called a hallucination.
+WORDS_PER_SECOND_CEILING = 4.0
+
+
+def _plausible(text, secs):
+    """Could this many words fit in this much audio?
+
+    A cheap, physical check. Whisper's inventions on near-silence are
+    not subtle — they are whole sentences on a fraction of a second —
+    so this does not need to be clever to catch them, and being
+    generous is deliberate: a wrongly dropped real transcript costs
+    one turn, and a wrongly kept invented one gets answered.
+    """
+    n = len(text.split())
+    return n <= int(secs * WORDS_PER_SECOND_CEILING) + 1
+
+
+def _has_signal(wav_bytes):
+    """Is there anything in this clip at all?
+
+    The first line of defence, and the cheaper one: a retry without
+    the voice filter is only sensible on audio that HAS sound in it.
+    On a genuinely silent clip, removing the filter is an invitation
+    to hallucinate rather than a second chance.
+
+    Standard library only — peak sample magnitude, no audioop, no
+    numpy. This runs on the Mac where neither is guaranteed.
+    """
+    try:
+        w = wave.open(BytesIO(wav_bytes), "rb")
+        sw, n = w.getsampwidth(), w.getnframes()
+        raw = w.readframes(min(n, 16000 * 30))
+        w.close()
+        if sw != 2 or not raw:
+            # Not 16-bit: do not guess. Allow the retry — the
+            # plausibility check still stands behind it.
+            return True
+        peak = 0
+        # Every 8th sample is plenty to find a peak and keeps this
+        # off the critical path.
+        for i in range(0, len(raw) - 1, 16):
+            v = raw[i] | (raw[i + 1] << 8)
+            if v >= 32768:
+                v -= 65536
+            v = -v if v < 0 else v
+            if v > peak:
+                peak = v
+        return peak >= RESCUE_MIN_PEAK
+    except Exception:
+        return True
+
+
+# A real microphone in a quiet room measures 29+ (this project's own
+# route-liveness number). A digitally silent clip measures 0. The bar
+# is set well above silence and well below speech.
+RESCUE_MIN_PEAK = int(os.environ.get("DOSE_SERVER_RESCUE_MIN_PEAK", "180"))
+
+
 def transcribe(wav_bytes, model_name=None):
     """WAV in, text out. The only thing this program does.
 
@@ -695,16 +756,38 @@ def transcribe(wav_bytes, model_name=None):
     # silent clip comes back empty again and the station behaves
     # exactly as it did before.
     vad_rescue = False
-    if not text:
+    if not text and _has_signal(wav_bytes):
         segs2, _i2 = model.transcribe(
             BytesIO(wav_bytes), language="en", beam_size=1,
             vad_filter=False, condition_on_previous_text=False,
             initial_prompt=PROMPT)
         text2 = " ".join(s.text for s in segs2).strip()
-        if text2:
+        if text2 and _plausible(text2, secs):
             text = text2
             vad_rescue = True
             _STATS["vad_rescued"] = _STATS.get("vad_rescued", 0) + 1
+        elif text2:
+            # WHISPER INVENTS WORDS ON SILENCE. That is what
+            # vad_filter=True is FOR, and removing it on the retry
+            # brought the invention back. From the device, one run
+            # after the rescue shipped:
+            #
+            #     0.68s of audio in 2.23s -> (15 words, 70 chars)
+            #     3.16s of audio in 16.29s -> (13 words, 63 chars)
+            #
+            # Fifteen words cannot fit in two thirds of a second.
+            # That is not a transcript, and a station that answers
+            # it is answering something nobody said — the exact
+            # thing Ryan warned about: "It needs to be correct on
+            # what was actually said and what was transcribed."
+            #
+            # Trading an empty answer for an invented one is a much
+            # worse deal than the one I thought I was making.
+            _STATS["vad_invented"] = _STATS.get("vad_invented", 0) + 1
+            log("the retry invented %d words for %.2fs of audio — "
+                "dropped it (%d so far). Empty is the honest answer."
+                % (len(text2.split()), secs,
+                   _STATS["vad_invented"]))
 
     if _is_prompt_echo(text):
         # THE MODEL HANDING THE PROMPT BACK.
@@ -843,6 +926,7 @@ class Handler(BaseHTTPRequestHandler):
                       # only papering over.
                       "vad_rescued": _STATS.get("vad_rescued", 0),
                       "bad_token": _STATS.get("bad_token", 0),
+                      "vad_invented": _STATS.get("vad_invented", 0),
                       "rtf": round(_STATS["infer_seconds"]
                                    / max(0.001, _STATS["audio_seconds"]), 3)})
             return

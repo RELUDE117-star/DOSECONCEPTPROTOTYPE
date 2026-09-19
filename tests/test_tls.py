@@ -216,8 +216,12 @@ check("the first pass still uses the voice filter",
       "dropping it wholesale would put room noise through the "
       "recogniser on every turn")
 check("a retry without it happens ONLY when nothing came back",
-      "if not text:" in _tr
-      and _tr.index("if not text:") < _tr.index("vad_filter=False"),
+      # The condition gained the signal gate, so the literal
+      # "if not text:" is now "if not text and _has_signal(...)".
+      # Checking for the exact old text would have had me "fix" the
+      # gate back out again.
+      "if not text and _has_signal(wav_bytes):" in _tr
+      and _tr.index("if not text and") < _tr.index("vad_filter=False"),
       "an unconditional second decode would double every turn")
 check("...and it is the same model, not a different one",
       _tr.count("load_model(") == 1,
@@ -268,6 +272,70 @@ check("repeated bad tokens are diagnosed, not just counted",
       "that is your station, presenting a secret this server does" in _FLAT)
 check("...and the source of this server's token is reported",
       '"token_source"' in SRV)
+
+print("\n── THE RESCUE MAY NOT INVENT WORDS ────────────────────────")
+# The first version of the VAD rescue shipped and the device caught
+# it in one run:
+#
+#     0.68s of audio in 2.23s -> (15 words, 70 chars)
+#     3.16s of audio in 16.29s -> (13 words, 63 chars)
+#
+# Fifteen words do not fit in two thirds of a second. Whisper
+# INVENTS text on near-silence — that is what vad_filter=True is
+# for — so removing it on the retry brought the invention back, and
+# the station would then answer something nobody said. Trading an
+# empty answer for a fabricated one is a far worse deal than the one
+# I thought I was making, and it is the exact failure Ryan named:
+# "correct on what was actually said and what was transcribed".
+import importlib.util as _ilu                              # noqa: E402
+import wave as _wave, io as _io, struct as _st, math as _mt  # noqa: E402
+_s2 = _ilu.spec_from_file_location(
+    "_srv_rescue", os.path.join(ROOT, "tools", "dose_server.py"))
+_m2 = _ilu.module_from_spec(_s2)
+_s2.loader.exec_module(_m2)
+
+
+def _wav(secs, amp, rate=16000):
+    b = _io.BytesIO()
+    w = _wave.open(b, "wb")
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(rate)
+    w.writeframes(b"".join(
+        _st.pack("<h", int(amp * _mt.sin(i * 0.05)))
+        for i in range(int(secs * rate))))
+    w.close()
+    return b.getvalue()
+
+
+check("the retry is gated on the clip actually having sound",
+      "_has_signal(wav_bytes)" in SRV,
+      "on a silent clip, removing the voice filter is an invitation "
+      "to hallucinate, not a second chance")
+check("digital silence never gets a retry",
+      not _m2._has_signal(_wav(1.0, 0)))
+check("...nor a clip barely above nothing",
+      not _m2._has_signal(_wav(1.0, 40)))
+check("quiet speech DOES get one",
+      _m2._has_signal(_wav(1.0, 400)),
+      "the whole point is the loudspeaker-across-the-room case")
+check("and loud audio obviously does", _m2._has_signal(_wav(1.0, 9000)))
+check("fifteen words in 0.68s is rejected",
+      not _m2._plausible(" ".join(["w"] * 15), 0.68),
+      "this is the exact line the device produced")
+check("...and one word in 0.68s is kept",
+      _m2._plausible("Yes.", 0.68))
+check("a normal command is kept",
+      _m2._plausible("what do i take today", 1.5))
+check("fast but real speech is kept",
+      _m2._plausible(" ".join(["w"] * 13), 3.16),
+      "4 words a second is fast talking, not a hallucination — a "
+      "wrongly dropped real transcript costs a turn, so the bar is "
+      "deliberately generous")
+check("a dropped invention is logged and counted, not silent",
+      "the retry invented" in _FLAT and '"vad_invented"' in SRV)
+check("...and empty is called the honest answer",
+      "Empty is the honest answer" in _FLAT)
 
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:

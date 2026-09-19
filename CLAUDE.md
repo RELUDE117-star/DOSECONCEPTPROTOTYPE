@@ -1940,6 +1940,42 @@ The Mac composes conversation and declines medication, over TLS, with
 no transcript on its disk. Both acceptance runs PASS at 100%
 understood, worst turn 1.39 s and 1.5 s.
 
+## AND THEN THE RESCUE STARTED INVENTING WORDS
+
+The fix below shipped and the device caught it in one run:
+
+    0.68s of audio in  2.23s -> (15 words, 70 chars)
+    3.16s of audio in 16.29s -> (13 words, 63 chars)
+
+**Fifteen words do not fit in two thirds of a second.** Whisper
+hallucinates text on near-silence — that is what `vad_filter=True`
+is FOR — so removing it on the retry brought the invention straight
+back. The station would then answer something nobody said, which is
+strictly worse than saying "I didn't catch that", and is the exact
+failure Ryan named: *"correct on what was actually said and what was
+transcribed"*.
+
+**I traded an empty answer for a fabricated one and called it a
+fix.** The empty turns were honest. Nothing about the original
+problem justified that trade, and I did not see it until the log
+showed a word count next to an audio length — which it only does
+because the redaction replaced transcripts with shape.
+
+Two gates, both cheap, both standard library:
+
+- `_has_signal()` — a retry only happens on a clip that actually has
+  sound in it (peak ≥ 180; digital silence is 0, a real mic in a
+  quiet room is 29+). On a silent clip, removing the voice filter is
+  an invitation to hallucinate, not a second chance.
+- `_plausible()` — at most `4 × seconds + 1` words. Speech runs 2-3
+  words a second; four is fast talking. Deliberately generous: a
+  wrongly dropped real transcript costs one turn, a wrongly kept
+  invented one gets answered.
+
+Dropped inventions are logged and counted (`vad_invented`), because
+a station where that number climbs is one whose capture is producing
+silence, and the rescue would only be hiding it.
+
 ## THE VAD WAS THROWING WHOLE TURNS AWAY, AND THE LOG SAID SO
 
 Roughly two turns a run came back empty. The Mac's own log names it
