@@ -1174,19 +1174,43 @@ Not machine-wide CPU contention — an external process is fast at the
 very moment the app is slow. Something **inside the app's interpreter**
 costs 1.6 s per render.
 
-**The leading candidate is now the GIL, and it has not been tested.**
-ONNX releases the GIL during inference, but the Python around it —
-phonemization, audio assembly — does not, and it is competing with a
-capture reader thread doing `ratecv` and AGC arithmetic on 47 blocks a
-second, plus the Tk main loop and the heartbeat. An external process
-has no such competition, which is exactly the shape of the table above.
+**The GIL was the leading candidate. It is not the answer either.**
+Reproduced outside the app — render alone, then render while one
+thread does exactly what `ingest()` does per block (tomono, ratecv,
+rms, max) at 47 a second:
 
-Note this also explains why gating Vosk and Silero did not help: both
-run their heavy work in C with the GIL released. The per-block Python
-in `ingest()` does not.
+```
+alone                            0.90s   (median 1.38 — warming up)
+with ONE capture-reader thread   0.75s   (median 0.83)
+penalty                          none
+```
 
-**Do not "fix" this by moving synthesis to the worker.** That was
-measured: 6.71 s against 2.41 s in-process (§ above).
+**Eleven explanations, eleven measurements, eleven misses.** Stopping
+here rather than guessing a twelfth, because every one of these cost a
+device round trip and the station is not blocked on it.
+
+### The one tool not yet pointed at this question
+
+Every measurement above has been a *reconstruction* — a bench that
+imitates the app. The app itself has never been profiled DURING a
+render. `py-spy record --pid <app> --duration 10` across a turn would
+show where those 1.6 s actually go, in the real process, with no
+model of it in between. That is the next step, and it is the same
+lesson as `voice/selection.txt`: **the program knows; ask it.**
+
+Facts any such attempt must respect, all measured:
+
+| | |
+|---|---|
+| external process while the app runs | 0.78 s |
+| the app's own process, same moment | 2.4 s |
+| two voices in one process | 0.79 s — not the footprint, not ageing |
+| the worker (138 MB child) | 6.71 s — **slower** |
+| a capture-reader thread alongside | no penalty — not the GIL |
+| ONNX thread cap 2 vs 4 | 0.18 s, and a no-op as applied |
+
+**Do not "fix" this by moving synthesis to the worker.** Measured:
+6.71 s against 2.41 s in-process.
 
 ### The reply cache: 32 clips on disk, and no hit ever observed
 
