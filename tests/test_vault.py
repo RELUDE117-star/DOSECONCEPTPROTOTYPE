@@ -27,6 +27,7 @@ forever. That is what most of this file is about.
 Run:  python3 tests/test_vault.py
 """
 import ast
+import re
 import os
 import sys
 
@@ -219,8 +220,29 @@ check("--keep-file exists for someone who wants both",
       "--keep-file" in SRC)
 
 print("\n── the server prefers it, and still works without it ───────")
-tok = SRV.split("def token(")[1]
+# THE RESOLVE, NOT THE ACCESSOR. token() used to hold this body and
+# was called from the request handler, so Ryan got a password dialog
+# every few seconds — the Pi polls /health while idle. The body now
+# lives in _resolve_token(), called once at startup; token() is a
+# cache in front of it and token_now() is what a request may use.
+tok = SRV.split("def _resolve_token(")[1]
 tok = tok[:tok.index("\ndef ")]
+_ALLOWED_CODE = "\n".join(
+    ln for ln in SRV.split("def _allowed(")[1][:900].splitlines()
+    if not ln.lstrip().startswith("#"))
+check("asking the keychain happens in ONE place, called once",
+      "def _resolve_token(" in SRV and "def token_now(" in SRV,
+      "a keychain read on the request path is a password prompt per "
+      "request")
+check("...and the request path uses the accessor that cannot ask",
+      # Two traps in one line, both already in CLAUDE.md. "token()"
+      # is a SUBSTRING of "token_now()", so the word has to be
+      # matched; and the comment above that line contains the literal
+      # words "NEVER token()", so the comments have to come out
+      # first. Grepping source text that includes its own commentary
+      # is how a test asserts the opposite of what it means.
+      "token_now()" in _ALLOWED_CODE
+      and not re.search(r"(?<!_now)\btoken\(\)", _ALLOWED_CODE))
 check("the server asks the keychain before the file",
       tok.index('v.present("mac-token")') < tok.index("open(TOKEN_FILE)"),
       "a protected token that is ignored is not protected")

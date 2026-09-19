@@ -295,6 +295,81 @@ check("the turn log says when the Mac answered",
 check("audio is handed over as bytes, never a path",
       "_remote_stt.transcribe(" in DVC and "self._wav_bytes(" in DVC)
 
+print("\n── NOTHING IN A REQUEST MAY ASK RYAN FOR A PASSWORD ────────")
+# He protected his tokens and was then prompted over and over, after
+# quitting the app:
+#
+#     "it keeps reasking a bunch of tiems is that normal"
+#     "as I exited but it still keeps asking"
+#
+# `_allowed()` built "Bearer " + token() on EVERY request, and token()
+# asks the keychain. The Pi's idle /health probe alone was enough to
+# keep a dialog on his screen. The function's own docstring said
+# "ONCE, when the server starts — not per request" while the code four
+# lines away did the opposite, so this is asserted from the syntax
+# tree rather than trusted to prose.
+SRVT = ast.parse(open(os.path.join(ROOT, "tools", "dose_server.py"),
+                      encoding="utf-8").read())
+_fns = {}
+for _n in ast.walk(SRVT):
+    if isinstance(_n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        _fns.setdefault(_n.name, _n)
+
+
+def calls_in(fn_name):
+    """Every plain-name function called inside this function."""
+    fn = _fns.get(fn_name)
+    out = set()
+    if fn is None:
+        return out
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Call):
+            if isinstance(n.func, ast.Name):
+                out.add(n.func.id)
+            elif isinstance(n.func, ast.Attribute):
+                out.add(n.func.attr)
+    return out
+
+
+_allowed_calls = calls_in("_allowed")
+check("the request path does NOT call token()",
+      "token" not in _allowed_calls,
+      "one keychain prompt per request, on a server the Pi polls "
+      "while idle")
+check("...it uses token_now(), which cannot ask",
+      "token_now" in _allowed_calls)
+check("token_now() reaches neither the vault nor the keychain",
+      not (calls_in("token_now") & {"_vault", "get", "present",
+                                    "_resolve_token", "open"}),
+      sorted(calls_in("token_now")))
+check("token_now() returns the remembered value",
+      "_TOKEN" in ast.dump(_fns.get("token_now", ast.Pass())))
+check("the value is resolved once and cached",
+      '_TOKEN["value"] = val' in open(
+          os.path.join(ROOT, "tools", "dose_server.py"),
+          encoding="utf-8").read())
+check("...and token() returns the cache before doing any work",
+      "if not refresh and _TOKEN[\"value\"]:" in open(
+          os.path.join(ROOT, "tools", "dose_server.py"),
+          encoding="utf-8").read())
+check("only _resolve_token() ever asks the keychain",
+      "_vault" in calls_in("_resolve_token"),
+      "if a second function starts asking, this stops being one "
+      "prompt a day")
+check("serve() resolves it at startup, before any request arrives",
+      "token" in calls_in("serve"))
+check("a server with no token refuses rather than prompting",
+      "this server has no token yet" in open(
+          os.path.join(ROOT, "tools", "dose_server.py"),
+          encoding="utf-8").read(),
+      "the one thing worse than a prompt is a prompt nobody asked "
+      "for, mid-turn")
+# The honest limit, stated in the file rather than discovered later.
+check("the docstring says the value is then held in memory",
+      "held in memory" in open(
+          os.path.join(ROOT, "tools", "dose_server.py"),
+          encoding="utf-8").read())
+
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
     for f in FAILURES:

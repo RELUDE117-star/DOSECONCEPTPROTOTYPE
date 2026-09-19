@@ -145,10 +145,49 @@ def _vault():
         return None
 
 
-def token():
-    """The shared secret.
+# THE VALUE, RESOLVED ONCE. Read the comment on token() before
+# touching this. It is the difference between one password dialog a
+# day and one every few seconds.
+_TOKEN = {"value": "", "source": "", "at": 0.0}
 
-    THE KEYCHAIN FIRST, AND IT PROMPTS.
+
+def token_now():
+    """The token WITHOUT ever asking anybody anything.
+
+    This is what the request path uses. It cannot prompt, it cannot
+    block, and it cannot touch the keychain — it returns what was
+    resolved at startup or an empty string.
+
+    IT EXISTS BECAUSE `_allowed()` CALLED `token()` ON EVERY REQUEST.
+    Ryan protected his tokens, and then:
+
+        "it keeps reasking a bunch of tiems is that normal"
+        "i jsut exited the platform but it keeps asking for it"
+        "as I exited but it still keeps asking"
+
+    I blamed the panel's five-second status refresh, fixed that, and
+    it was only half of it — and the smaller half. The station's
+    heartbeat probes `/health` every few seconds while idle, and
+    every voice turn is another request; each one went through
+    `_allowed()`, which built `"Bearer " + token()`, which asked the
+    keychain, which put a dialog on his screen. Closing the app
+    changed nothing because it was never the app: it was the Pi,
+    politely knocking.
+
+    And the docstring on token() SAID "ONCE, when the server starts —
+    not per request", which is what I believed while the code did the
+    opposite four lines away. **A docstring is not an invariant.**
+    `tests/test_dose_server.py` asserts this one from the syntax tree
+    now, because the next person to add a call in a handler will be
+    just as sure.
+    """
+    return _TOKEN["value"] or ""
+
+
+def token(refresh=False):
+    """The shared secret, resolved ONCE and remembered in memory.
+
+    THE KEYCHAIN FIRST, AND IT PROMPTS — ONCE.
 
     Ryan: "you physically and not an autumn or ai needs to manually
     type in a password on the MacBook itself in order to ever get
@@ -156,28 +195,53 @@ def token():
 
     When the token has been moved into the login keychain with no
     trusted applications, reading it here puts a dialog on this Mac
-    and waits for him. That happens ONCE, when the server starts —
-    not per request — so the cost is one password at launch and the
-    plaintext never goes back to disk.
+    and waits for him. That is the whole protection and it is
+    supposed to cost him one password when the server starts. After
+    that the value is held in this process's memory and every request
+    compares against that copy; nothing asks again until the server
+    is restarted, which in practice is about once a day.
+
+    That is also the honest limit: a process that has been granted
+    the token holds it until it exits. Anything that can read this
+    process's memory has it. What the keychain stops is the thing he
+    was actually worried about — a script, a download, an agent
+    reading a file and walking off with the secret — and that it does
+    stop, completely.
 
     A file is still read when the keychain has nothing, because a
     station that has not been through the protection step has to keep
     working. `--status` says which of the two is in force, in words,
     so nobody has to guess whether it is protected.
     """
+    if not refresh and _TOKEN["value"]:
+        return _TOKEN["value"]
+    val, source = _resolve_token()
+    _TOKEN["value"] = val
+    _TOKEN["source"] = source
+    _TOKEN["at"] = time.time()
+    return val
+
+
+def _resolve_token():
+    """Where the value actually comes from. Called once per process.
+
+    Split out from token() so the caching is visible and so a test
+    can assert that the request path never reaches this."""
     v = _vault()
     if v is not None and v.supported() and v.present("mac-token"):
         val, err = v.get("mac-token")
         if val:
-            log("token released from the keychain by someone at this Mac")
-            return val
+            log("token released from the keychain by someone at this Mac "
+                "— held in memory now, nothing will ask again until "
+                "this server restarts")
+            return val, "keychain"
         log("the keychain did not release the token (%s) — "
             "falling back to the file" % (err or "refused"))
     try:
         with open(TOKEN_FILE) as f:
             t = f.read().strip()
             if t:
-                return t
+                return t, "file"
     except Exception:
         pass
     t = secrets.token_urlsafe(32)
@@ -185,7 +249,7 @@ def token():
     fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(t + "\n")
-    return t
+    return t, "new file"
 
 
 def lan_address():
@@ -355,7 +419,14 @@ class Handler(BaseHTTPRequestHandler):
             self._deny(403, "not the paired device")
             return False
         auth = self.headers.get("Authorization", "")
-        want = "Bearer " + token()
+        # token_now(), NEVER token(). See token_now()'s comment: this
+        # line asked the keychain on every request, and the Pi's
+        # idle /health probe alone was enough to put a password
+        # dialog on Ryan's screen every few seconds.
+        want = "Bearer " + token_now()
+        if not want.strip() or want == "Bearer ":
+            self._deny(503, "this server has no token yet")
+            return False
         if not secrets.compare_digest(auth, want):
             self._deny(401, "bad token")
             return False
@@ -417,7 +488,13 @@ def serve(host=None, port=8765, preload=True):
     if not is_private(host):
         log("REFUSING to bind %s — that is not a private address" % host)
         return 2
+    # ONCE, HERE, BEFORE THE SOCKET IS OPEN. If the token is in the
+    # keychain this is the moment the dialog appears, with nobody
+    # waiting on the other end of a request. Every request afterwards
+    # compares against this value through token_now(), which cannot
+    # ask.
     t = token()
+    log("token source: %s (asked once, at startup)" % _TOKEN["source"])
     if preload:
         # BOTH, and the fast one FIRST. It is the one a turn waits on,
         # and a station asking for it while it is still loading pays
