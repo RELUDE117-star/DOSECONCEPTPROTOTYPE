@@ -1490,6 +1490,40 @@ both cut from a base the Mac's clone does not have, so every fetch said
 sat four commits behind a Pi that had the code. `git bundle verify`
 before trusting either one.
 
+### WHERE IT LANDED — verified on the device, 2026-09-18
+
+Five real turns through the room, measured by the harness after both
+of its own faults were fixed:
+
+```
+reply                            endpoint   stt  speak  total  hit  engine
+The time is 6:17 PM.                 0.55  0.89   0.00   1.52   1   mac
+I could not find aspirin, Ryan.      0.53  0.90   0.00   1.44   1   mac
+Nothing remains. Every dose is l..   0.56  0.82   0.00   1.85   1   mac
+Current inventory: New Medicatio..   0.45  0.96   0.00   1.57   1   mac
+
+VERDICT: PASS   understood 100%   turn total (worst) 1.85s
+                time to first sound 0.0s
+```
+
+**Every turn under two seconds, and `speak 0.00` on all of them** —
+the first sound is already rendered when the station decides to say
+it. Against the same station four days earlier: 3.7–6.9 s totals with
+2.8–5.5 s of that in synthesis.
+
+What got it there, in order of how much it was worth:
+
+| | |
+|---|---|
+| the reply cache actually being HIT | 2.4 s → 0.0002 s per opening |
+| declared openings for replies that can never be cached whole | the last 3.2 s reply |
+| the cache surviving a restart | it was wiped on every launch |
+| the Mac as recogniser | 0.83–0.96 s against 4.3–13 s local |
+| ceilings on every timed step | a 105 s turn, and then an 11.96 s one |
+
+Board at 50 °C, 2.5 GB free, capture reopens 1, voice gate reading
+450 of 450 blocks as speech, Mac round trip 66 ms.
+
 ### THE HARNESS WAS THE FAULT, TWICE. The station was fine.
 
 **Four jobs went into proving this station deaf. It was not.** A plain
