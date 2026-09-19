@@ -8217,7 +8217,21 @@ class DoseVoice:
             are still listening. Discarded for free if more speech
             turns up."""
             ev = threading.Event()
-            box = {"voice_ts": voice_ts, "done": ev, "text": ""}
+            # `remote` is recorded HERE, at the start, not read from
+            # the result. finish() has to decide whether this pass is
+            # worth waiting for BEFORE it has finished — the endpoint
+            # fires 0.35 s after the last voice and this starts at
+            # 0.18 s, so there is a sixth of a second of head start on
+            # a round trip that takes the best part of a second.
+            #
+            # I got that wrong once already: the reuse test asked who
+            # ANSWERED it, which is unknowable until it has, so the
+            # answer was always "nobody" and every turn paid for a
+            # second full pass. The device read `spec hits: 0` and
+            # stt 1.08-1.49 s against a 0.85 s baseline.
+            box = {"voice_ts": voice_ts, "done": ev, "text": "",
+                   "remote": bool(_remote_stt is not None
+                                  and _remote_stt.available())}
 
             def work():
                 # DO NOT DEPRIORITISE THE THREAD WE THEN WAIT ON.
@@ -8373,9 +8387,24 @@ class DoseVoice:
             # So: reuse it when the audio has not changed AND the Mac
             # is who answered it. A locally-speculated answer still
             # defers to the Mac, exactly as before.
-            _spec_by_mac = bool(spec and spec.get("by") == "mac")
+            # Whether the speculation was POINTED at the Mac, decided
+            # when it started — not who answered it, which is not
+            # known yet and was my mistake the first time.
+            _spec_remote = bool(spec and spec.get("remote"))
+            # SAY WHICH BRANCH RAN. Two attempts at this reuse have now
+            # gone wrong in ways that looked identical from the row —
+            # `spec_hit 0` covers "never started", "audio changed" and
+            # "refused", and those need three different fixes.
+            if not spec:
+                self._spec_why = "no speculation ran"
+            elif spec.get("voice_ts") != self._last_voice_ts:
+                self._spec_why = "more speech arrived after it started"
+            elif not (_spec_remote or not going_remote):
+                self._spec_why = "it was local and the Mac is up"
+            else:
+                self._spec_why = "reusing it"
             if spec and spec.get("voice_ts") == self._last_voice_ts \
-                    and (_spec_by_mac or not going_remote):
+                    and (_spec_remote or not going_remote):
                 # WAIT THE TURN BUDGET, NOT A ROUND NUMBER.
                 #
                 # This used to wait six seconds and then, if the
@@ -10137,6 +10166,7 @@ class DoseVoice:
                        for k in ("wav", "prompt", "call", "decode",
                                  "total", "audio")},
                 "spec_hit": getattr(self, "_spec_hits", 0),
+                "spec_why": getattr(self, "_spec_why", ""),
                 "spec_miss": getattr(self, "_spec_misses", 0),
                 "spec_wait": round(getattr(self, "_t_spec_wait", 0.0), 2),
                 "budget": STT_TURN_BUDGET,
@@ -10211,6 +10241,7 @@ class DoseVoice:
                 "synth": getattr(self, "_t_synth", None),
                 "stt_note": getattr(self, "_stt_note", ""),
                 "spec_hit": getattr(self, "_spec_hits", 0),
+                "spec_why": getattr(self, "_spec_why", ""),
                 "spec_miss": getattr(self, "_spec_misses", 0),
                 "quick": getattr(self, "_quick_hits", 0),
                 "warmed": bool(getattr(self, "_warmed", False)),

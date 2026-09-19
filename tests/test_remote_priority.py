@@ -212,12 +212,31 @@ check("the old cloud-only name is gone", "going_cloud" not in DVC)
 # an identical string. The device measured that mistake: speculation
 # hits 0, and stt up from 0.80-0.96s to 1.17-1.49s, because every
 # turn was making two requests and the second queued behind the first.
-check("a Mac-answered speculation is reused instead of re-asked",
-      "_spec_by_mac or not going_remote" in DVC,
+check("a Mac-pointed speculation is reused instead of re-asked",
+      "_spec_remote or not going_remote" in DVC,
       "two round trips for an identical string is slower, not safer")
-check("...and it only counts when the MAC is who answered it",
-      'spec.get("by") == "mac"' in DVC,
-      "a locally-speculated answer must still defer to the Mac")
+# AND IT ASKS THE RIGHT QUESTION. The first attempt tested who
+# ANSWERED the speculation — which is unknowable when finish() runs,
+# because the endpoint fires 0.35 s after the last voice and the
+# speculation starts at 0.18 s, so it has a sixth of a second of head
+# start on a round trip of nearly a second. The answer was therefore
+# always "nobody", every turn paid for a second full pass, and the
+# device read `spec hits: 0` with stt up from 0.85 s to 1.08-1.49 s.
+check("...decided by where it was POINTED, recorded when it started",
+      'spec.get("remote")' in DVC
+      and '"remote": bool(_remote_stt is not None' in DVC,
+      "who answered it is not known yet at that moment")
+check("...and it still waits for the answer before using it",
+      DVC.index("_spec_remote or not going_remote")
+      < DVC.index('spec["done"].wait('))
+check("a local speculation still defers to a Mac that is up",
+      "not going_remote" in DVC,
+      "reusing whisper-tiny.en when an M1 is idle on the LAN is the "
+      "bug this whole path exists to avoid")
+check("the row says WHICH branch ran, not just that it missed",
+      "_spec_why" in DVC and "spec_why" in DV,
+      "`spec_hit 0` covers never-started, audio-changed and refused, "
+      "and those need three different fixes")
 check("...and only when no new speech arrived",
       'spec.get("voice_ts") == self._last_voice_ts' in DVC)
 check("the speculation records who answered on a channel the live "
