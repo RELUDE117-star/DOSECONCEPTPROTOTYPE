@@ -389,8 +389,30 @@ def live_turns(items, app_dir, pad=0.6):
         # Wait for the engine to actually be listening before speaking
         # at it, rather than sleeping and hoping.
         if not wait_state(app_dir, "listening", 12.0):
-            say("    %-30s engine never entered 'listening'" % phrase)
-            rows.append({"phrase": phrase, "live": False})
+            # SAY WHICH IT IS. "engine never entered 'listening'"
+            # reads like a broken station, and four jobs went into
+            # proving one was deaf when it was not: a tone through the
+            # same speaker gave it `peak 16798, loud 172, called
+            # speech 172 (100%)` while this printed VERDICT: FAIL.
+            #
+            # The hook file is the tell. Writing it always succeeds —
+            # it is a file — but the app only CONSUMES it when
+            # DOSE_TEST_HOOKS is set for the service. Still sitting
+            # there means nothing was listening for it, which is a
+            # switch, not a fault.
+            if os.path.exists(hook):
+                say("    %-30s the app never picked up the "
+                    "push-to-talk hook — DOSE_TEST_HOOKS is not set "
+                    "for the service, so this is the TEST that cannot "
+                    "start a turn, not the station failing one"
+                    % phrase)
+                rows.append({"phrase": phrase, "live": False,
+                             "reason": "hook not consumed"})
+            else:
+                say("    %-30s hook taken, but the engine never "
+                    "entered 'listening' within 12s" % phrase)
+                rows.append({"phrase": phrase, "live": False,
+                             "reason": "no listening state"})
             continue
         time.sleep(pad)
         # THE SPEAKER, ADDRESSED DIRECTLY, FIRST — the same fix
@@ -789,9 +811,33 @@ def main():
     failed = [g for g in grades if g[1] != "PASS"]
     res["verdict"] = "PASS" if not failed else "FAIL"
     say("=" * 58)
-    say("  VERDICT: %s%s" % (res["verdict"],
-                             "" if not failed
-                             else "  (%s)" % ", ".join(g[0] for g in failed)))
+    # A TEST THAT COULD NOT RUN DID NOT FAIL.
+    #
+    # Every live turn came back "hook not consumed" — the app is not
+    # reading the push-to-talk file because DOSE_TEST_HOOKS is not set
+    # for the service — and this still printed VERDICT: FAIL with
+    # "understood (real turns)" against it. Four jobs went into
+    # proving a station deaf that was not: a tone through its own
+    # speaker gave it peak 16798 and a voice gate reading 172 of 172
+    # blocks as speech, while this said FAIL.
+    #
+    # An instrument that reports its own switch being off as the
+    # subject failing is worse than no instrument.
+    _blocked = [r for r in (live_rows or [])
+                if r.get("reason") == "hook not consumed"]
+    if _blocked and len(_blocked) == len(live_rows or []):
+        res["verdict"] = "NOT RUN"
+        say("  VERDICT: NOT RUN — no live turn could be STARTED.")
+        say("  The app is not consuming voice/ptt_request, which means")
+        say("  DOSE_TEST_HOOKS is not set for the service. Nothing")
+        say("  here is a measurement of the station. Add")
+        say("  Environment=DOSE_TEST_HOOKS=1 to the unit, reload, and")
+        say("  run this again.")
+    else:
+        say("  VERDICT: %s%s" % (res["verdict"],
+                                 "" if not failed
+                                 else "  (%s)"
+                                 % ", ".join(g[0] for g in failed)))
 
     if args.json:
         try:
