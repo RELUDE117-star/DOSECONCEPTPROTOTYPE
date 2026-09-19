@@ -2397,3 +2397,117 @@ four shells, and only a path should cross them.
 - `tests/test_security.py` and `tests/test_brain.py` fail on a clean checkout
   for reasons predating this work (test_security hardcodes
   `/home/user/DOSECONCEPTPROTOTYPE/`). Not regressions — but not green either.
+
+## Installing on the Pi without pushing first is a no-op — 2026-09-19
+
+Job 282 installed a new build on the station and verified it:
+
+    --- install ---
+      dose_voice: 8fb3146137420d3a7ae338eb8a280637
+
+Forty seconds and one restart later, the same job measured:
+
+    dose_voice.py on disk: bf8ade5ef5ccc0dfba3d09d73b8a327d
+
+That is the PREVIOUS build. Nothing was wrong with the install.
+`DOSE.sh` pulls from GitHub on start, GitHub still had the older
+commit, and the auto-update did exactly its job.
+
+**"GitHub is the source of truth" runs in both directions.** A change
+that is not pushed is not merely un-backed-up; it is actively
+temporary, with a lifetime of one restart. The order is:
+
+    commit -> bundle -> Mac fetch -> secret scan -> push ->
+    `git ls-remote` CONFIRMS the hash -> only then touch the device
+
+and the check that matters is the md5 of the file AFTER the restart,
+not after the install. Job 284 does it this way and the build
+survived.
+
+## The desktop icon kept un-trusting itself
+
+Ryan, repeatedly: "when i press it and then hit execute in terminal it
+takes forever for the app to start".
+
+That dialog is the file manager refusing to trust the `.desktop` file.
+Measured on the device: `metadata::trusted: true` at 09:20, gone by
+09:47. Two causes, both in `DOSE.sh`:
+
+1. **It rewrote `~/Desktop/DOSE.desktop` on EVERY start.** Replacing a
+   `.desktop` file discards its gio metadata, so the station
+   un-trusted its own icon every time it came up. It now writes only
+   when the content would actually change (`cmp -s`).
+2. **The re-trust could never have worked.** `dbus-launch gio set`
+   spawns a BRAND NEW private bus, writes the flag into it, and throws
+   it away. gio metadata lives in the desktop session's store. Use
+   `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus`.
+
+The same fact bites when READING it: `gio info` with no bus reports
+`trusted: 0` for a file that is trusted. Job 285 read 0 and job 284
+read 1, on the same unchanged file. Always name the bus.
+
+## Every intent trigger needs a VERB
+
+`" new medication "` was an add-a-medication trigger with no verb. One
+slot on Ryan's station is *named* "New Medication", so every sentence
+about that drug opened an intake flow:
+
+    "change the schedule for New Medication to 4 pm"
+        -> "Understood. New medication intake. First: what is the
+            medication called?"
+
+and once inside the flow it swallowed everything after it, so "what
+time is it" came back as "A number, Ryan. How many pills are in the
+bottle?". One over-greedy phrase, six broken intents.
+
+It was invisible in the container because my fixtures use tidy drug
+names. **Run the brain against the medications actually loaded on the
+device.** `xfer/flowtest_*.py` does that: it reads the real
+`med_data.json`, hands a COPY to a fake app, and never writes back.
+
+## A question can be the context a parser needs
+
+`parse_spoken_time()` refuses a lone number without context — right in
+general, because "take one tablet" must never become 1:00. But as the
+answer to "What time should it move to?", "seven" is unambiguous, and
+rejecting it made an unbreakable loop: the user says a time, is told
+it is not a time, says it again. `_time_answer()` retries with "at "
+prefixed, only at steps where the station just asked for a time.
+
+### Measurement traps added this session
+
+- **`stat -c %Y /proc/PID` is not a process start time.** It reported
+  a process started at 09:59 as older than a file installed at 09:56,
+  in the same run where that process's module imported cleanly and
+  passed 21 of 21 checks. Use `ps -o lstart=`.
+- **macOS has no `timeout`.** `timeout 180 python3 tests/x.py` on the
+  Mac is command-not-found, so all twelve suites reported FAIL having
+  never run. Twelve red lines that meant nothing is worse than none.
+- **Python puts the SCRIPT's directory first on `sys.path`.** A test
+  staged into a folder that also held an old `dose_voice.py` tested
+  that old module and reported the new features missing. Print
+  `module.__file__` and assert a marker from the build under test.
+- **A soak counted as two**, because matching "soak.sh" in a command
+  line also matched the `sudo ... bash .../soak.sh` wrapper. Twelfth
+  self-matching pattern here. Filter on `comm` first.
+- **`RC=$?` after a pipeline reads the LAST command's status**, not
+  the one you care about. A variable that looks like a check and reads
+  the wrong process is worse than no check.
+
+## The station is a workhorse now — measured 2026-09-19
+
+    SIGKILL -> gone at +10s, back at +20s, by itself, one instance
+    hearing at 47.7 blocks/sec, zero capture reopens
+    med_data.json  -rw-------   (0600, healed at startup AND on save)
+    43 GB free, 47.7'C, get_throttled 0x0 — never undervolted
+    26 threads, 73 fds, 2.6 GB available
+
+`Restart=always` and `RestartSec=5` were already in the unit.
+`StartLimitBurst=5` / `StartLimitIntervalSec=300` were NOT changed
+until job 286 — meaning the station survived one crash but would have
+given up after five in five minutes. Both are now 0: never give up.
+
+`tools/soak.sh` samples the station once a minute into
+`voice/soak.log`. `tools/trim_logs.sh` runs hourly from cron so no log
+can ever fill the card — a full SD card takes the station down and the
+medication data with it.
