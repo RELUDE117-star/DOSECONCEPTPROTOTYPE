@@ -1724,6 +1724,186 @@ and the owner disagree, suspect the measurement first.**
   cost (0.84 s); whatever remains is endpointing, the language layer and
   time-to-first-sound, and none of it has been broken down yet.
 
+## THE MAC COMPOSES CONVERSATION. THE PI OWNS EVERY FACT.
+
+**2026-09-19.** Ryan, after watching four scripted questions answered
+perfectly:
+
+    "What if it just wants to talk and say how are you. It should be
+     able to handle any conversation."
+
+and, separately, the rule that makes it safe:
+
+    "Keeping all sensitive information like medical on the pi where
+     its hold completely locally and then any unique talking info
+     thats not sensistve through the mac"
+
+`tools/dose_reply.py` is that split, and it is **structurally
+incapable of stating a fact** — no digit, no drug name, no time,
+ever. Anything touching medication returns `"defer"` and the Pi
+answers from its own data with the Mac shut.
+
+- **The reply rides back with the transcript**, in the same HTTP
+  response. A second request would cost a full round trip (0.85 s
+  measured) to replace a decision that already costs nothing: every
+  turn row reads `think: 0.00`. There was never any latency to win
+  here, and saying so to Ryan before building it was worth more than
+  the feature.
+- **Keyed by the transcript it was composed for**, not guarded by a
+  flag. The speculative pass and the real pass both write it, by
+  design. That is the fifth time this project has needed the
+  "two threads, one attribute" lesson and the first time it was
+  designed in rather than debugged out — a stale reply *cannot* be
+  spoken, because it cannot match.
+- **The replies are a CLOSED list, and the prewarm renders
+  `corpus()`** — the module's own tables, never a copy. A line that
+  is not in the TTS cache costs 2.2–3.4 s on the critical path. A
+  station that takes three seconds to say "Hello, Ryan" is not more
+  human; it is worse at the only thing it is for. This is also why
+  there is no model here: `compose()` returns `kind="none"` exactly
+  where one would go, on the rare path, never on "how are you".
+- **The same file runs on both machines.** Two copies would drift and
+  the drift would be silent and slow.
+- `tests/test_reply.py` (54 checks) caught two real faults while it
+  was being written: the medication guard classified **"good
+  morning"** as a medication question (it listed `morning`), so the
+  station would have gone silent on a greeting; and three chat
+  replies leaked medication words. Both were mine. Hence
+  `MED_WORDS` (strong, never exempt) split from `CONTEXT_WORDS`
+  (temporal, exempt only for an utterance that is nothing but a
+  greeting, anchored at both ends).
+
+## The Mac was keeping a medication record nobody called one
+
+Every transcript went to `~/.dose-server/server.log`, in full,
+forever:
+
+    stt[small.en] 1.80s of audio in 0.67s -> 'Did I take my aspirin today?'
+
+It was *useful* — reading those lines is how a bad test run turned
+out to be a person talking in the room — and being useful is exactly
+how a health record accumulates somewhere nobody thinks of as one.
+**102 such lines were on that Mac.**
+
+`_say()` now logs shape (`(6 words, 28 chars)`); the words need
+`DOSE_SERVER_LOG_TEXT=1`, off by default and unreachable from the
+network. Every diagnosis this project has actually needed from those
+lines — empty, prompt echo, a stranger talking — was a question about
+SHAPE. `--redact-log` cleaned the existing file and moved the
+original to `server.log.with-transcripts` rather than deleting it.
+
+## TLS, pinned, with no way to downgrade quietly
+
+Ryan: *"jsut make sure its encrypted"* and, a minute later, *"The MAC
+has to hear the audio in order to do the computing so please make
+sure it stays that way."* Both, and they are not in tension.
+
+- `tools/dose_cert.py --make` creates a self-signed certificate. **In
+  a separate tool on purpose**: `dose_server.py` is the one thing on
+  the Mac the Pi can reach, and its rule — no subprocess, anywhere,
+  with a test behind it — is not worth trading to save a file.
+- The Pi **pins that certificate**: `CERT_REQUIRED`,
+  `load_verify_locations(cafile=CERT)`, `check_hostname=False`
+  (the Mac's address is DHCP, so a name in the certificate is a thing
+  that silently stops matching). That is *stronger* than ordinary
+  HTTPS here — a compromised public CA buys an attacker nothing,
+  because the station will not accept a certificate it was not handed
+  during pairing.
+- **Neither end may fall back.** The server *refuses to serve* if its
+  certificate is broken; the client never retries in the clear. A
+  client that downgrades on handshake failure is a client an attacker
+  downgrades by breaking the handshake.
+- Verified on the device: `DOSE server on https://192.168.4.21:8765`,
+  and the station's own `dose_remote_stt.encrypted()` → `True`.
+- `tests/test_tls.py` (29 checks).
+
+## A DOCSTRING IS NOT AN INVARIANT
+
+`token()` said, in the file:
+
+    That happens ONCE, when the server starts — not per request
+
+and four lines away `_allowed()` built `"Bearer " + token()` on
+**every request**. Reading the keychain prompts. The Pi probes
+`/health` every few seconds while idle, so protecting the token
+bought Ryan a password dialog every few seconds, forever, unaffected
+by quitting the app — which is precisely what he reported, three
+times:
+
+    "it keeps reasking a bunch of tiems is that normal"
+    "i jsut exited the platform but it keeps asking for it"
+    "as I exited but it still keeps asking"
+
+I fixed the panel's five-second refresh first. That was real and it
+was the smaller half; *"I exited and it still asks"* was him telling
+me so, and it took two more turns to hear it. **Eighth time he read
+his device better than my instrument did.**
+
+Now: `_resolve_token()` asks once, `token()` caches, and the request
+path uses `token_now()`, which cannot reach the vault. Asserted from
+the syntax tree, because the next person to add a call in a handler
+will be as sure as I was.
+
+**And the worse bug underneath it:** when the keychain refused, the
+old code fell through, found no plaintext file (the protection step
+moves it aside), **minted a brand-new token and wrote it to disk**.
+Every Deny quietly re-keyed the server against a station that could
+no longer talk to it. A secret that is PRESENT but withheld is not a
+missing secret; `_resolve_token()` refuses rather than inventing one.
+
+## `git merge --ff-only` prints "Updating" and then fails
+
+    Updating ceeb258..9a4d1ed
+    head: ceeb258
+
+Both lines, from one job, one after the other. The merge announced
+the fast-forward and then could not check out, because the working
+tree was dirty — earlier jobs `cp` files into `repo/tools/` and those
+edits were still sitting there. `git push` then said **"Everything
+up-to-date"** and the sync check said **"IN SYNC"**, and both were
+true and meaningless: origin and the clone agreed, at the old commit.
+The station ran code that existed nowhere but two machines.
+
+The error explaining this is printed AFTER the Updating line, and
+every job in this project piped the merge through `tail -1`. **Fourth
+time a discarded error message has cost this project a day** — after
+`-q` on arecord, `stderr=DEVNULL` on the piper worker, and the
+worker's own exception.
+
+Rules: never `tail` a git merge; and never trust its output at all —
+`git rev-parse HEAD` against the **known wanted hash**, and treat a
+mismatch as fatal before pushing. `git reset --hard` to the bundle
+ref is the recovery, because the bundle is the truth (the container
+cut it and the device is already running those files).
+
+## READING A CAPPED FILE AS THOUGH IT WERE A RUN
+
+`voice/turns.jsonl` keeps the **last sixty rows** and rewrites the
+file. So `tail -12` returns the last twelve rows *that exist*, not
+the last twelve of this run — and after a short run, most of them are
+history.
+
+I read twelve rows, found four empty ones, and started diagnosing a
+fault. Two details in the same output disagreed with me:
+
+    reply=The time is 8:05 PM.        <- a "current" row
+    2026-09-18 21:54:50  stt[...]     <- the actual run
+
+and one row read `heard=Did I take my aspirin today?  I sp` — the
+tail of *"I spent like a day waiting in"*, the stranger talking in
+the room from job 255, days earlier.
+
+**This file already records this trap** (the harness once counted
+lines in this same capped file and called a healthy station FAIL,
+twice). I wrote that down and then made the neighbouring version of
+it.
+
+**Anything read out of `turns.jsonl` must be filtered by a timestamp
+inside a window recorded before the run**, and the Mac's request
+count in the same window is the cross-check: six phrases should
+produce six to twelve requests, and `requests: 1` is the tell that
+nothing else in the row set is about this run.
+
 ## Known limitations / TODO
 - `arecord -D default` fails with `Host is down` — the PipeWire ALSA plugin is
   not serving this user. Not blocking (the pinned `plughw:5,0` route works),

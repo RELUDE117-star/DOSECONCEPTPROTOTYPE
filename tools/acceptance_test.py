@@ -70,6 +70,39 @@ PHRASES = [
     ("how many pills do i have left", "pills_left"),
 ]
 
+# THE OTHER HALF OF THE JOB, AND IT HAD NEVER BEEN SPOKEN ALOUD.
+#
+# Ryan: "What if it just wants to talk and say how are you. It should
+# be able to handle any conversation."
+#
+# The list above is every phrase this harness has ever played, and
+# every one of them is a medication command. So the conversational
+# layer was verified by calling compose() on the device — which
+# proves the module works and proves NOTHING about a turn: not the
+# endpointer, not whether the reply was in the TTS cache, not whether
+# the Mac's answer survived the trip. Exactly the gap live_turns()
+# exists to close, left open for the one feature he asked for by
+# name.
+#
+# The criterion is different, deliberately. These have no medication
+# intent, so `understood` is the wrong question; the question is
+# whether the station ANSWERED LIKE A PERSON instead of shrugging.
+# A row with intent "chat" did. A row with intent "fallback" is the
+# station saying "I didn't catch that" to something it heard
+# perfectly, which is the whole complaint.
+CHAT_PHRASES = [
+    ("how are you", "chat"),
+    ("good morning", "chat"),
+    ("thank you", "chat"),
+    ("who are you", "chat"),
+    ("are you there", "chat"),
+    # AND ONE THAT MUST NOT BE CHAT. If the conversational layer ever
+    # starts answering this, it is improvising over medication and
+    # the split Ryan drew is broken. A run where all six come back
+    # "chat" is a FAILURE, not a better score.
+    ("what do i take today", "schedule"),
+]
+
 
 def say(msg):
     print(msg, flush=True)
@@ -522,6 +555,10 @@ def main():
                          "returns success into an unplugged HDMI port "
                          "looks exactly like a working one.")
     ap.add_argument("--phrases", type=int, default=len(PHRASES))
+    ap.add_argument("--conversation", action="store_true",
+                    help="speak conversational phrases instead of "
+                         "medication commands, and grade whether the "
+                         "station answered like a person")
     ap.add_argument("--min-understood", type=float, default=100.0)
     ap.add_argument("--max-wer", type=float, default=15.0)
     ap.add_argument("--max-stt", type=float, default=6.0)
@@ -597,6 +634,11 @@ def main():
     say("  vocabulary bias: %d medication name(s)" % len(MEDS))
 
     model = None
+    global PHRASES
+    if args.conversation:
+        PHRASES = CHAT_PHRASES
+        if args.phrases > len(PHRASES):
+            args.phrases = len(PHRASES)
     if not args.live_only:
         t0 = time.time()
         from faster_whisper import WhisperModel
@@ -745,6 +787,40 @@ def main():
             [(p, os.path.join(tmp, "say_%d.wav" % i))
              for i, (p, _w) in enumerate(PHRASES[:args.phrases])],
             APP_DIR)
+
+    if args.conversation and live_rows:
+        say("")
+        say("  ── DID IT ANSWER LIKE A PERSON ─────────────────────")
+        chat_ok = chat_bad = leak = 0
+        for r in live_rows:
+            if not r.get("live"):
+                continue
+            want = dict(CHAT_PHRASES).get(r.get("phrase"), "chat")
+            got = r.get("intent") or "?"
+            reply = str(r.get("reply") or "")
+            if want == "chat":
+                if got == "chat" and reply.strip():
+                    chat_ok += 1
+                    mark = "ok"
+                else:
+                    chat_bad += 1
+                    mark = "SHRUGGED"
+            else:
+                # The guard. Chat here would mean the module
+                # improvised over a medication question.
+                if got == "chat":
+                    leak += 1
+                    mark = "LEAKED INTO CHAT"
+                else:
+                    mark = "ok (the Pi answered it)"
+            say("    %-24s %-10s %-18s %r"
+                % (str(r.get("phrase"))[:24], got, mark, reply[:40]))
+        say("")
+        say("    answered like a person: %d    shrugged: %d"
+            % (chat_ok, chat_bad))
+        say("    medication questions that leaked into chat: %d  "
+            "(any number above 0 is a failure whatever else passed)"
+            % leak)
 
     hw1 = hardware()
     ok = [r for r in rows if "error" not in r and r.get("loopback") is not False]
