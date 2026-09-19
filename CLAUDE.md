@@ -1365,7 +1365,48 @@ Two related traps:
   `f"..."`, so the syntax-tree harvest skips them (it takes string
   literals inside list literals). They go in the prewarm list by hand.
 
-### The cache was wiped on every restart
+### NOT EVERY .onnx IN voice/ IS A VOICE — it was deleting Silero
+
+**The answer to "who keeps wiping the cache", and it is worse than the
+cache.** `dose_app._retire_other_voices()` globbed `*.onnx` and deleted
+anything that was not the Piper voice. **`silero_vad.onnx` lives in the
+same folder.** So on EVERY LAUNCH the station deleted its own
+voice-activity model, concluded that a voice had been retired, and
+wiped the entire pre-rendered reply cache as collateral. `DOSE.sh`'s
+retirement loop had the identical bug.
+
+The device's own purge log named it on the first restart after that log
+existed:
+
+```
+17:24:28 pid=351218 dose_app._retire_other_voices: 125 clips, retired silero_vad.onnx
+17:26:10 pid=352914 dose_app._retire_other_voices:  62 clips, retired silero_vad.onnx
+```
+
+The cache was the symptom. **The quieter cost is worse: the VAD model
+was re-downloaded on every boot, so a station with no internet ran with
+no voice-activity detection at all — having deleted a model it already
+had.** The fetch fails open, so nothing ever complained.
+
+The distinction the code was missing: **a Piper voice is a `.onnx` WITH
+a `.onnx.json` beside it.** Nothing else in that folder has one. That
+test plus `NON_VOICE_MODELS` (naming `silero_vad.onnx` outright) is the
+fix, in both places. `tests/test_migration.py` runs the real function
+against a seeded directory and asserts the VAD model survives, a
+foreign voice is still retired on sight, and — the whole bug in one
+check — with only her voice and the VAD model present, the clips are
+still there afterwards.
+
+**And the general lesson, which cost four jobs:** three different
+pieces of code could delete those clips, an attribute on `self` only
+witnesses its own object (the app builds more than one `DoseVoice`),
+and I guessed wrong twice from the outside. Every deleter now writes
+one line to `voice/cache_purges.log` — name, pid, count, reason — and
+the heartbeat prints the last of them. **When several things can cause
+one symptom, make each of them sign its own name before reasoning about
+which it was.**
+
+### The cache was wiped on every restart (the other half)
 
 ```
 221 ended with  61 clips  ->  222 started and found 35
