@@ -226,7 +226,8 @@ def unpin_peer():
 
 _MODEL = {}          # name -> loaded model, both resident
 _STATS = {"requests": 0, "audio_seconds": 0.0, "infer_seconds": 0.0,
-          "refused": 0, "vad_rescued": 0, "started": time.time()}
+          "refused": 0, "vad_rescued": 0, "bad_token": 0,
+          "started": time.time()}
 
 
 def log(msg):
@@ -396,11 +397,60 @@ def token(refresh=False):
     return val
 
 
+# ── AN UNATTENDED RESTART MUST NOT PUT A DIALOG ON HIS SCREEN ───────
+#
+# Ryan, after a night of deploys:
+#
+#     "I got a couple more of those rerequesting for access so I jsut
+#      typed password"
+#     "I dont want to see any more passwords asks for 24 hours at
+#      least I already typed it"
+#     "I dont want have to keep doing it over and over"
+#
+# He is right, and the cause is not the protection — it is me. The
+# server reads the keychain once at startup, which is correct and
+# costs one password. It only became "over and over" because I
+# restarted the server five times in one evening to deploy things.
+#
+# THE HONEST TRADE, stated rather than papered over: a secret that
+# only a person can release cannot also be available to a process
+# that starts while that person is asleep. Any cached copy on disk is
+# readable by anything running as him, which is precisely what the
+# keychain was adopted to stop. There is no arrangement that gives
+# both.
+#
+# So this switch says which of the two THIS START is choosing, out
+# loud, instead of a prompt nobody is there to answer timing out
+# after two minutes and falling through to a file whose contents
+# nobody has checked — which is exactly how the station spent an
+# hour being refused by its own Mac tonight.
+#
+# It weakens nothing that was not already true: the file is on disk
+# and readable either way. What it removes is a dialog with nobody in
+# front of it.
+TOKEN_FILE_ONLY = os.environ.get(
+    "DOSE_SERVER_TOKEN_FILE_ONLY", "").strip().lower() \
+    in ("1", "true", "yes", "on")
+
+
 def _resolve_token():
     """Where the value actually comes from. Called once per process.
 
     Split out from token() so the caching is visible and so a test
     can assert that the request path never reaches this."""
+    if TOKEN_FILE_ONLY:
+        log("DOSE_SERVER_TOKEN_FILE_ONLY is set: reading %s and NOT "
+            "asking the keychain. Nobody will be prompted by this "
+            "start. The keychain copy is untouched and the next "
+            "ordinary restart uses it again." % TOKEN_FILE)
+        try:
+            with open(TOKEN_FILE) as f:
+                t = f.read().strip()
+            if t:
+                return t, "file (asked for explicitly, no prompt)"
+        except Exception as e:
+            log("...and there is no readable token file: %s" % e)
+        return "", "none"
     v = _vault()
     held = bool(v is not None and v.supported() and v.present("mac-token"))
     if held:
@@ -410,13 +460,42 @@ def _resolve_token():
                 "— held in memory now, nothing will ask again until "
                 "this server restarts")
             return val, "keychain"
-        log("the keychain did not release the token (%s) — "
-            "falling back to the file" % (err or "refused"))
+        # THE KEYCHAIN HOLDS IT AND WOULD NOT HAND IT OVER.
+        #
+        # Usually because nobody was at the Mac: the dialog waits two
+        # minutes and an unattended restart at eleven at night times
+        # out. That happened, and what followed is the reason this
+        # comment is long.
+        #
+        # Falling back to the file is only correct if the file agrees
+        # with the keychain. It did not, because an EARLIER build
+        # minted a fresh token every time the keychain was denied —
+        # so the file held a random value nobody else had ever seen.
+        # The server came up happily on it and then refused the
+        # cabinet, its own paired station, two hundred times:
+        #
+        #     refused /health from 192.168.4.154: bad token
+        #
+        # Every layer reported success. The server was listening, TLS
+        # was up, the token "loaded". Only the station knew, and all
+        # it could say was that the Mac would not talk to it.
+        #
+        # So the fallback stays — a station that has never been
+        # through the protection step has to keep working — but it is
+        # now LOUD, and the state is carried out to --status and
+        # /health rather than living in one log line at startup.
+        log("THE KEYCHAIN DID NOT RELEASE THE TOKEN (%s). Falling "
+            "back to %s. If nobody was at this Mac, that is expected "
+            "— but if that file disagrees with the station, every "
+            "request will be refused as a bad token. Restart this "
+            "server while you are at the Mac and answer the dialog."
+            % (err or "refused", TOKEN_FILE))
     try:
         with open(TOKEN_FILE) as f:
             t = f.read().strip()
             if t:
-                return t, "file"
+                return t, ("file (THE KEYCHAIN WAS NOT ANSWERED)"
+                       if held else "file")
     except Exception:
         pass
 
@@ -700,6 +779,25 @@ class Handler(BaseHTTPRequestHandler):
             self._deny(503, "this server has no token yet")
             return False
         if not secrets.compare_digest(auth, want):
+            # NAME WHAT THIS ACTUALLY MEANS AFTER A FEW OF THEM.
+            #
+            # "bad token" from an unknown address is an intruder.
+            # "bad token" from the same address, over and over, is
+            # the paired station holding a DIFFERENT secret than
+            # this server — and that reads identically in the log
+            # while meaning the opposite. Two hundred of these went
+            # by saying nothing useful.
+            _STATS["bad_token"] = _STATS.get("bad_token", 0) + 1
+            if _STATS["bad_token"] in (3, 25, 100):
+                log("%d requests refused as a bad token, all from "
+                    "%s. That is not an intruder — that is your "
+                    "station, presenting a secret this server does "
+                    "not have. They are out of sync. This server's "
+                    "token came from: %s. Fix: restart this server "
+                    "at the Mac and answer the keychain dialog, or "
+                    "re-pair the station from the DOSE panel."
+                    % (_STATS["bad_token"], peer,
+                       _TOKEN.get("source") or "unknown"))
             self._deny(401, "bad token")
             return False
         # THE TOKEN IS WHAT EARNS THE PIN, and it has just been
@@ -729,6 +827,7 @@ class Handler(BaseHTTPRequestHandler):
                       # climbs has a capture problem the rescue is
                       # only papering over.
                       "vad_rescued": _STATS.get("vad_rescued", 0),
+                      "bad_token": _STATS.get("bad_token", 0),
                       "rtf": round(_STATS["infer_seconds"]
                                    / max(0.001, _STATS["audio_seconds"]), 3)})
             return
@@ -1007,6 +1106,7 @@ def main():
                             if tls_ready() else
                             "NOT ENCRYPTED — the audio crosses your "
                             "network in the clear"),
+             "token_source": _TOKEN.get("source") or "(not read yet)",
              "token_protected": protected,
              "token_protection": (
                  "keychain — a person must approve each read on this Mac"

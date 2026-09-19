@@ -24,6 +24,7 @@ Run:  python3 tests/test_tls.py
 """
 import ast
 import os
+import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -231,6 +232,42 @@ check("...and counted where it can be watched",
 check("a genuinely silent clip still comes back empty",
       "text2" in _tr and "if text2:" in _tr,
       "the rescue must not invent a transcript when there is none")
+
+print("\n── A RESTART WITH NOBODY THERE MUST NOT PROMPT ────────────")
+# "I dont want to see any more passwords asks for 24 hours at least
+# I already typed it". The prompts were deploy restarts, not the
+# design — but a dialog with nobody in front of it is worse than
+# useless: it waits two minutes and then falls through to a file
+# whose contents nobody checked, which is how the station spent an
+# hour being refused by its own Mac.
+check("there is an explicit way to start without asking",
+      "TOKEN_FILE_ONLY" in SRV)
+# FLATTEN THE SOURCE FIRST. These messages are written as adjacent
+# string literals across several lines, so a phrase that reads as one
+# sentence in the file does not exist as one substring of it. Three
+# checks failed on that alone — which is the same "grep the text"
+# mistake as everywhere else in this project, wearing a new hat.
+_FLAT = re.sub(r'"\s*\n\s*"', "", SRV)
+check("...and it says so in the log rather than being silent",
+      "NOT asking the keychain" in _FLAT)
+check("...and it is OFF unless deliberately set",
+      'os.environ.get(\n    "DOSE_SERVER_TOKEN_FILE_ONLY", "")' in SRV
+      or '"DOSE_SERVER_TOKEN_FILE_ONLY", ""' in SRV)
+check("...and it cannot be reached from the network",
+      "DOSE_SERVER_TOKEN_FILE_ONLY" not in
+      SRV.split("class Handler")[1],
+      "an environment switch is fine; a request that flips it is not")
+check("the honest trade is written down, not hidden",
+      "cannot also be available to a process" in SRV,
+      "a security note that oversells is worse than none")
+check("a keychain refusal now says what will break",
+      "every request will be refused as a bad token" in _FLAT,
+      "the old line said 'falling back to the file' and the file was "
+      "wrong, and nothing said so for two hundred requests")
+check("repeated bad tokens are diagnosed, not just counted",
+      "that is your station, presenting a secret this server does" in _FLAT)
+check("...and the source of this server's token is reported",
+      '"token_source"' in SRV)
 
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:
