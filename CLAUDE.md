@@ -1904,6 +1904,34 @@ count in the same window is the cross-check: six phrases should
 produce six to twelve requests, and `requests: 1` is the tell that
 nothing else in the row set is about this run.
 
+## `ast.parse` IS NOT A COMPILE CHECK
+
+Every job in this project gates an install with
+
+    python3 -c "import ast; ast.parse(open(f).read())"
+
+and that is weaker than it looks. `ast.parse` builds a tree; it does
+not run the compiler's symbol-table pass. So this sailed through it
+and onto the device:
+
+    SyntaxError: name 'PHRASES' is used prior to global declaration
+
+`global X` partway down a function that already read `X` higher up.
+A real error, in the installed file, invisible to the gate that
+exists to catch exactly that.
+
+It cost nothing this time — the harness refused to start and the
+station was never touched, which is the best possible version of the
+mistake. Next time it might be a file the app imports at boot.
+
+**Use the compiler:**
+
+    python3 -c "import py_compile,sys; py_compile.compile(sys.argv[1], doraise=True)" FILE
+
+and run it in the container before staging as well as on the device
+before installing. `ast.parse` stays useful for READING a file's
+structure in a test; it is not a substitute for compiling it.
+
 ## Known limitations / TODO
 - `arecord -D default` fails with `Host is down` — the PipeWire ALSA plugin is
   not serving this user. Not blocking (the pinned `plughw:5,0` route works),

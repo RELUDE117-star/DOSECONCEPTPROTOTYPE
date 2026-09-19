@@ -634,11 +634,15 @@ def main():
     say("  vocabulary bias: %d medication name(s)" % len(MEDS))
 
     model = None
-    global PHRASES
-    if args.conversation:
-        PHRASES = CHAT_PHRASES
-        if args.phrases > len(PHRASES):
-            args.phrases = len(PHRASES)
+    # A LOCAL, NOT A GLOBAL REBIND. My first version said
+    # `global PHRASES` partway down main(), which is a SyntaxError
+    # when the name is read earlier in the same function — and it is,
+    # by the --phrases default. Python refused to compile the file and
+    # the job printed the error instead of running, which is the best
+    # possible version of that mistake: nothing touched the station.
+    use_phrases = CHAT_PHRASES if args.conversation else PHRASES
+    if args.phrases > len(use_phrases):
+        args.phrases = len(use_phrases)
     if not args.live_only:
         t0 = time.time()
         from faster_whisper import WhisperModel
@@ -673,7 +677,7 @@ def main():
                 " a loopback through a speaker is the hardest case.")
 
     rows = []
-    for i, (phrase, want_intent) in enumerate(PHRASES[:args.phrases]):
+    for i, (phrase, want_intent) in enumerate(use_phrases[:args.phrases]):
         if args.live_only:
             src = os.path.join(tmp, "say_%d.wav" % i)
             tts = synth(phrase, src, voice)
@@ -785,7 +789,7 @@ def main():
         # audio is identical and only the path through the app differs.
         live_rows = live_turns(
             [(p, os.path.join(tmp, "say_%d.wav" % i))
-             for i, (p, _w) in enumerate(PHRASES[:args.phrases])],
+             for i, (p, _w) in enumerate(use_phrases[:args.phrases])],
             APP_DIR)
 
     if args.conversation and live_rows:
