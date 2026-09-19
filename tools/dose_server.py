@@ -92,7 +92,26 @@ MODEL_NAME = os.environ.get("DOSE_SERVER_MODEL", "small.en")
 # here, like /stt. The Pi picks one of two URLs and never sends a
 # name, so "no route takes a path, a filename, a command, a model
 # name or a shell fragment" stays literally true.
-FAST_MODEL_NAME = os.environ.get("DOSE_SERVER_FAST_MODEL", "base.en")
+#
+# CHOSEN AGAIN, AFTER THE DEVICE DISAGREED WITH THE BENCHMARK.
+#
+# base.en gave a median turn of 0.61 s and six of eight under a
+# second. It also transcribed "what do I take today" as "what two i
+# take today tomorrow", three times in one run, and the station
+# answered all three quickly and wrongly. Ryan's instruction covers
+# exactly that case: "It needs to be under 1 second AND correct on
+# what was actually said and what was transcribed and on how it
+# responds." A fast wrong answer is not a win.
+#
+# distil-small.en was 0.44 s in the same benchmark and got the drug
+# name right where base.en did not. The speculation starts 0.18 s into
+# a pause and the endpointer fires at 0.45 s, so 0.44 s means waiting
+# roughly 0.17 s at the end rather than nothing — a turn near 0.62 s
+# instead of 0.47 s, and correct.
+#
+# That is the trade, made deliberately and in this direction.
+FAST_MODEL_NAME = os.environ.get("DOSE_SERVER_FAST_MODEL",
+                                 "distil-small.en")
 
 # The device that may ask. Empty means "any private address", which is
 # still a LAN-only rule; setting it pins the server to one machine.
