@@ -1940,6 +1940,75 @@ The Mac composes conversation and declines medication, over TLS, with
 no transcript on its disk. Both acceptance runs PASS at 100%
 understood, worst turn 1.39 s and 1.5 s.
 
+## THE VAD WAS THROWING WHOLE TURNS AWAY, AND THE LOG SAID SO
+
+Roughly two turns a run came back empty. The Mac's own log names it
+in one number:
+
+    stt[distil-small.en] 2.22s of audio in 0.03s -> (nothing)
+    stt[small.en]        2.73s of audio in 0.05s -> (nothing)
+
+**Three hundredths of a second for two seconds of audio.** The model
+never ran. `vad_filter=True` decided there was no speech in the clip
+and returned nothing, and the station then said "I didn't catch
+that" about audio it had captured perfectly — the exact null answer
+Ryan warned about ("it might seem like it answered but really it was
+a null value").
+
+Silero's VAD is tuned for a person near a microphone. The harness
+plays through a loudspeaker across the room and the AIRHUG has AI
+vocal isolation that suppresses loudspeaker audio, so a quiet, real,
+perfectly intelligible clip measures as "not speech".
+
+**One retry with `vad_filter=False`, only when the first pass
+returned nothing.** Not a model change — Ryan was explicit that the
+models stay (`small.en` / `distil-small.en`) and neither moves. What
+changes is whether the model is asked at all. The cost lands only on
+turns that were already lost: a rejected clip costs 0.03 s, so the
+retry IS that turn's first real decode. A genuinely silent clip comes
+back empty again and nothing else changes.
+
+Every rescue is logged and counted (`vad_rescued` in `/health`),
+because a station where the recogniser constantly disagrees with the
+voice filter has a capture fault that this only papers over.
+
+## ONE MACHINE MAY TALK TO THE MAC, AND THE GATE HAD ALWAYS BEEN OFF
+
+Ryan: *"nothing should be able to talk to the Mac besides the pi"*.
+
+`_allowed()` had always had `if ALLOW_PEER and peer != ALLOW_PEER`,
+and `ALLOW_PEER` came from an environment variable **nobody ever
+set**. So the rule actually in force was "any private address, with
+the token" — every phone, laptop, television and smart plug on the
+network was one stolen token away from a service that accepts audio.
+A gate whose condition is empty is not a gate, and it read like one
+in every review of this file.
+
+The token was never weak. But it lives in a file on the Pi, the Pi
+updates itself from a PUBLIC repository, and the whole threat model
+here is that the Pi is the exposed end. "Holds the token" should not
+be sufficient; "holds the token AND is the cabinet" should be.
+
+**Trust on first use, earned by the token.** There is no address to
+hardcode — the Pi is on DHCP and a literal here is a thing that
+silently stops matching the day the lease changes. So the first
+caller that presents the CORRECT TOKEN is written to
+`~/.dose-server/peer` (0600) and is the only address accepted from
+then on. Nothing is pinned by merely connecting.
+
+- The pin is checked **before** the token, so anything that is not
+  the cabinet is refused without the server looking at what it
+  claims to hold.
+- A changed lease **is** refused, deliberately. A station that goes
+  quiet and says why beats a server that silently widens. The
+  refusal names the address and the command (`--unpin`), so it is a
+  minute of work.
+- `unpin_peer()` **blanks the file rather than deleting it**:
+  test_dose_server.py asserts this program never calls `os.remove`
+  and caught the first version doing so. The rule is worth more than
+  the tidiness — the one service the Pi can reach should not contain
+  the ability to delete a file at all.
+
 ## A redaction that knows only today's format is not a redaction
 
 `--redact-log` reported

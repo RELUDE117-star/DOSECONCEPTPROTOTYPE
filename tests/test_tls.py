@@ -189,7 +189,7 @@ CASES = [
     (True,  "10:00:00  dropped a prompt echo: 'Medication reminder device.'"),
     (False, "21:54:50  stt[distil-small.en] 0.9s in 0.7s -> (4 words, 16 chars)"),
     (False, "10:00:00  stt[small.en] 1.0s in 0.2s -> (nothing)  reply=none/x"),
-    (False, "10:00:00  DOSE server on https://192.168.4.21:8765  (/stt small.en)"),
+    (False, "10:00:00  DOSE server on https://<the-mac>:8765  (/stt small.en)"),
     (False, "10:00:00  token released from the keychain by someone at this Mac"),
 ]
 for want, line in CASES:
@@ -200,6 +200,37 @@ for want, line in CASES:
 check("the original is moved aside, never deleted",
       "with-transcripts" in SRV and "I have not deleted it" in SRV,
       "a redaction he cannot check is not a redaction")
+
+print("\n── THE VAD MAY NOT THROW A TURN AWAY SILENTLY ─────────────")
+# Two turns a run came back empty at 0.03s of decode for 2.22s of
+# audio — the model never ran, because vad_filter=True decided there
+# was no speech. The station then said "I didn't catch that" about
+# audio it had captured perfectly, which is exactly the null answer
+# Ryan warned about: "if it says nothing and the response is nothing
+# it might seem like it answered but really it was a null value".
+_tr = SRV.split("def transcribe(")[1]
+_tr = _tr[:_tr.index("\nclass ")]
+check("the first pass still uses the voice filter",
+      "vad_filter=True" in _tr,
+      "dropping it wholesale would put room noise through the "
+      "recogniser on every turn")
+check("a retry without it happens ONLY when nothing came back",
+      "if not text:" in _tr
+      and _tr.index("if not text:") < _tr.index("vad_filter=False"),
+      "an unconditional second decode would double every turn")
+check("...and it is the same model, not a different one",
+      _tr.count("load_model(") == 1,
+      "Ryan: 'Keep the models we already have' — this changes "
+      "whether the model is ASKED, never which model")
+check("a rescue is logged every time",
+      "rescued this turn" in SRV,
+      "a station where the filter constantly disagrees with the "
+      "recogniser has a capture fault this only papers over")
+check("...and counted where it can be watched",
+      '"vad_rescued": _STATS.get("vad_rescued", 0)' in SRV)
+check("a genuinely silent clip still comes back empty",
+      "text2" in _tr and "if text2:" in _tr,
+      "the rescue must not invent a transcript when there is none")
 
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:

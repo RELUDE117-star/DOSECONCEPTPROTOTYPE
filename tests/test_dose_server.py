@@ -96,8 +96,13 @@ _opens = [n for n in ast.walk(SRV)
           and n.func.id == "open"]
 check("every file it opens is a fixed path it owns, never one built "
       "from a request",
+      # The property is "a module-level constant this file owns",
+      # not "one of two specific names" — pinning the literal list
+      # made adding PEER_FILE look like a violation when it is
+      # exactly the same shape. Constants are UPPER_CASE here.
       all(isinstance(a.args[0], ast.Name)
-          and a.args[0].id in ("TOKEN_FILE", "LOG_FILE")
+          and a.args[0].id.isupper()
+          and a.args[0].id.endswith("_FILE")
           for a in _opens),
       [ast.dump(a.args[0])[:60] for a in _opens])
 check("it imports no process or serialisation machinery",
@@ -373,6 +378,52 @@ check("the docstring says the value is then held in memory",
       "held in memory" in open(
           os.path.join(ROOT, "tools", "dose_server.py"),
           encoding="utf-8").read())
+
+print("\n── ONLY THE CABINET MAY TALK TO THIS SERVER ────────────────")
+# Ryan: "nothing should be able to talk to the Mac besides the pi".
+#
+# The gate had always existed and had always been OFF: ALLOW_PEER
+# came from an environment variable nobody sets, so the rule in force
+# was "any private address, with the token" — every phone, laptop and
+# smart plug on his network one stolen token away from a service that
+# accepts audio.
+_SRVTXT = open(os.path.join(ROOT, "tools", "dose_server.py"),
+               encoding="utf-8").read()
+_allow = _SRVTXT.split("def _allowed(")[1]
+_allow = _allow[:_allow.index("\n    def ")]
+check("the peer pin is consulted on every request",
+      "pinned_peer()" in _allow)
+check("...BEFORE the token is compared",
+      _allow.index("pinned_peer()") < _allow.index("compare_digest"),
+      "anything that is not the cabinet should be refused without "
+      "this server looking at what it claims to hold")
+check("a wrong address is refused, not warned about",
+      "not the paired device" in _allow and "_deny(403" in _allow)
+check("...and the refusal says how to fix a changed lease",
+      "--unpin" in _allow,
+      "a pin that fails silently on a DHCP change costs an "
+      "afternoon; one that names the command costs a minute")
+check("the pin is only written AFTER the token is proved",
+      _allow.index("compare_digest") < _allow.index("pin_peer(peer)"),
+      "trust on first use is only safe when the first use had to "
+      "present the secret")
+check("...and pairing is logged loudly",
+      "PAIRED: this server now answers" in _SRVTXT)
+check("an explicit environment setting still wins",
+      "if ALLOW_PEER:" in _SRVTXT.split("def pinned_peer(")[1][:300])
+check("the pin survives a restart",
+      "PEER_FILE" in _SRVTXT and "os.O_CREAT" in
+      _SRVTXT.split("def pin_peer(")[1][:600])
+check("...at 0600",
+      "0o600" in _SRVTXT.split("def pin_peer(")[1][:600])
+check("only a real address can be pinned",
+      "ipaddress.ip_address(addr)" in
+      _SRVTXT.split("def pin_peer(")[1][:400])
+check("there is a way to undo it", "def unpin_peer(" in _SRVTXT
+      and '"--unpin"' in _SRVTXT)
+check("--status says which state it is in, in words",
+      "peer_state" in _SRVTXT and "not pinned yet" in _SRVTXT,
+      "'peer: ' with an empty value read as 'fine'")
 
 print("\n%d checks, %d failed" % (CHECKS[0], len(FAILURES)))
 if FAILURES:

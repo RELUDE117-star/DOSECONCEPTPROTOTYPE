@@ -140,9 +140,93 @@ FAST_MODEL_NAME = os.environ.get("DOSE_SERVER_FAST_MODEL",
 # still a LAN-only rule; setting it pins the server to one machine.
 ALLOW_PEER = os.environ.get("DOSE_SERVER_PEER", "").strip()
 
+# ── ONE MACHINE MAY TALK TO THIS SERVER ─────────────────────────────
+#
+# Ryan: "nothing should be able to talk to the Mac besides the pi".
+#
+# The gate below has always existed and has always been OFF, because
+# ALLOW_PEER comes from an environment variable nobody sets. So the
+# rule in force was "any private address, with the token" — every
+# phone, laptop, television and smart plug on his network was one
+# stolen token away from a service that accepts audio.
+#
+# The token was never weak. But it lives in a file on the Pi, the Pi
+# updates itself from a PUBLIC repository, and this station's whole
+# threat model is that the Pi is the exposed end. "Hold the token"
+# should not be sufficient; "hold the token AND be the cabinet"
+# should be.
+#
+# TRUST ON FIRST USE, AND ONLY WITH THE TOKEN. There is no address to
+# hardcode: the Pi is on DHCP, and a literal in this file is a thing
+# that silently stops matching the day the router hands out a
+# different lease. So the first caller that presents the CORRECT
+# TOKEN is written down, and from then on it is the only address
+# accepted. Nothing is pinned by merely connecting — an attacker who
+# reaches the port first still needs the secret, and if he has the
+# secret the pin was never what was protecting anything.
+#
+# WHEN THE LEASE CHANGES this refuses the real Pi, on purpose. That
+# is a deliberate trade: a station that goes quiet and says why in
+# one line beats a server that silently widens. The refusal names the
+# address, the fix, and the command, so it is a minute of work rather
+# than an afternoon.
+PEER_FILE = os.path.join(STATE_DIR, "peer")
+_PEER = {"addr": None, "read": False}
+
+
+def pinned_peer():
+    """The one address allowed to talk to this server, or None.
+
+    The environment variable still wins when it is set — explicit
+    configuration beats anything learned.
+    """
+    if ALLOW_PEER:
+        return ALLOW_PEER
+    if not _PEER["read"]:
+        _PEER["read"] = True
+        try:
+            with open(PEER_FILE) as f:
+                a = f.read().strip()
+            _PEER["addr"] = a or None
+        except Exception:
+            _PEER["addr"] = None
+    return _PEER["addr"]
+
+
+def pin_peer(addr):
+    """Write it down. Called only after a request proved the token."""
+    try:
+        ipaddress.ip_address(addr)
+    except Exception:
+        return False
+    os.makedirs(STATE_DIR, exist_ok=True)
+    fd = os.open(PEER_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(addr + "\n")
+    _PEER["addr"] = addr
+    _PEER["read"] = True
+    return True
+
+
+def unpin_peer():
+    """Forget the pinned address — by BLANKING the file, not deleting it.
+
+    test_dose_server.py asserts that this program never calls
+    os.remove, and it caught this function doing so. The rule is
+    worth more than the tidiness: the one service on the Mac that the
+    Pi can reach should not contain the ability to delete a file at
+    all, so that no future bug, however clever, can be walked into
+    one. An empty file reads as "not pinned" and costs nothing.
+    """
+    os.makedirs(STATE_DIR, exist_ok=True)
+    fd = os.open(PEER_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.close(fd)
+    _PEER["addr"] = None
+    _PEER["read"] = True
+
 _MODEL = {}          # name -> loaded model, both resident
 _STATS = {"requests": 0, "audio_seconds": 0.0, "infer_seconds": 0.0,
-          "refused": 0, "started": time.time()}
+          "refused": 0, "vad_rescued": 0, "started": time.time()}
 
 
 def log(msg):
@@ -480,6 +564,54 @@ def transcribe(wav_bytes, model_name=None):
         vad_filter=True, condition_on_previous_text=False,
         initial_prompt=PROMPT)
     text = " ".join(s.text for s in segs).strip()
+
+    # ── THE VAD THREW THE WHOLE TURN AWAY ───────────────────────────
+    #
+    # Roughly two turns in every run came back empty, and the log says
+    # exactly what happened rather than leaving it to be guessed:
+    #
+    #     stt[distil-small.en] 2.22s of audio in 0.03s -> (nothing)
+    #     stt[small.en]        2.73s of audio in 0.05s -> (nothing)
+    #
+    # **Three hundredths of a second for two seconds of audio.** The
+    # model never ran. `vad_filter=True` decided there was no speech
+    # in the clip and handed back nothing, and the station then said
+    # "I didn't catch that" about audio it had captured perfectly.
+    #
+    # That is the exact failure Ryan warned about:
+    #
+    #     "if it says nothing and the response is nothing it might
+    #      seem like it answered but really it was a null value so be
+    #      aware of that"
+    #
+    # Silero's VAD is tuned for a person near a microphone. This
+    # station's own test harness plays through a loudspeaker across
+    # the room, and the AIRHUG has AI vocal isolation that suppresses
+    # loudspeaker audio — so a quiet, real, perfectly intelligible
+    # clip measures as "not speech" and never reaches the recogniser.
+    #
+    # ONE RETRY, WITHOUT THE FILTER, ONLY WHEN THE FIRST PASS FOUND
+    # NOTHING. Not a model change — Ryan was explicit that the models
+    # stay as they are, and this changes neither. It changes whether
+    # the model is asked at all.
+    #
+    # The cost is bounded and lands only on turns that were already
+    # lost: a clip the VAD rejects costs 0.03s, so the retry is the
+    # first real decode of that turn, not a second one. A genuinely
+    # silent clip comes back empty again and the station behaves
+    # exactly as it did before.
+    vad_rescue = False
+    if not text:
+        segs2, _i2 = model.transcribe(
+            BytesIO(wav_bytes), language="en", beam_size=1,
+            vad_filter=False, condition_on_previous_text=False,
+            initial_prompt=PROMPT)
+        text2 = " ".join(s.text for s in segs2).strip()
+        if text2:
+            text = text2
+            vad_rescue = True
+            _STATS["vad_rescued"] = _STATS.get("vad_rescued", 0) + 1
+
     if _is_prompt_echo(text):
         # THE MODEL HANDING THE PROMPT BACK.
         #
@@ -501,6 +633,14 @@ def transcribe(wav_bytes, model_name=None):
         log("dropped a prompt echo: %s" % _say(text))
         text = ""
     took = time.time() - t0
+    if vad_rescue:
+        # SAY SO, EVERY TIME. A rescue is the recogniser disagreeing
+        # with the voice-activity detector about whether anybody
+        # spoke, and a station where that happens constantly has a
+        # capture problem this is only papering over. The count is in
+        # /health too, so it can be watched rather than assumed.
+        log("the voice filter found no speech and the model did — "
+            "rescued this turn (%d so far)" % _STATS["vad_rescued"])
     _STATS["audio_seconds"] += secs
     _STATS["infer_seconds"] += took
     return text, secs, took
@@ -538,8 +678,17 @@ class Handler(BaseHTTPRequestHandler):
         if not is_private(peer):
             self._deny(403, "not a local address")
             return False
-        if ALLOW_PEER and peer != ALLOW_PEER:
-            self._deny(403, "not the paired device")
+        # THE PIN IS CHECKED BEFORE THE TOKEN, when there is one.
+        # Anything that is not the cabinet is refused without this
+        # server ever looking at what it claims to hold — which is
+        # the point of having the pin as well as the secret.
+        _pin = pinned_peer()
+        if _pin and peer != _pin:
+            self._deny(403,
+                       "not the paired device (this server answers "
+                       "%s only). If the cabinet's address changed, "
+                       "re-pin it: python3 tools/dose_server.py "
+                       "--unpin" % _pin)
             return False
         auth = self.headers.get("Authorization", "")
         # token_now(), NEVER token(). See token_now()'s comment: this
@@ -553,6 +702,15 @@ class Handler(BaseHTTPRequestHandler):
         if not secrets.compare_digest(auth, want):
             self._deny(401, "bad token")
             return False
+        # THE TOKEN IS WHAT EARNS THE PIN, and it has just been
+        # proved. Only reached when nothing was pinned yet.
+        if not _pin:
+            if pin_peer(peer):
+                log("PAIRED: this server now answers %s and nothing "
+                    "else. Everything on this network other than the "
+                    "cabinet is refused from here on, whatever token "
+                    "it holds. To undo: "
+                    "python3 tools/dose_server.py --unpin" % peer)
         return True
 
     def do_GET(self):
@@ -565,6 +723,12 @@ class Handler(BaseHTTPRequestHandler):
             self._ok({"ok": True, "model": MODEL_NAME,
                       "fast_model": FAST_MODEL_NAME,
                       "uptime": round(up), "requests": _STATS["requests"],
+                      # How often the recogniser disagreed with the
+                      # voice filter about whether anybody spoke.
+                      # Watched, not assumed: a station where this
+                      # climbs has a capture problem the rescue is
+                      # only papering over.
+                      "vad_rescued": _STATS.get("vad_rescued", 0),
                       "rtf": round(_STATS["infer_seconds"]
                                    / max(0.001, _STATS["audio_seconds"]), 3)})
             return
@@ -773,7 +937,10 @@ def serve(host=None, port=8765, preload=True):
             "--make")
     log("DOSE server on %s://%s:%d  (/stt %s, /stt-fast %s)"
         % (scheme, host, port, MODEL_NAME, FAST_MODEL_NAME))
-    log("paired device: %s" % (ALLOW_PEER or "any address on this LAN"))
+    _p = pinned_peer()
+    log("paired device: %s" % (_p or
+        "NOT PINNED YET — the first caller with the right token "
+        "becomes the only one accepted"))
     log("token is in %s — install it on the Pi, never anywhere else" % TOKEN_FILE)
     try:
         httpd.serve_forever()
@@ -792,11 +959,33 @@ def main():
                     help="print the shared secret, for installing on the Pi")
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--no-preload", action="store_true")
+    ap.add_argument("--pin", default="",
+                    help="pin this server to one address (the cabinet)")
+    ap.add_argument("--unpin", action="store_true",
+                    help="forget the pinned address; the next caller "
+                         "with the right token becomes the new one")
     ap.add_argument("--redact-log", action="store_true",
                     help="strip transcripts out of this Mac's server log")
     a = ap.parse_args()
     if a.token:
         print(token())
+        return 0
+    if a.pin:
+        if pin_peer(a.pin.strip()):
+            print("pinned: this server will answer %s and nothing "
+                  "else." % a.pin.strip())
+            print("Restart the server for it to take effect on a "
+                  "running process.")
+            return 0
+        print("%r is not an address. Nothing was changed." % a.pin)
+        return 2
+    if a.unpin:
+        was = pinned_peer()
+        unpin_peer()
+        print("unpinned (was %s)." % (was or "nothing"))
+        print("The next caller presenting the correct token becomes "
+              "the only accepted address. Restart the server, then "
+              "let the cabinet make one request.")
         return 0
     if a.redact_log:
         return redact_log()
@@ -823,7 +1012,13 @@ def main():
                  "keychain — a person must approve each read on this Mac"
                  if protected else
                  "PLAINTEXT FILE — anything running as you can read it"),
-             "peer": ALLOW_PEER or "any private address"},
+             "peer": pinned_peer() or "",
+             "peer_state": (
+                 ("pinned to %s — nothing else on this network can "
+                  "talk to this server" % pinned_peer())
+                 if pinned_peer() else
+                 "not pinned yet — the first caller with the correct "
+                 "token becomes the only one accepted")},
             indent=1))
         return 0
     if a.serve:

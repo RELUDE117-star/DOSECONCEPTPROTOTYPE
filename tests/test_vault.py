@@ -227,8 +227,15 @@ print("\n── the server prefers it, and still works without it ────�
 # cache in front of it and token_now() is what a request may use.
 tok = SRV.split("def _resolve_token(")[1]
 tok = tok[:tok.index("\ndef ")]
+# THE WHOLE FUNCTION, not a fixed slice of it. This was [:900] and
+# the peer pin pushed token_now() past character 900, so the check
+# started failing on code that was correct. CLAUDE.md already records
+# a test that sliced a function body as a fixed 3000 characters and
+# broke when a docstring grew. Same mistake, same file.
+_ALLOWED_CODE = SRV.split("def _allowed(")[1]
+_ALLOWED_CODE = _ALLOWED_CODE[:_ALLOWED_CODE.index("\n    def ")]
 _ALLOWED_CODE = "\n".join(
-    ln for ln in SRV.split("def _allowed(")[1][:900].splitlines()
+    ln for ln in _ALLOWED_CODE.splitlines()
     if not ln.lstrip().startswith("#"))
 check("asking the keychain happens in ONE place, called once",
       "def _resolve_token(" in SRV and "def token_now(" in SRV,
