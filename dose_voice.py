@@ -3174,7 +3174,7 @@ class DoseVoice:
         return done.wait(PROBE_CLOSE_TIMEOUT)
 
     def _probe_device(self, index, native_rate, deadline=None):
-        """Open a device briefly and measure real signal (RMS).
+        """Open a device briefly and measure real signal (PEAK).
 
         Returns (rms, usable_rate), or None if it can't open, runs out
         of time, or wedges on close. Bounded absolutely: no single
@@ -3227,7 +3227,15 @@ class DoseVoice:
                 continue
             try:
                 import audioop
-                rms = audioop.rms(data, 2)
+                # PEAK, NOT RMS — the fourth place in this file that
+                # needed this and the third that had it wrong. The
+                # docstring above still says RMS because that is what
+                # it used to be; the name of the value is not the
+                # point, the DECISION is, and the decision is "did
+                # this device deliver any signal at all". A dead
+                # endpoint measures peak 0; a real microphone in a
+                # silent room measures 29+. RMS measures 0 for both.
+                rms = audioop.max(data, 2)
             except Exception:
                 rms = 1
             return rms, rate
@@ -4202,15 +4210,44 @@ class DoseVoice:
                 "hw:%d,%d" % (card, device),
                 "sysdefault:CARD=%d" % card,
                 "default"]
+        # ── THIS FUNCTION HAD BOTH OF THIS PROJECT'S AUDIO BUGS ────
+        #
+        # It is what "select microphone" runs, and Ryan reported it
+        # hearing nothing while the hold-the-logo path heard him
+        # perfectly. Two independent causes, BOTH already written down
+        # in CLAUDE.md, both sitting in one function nobody re-read
+        # after learning them:
+        #
+        # 1. `-c 1`. "ROOT CAUSE: ALSA was averaging the microphone
+        #    away." The AIRHUG's only native mode is 48 kHz S16_LE
+        #    **two channels**. Asking for one does not hand over the
+        #    microphone — it asks ALSA's plug layer to AVERAGE the
+        #    two, and this capsule's quiet-room floor is one or two
+        #    LSB, so (1 + 0) / 2 rounds to ZERO. Measured, same card,
+        #    same room, twelve seconds each:
+        #
+        #        -c 1  peak 103   non-zero    740 / 570,000
+        #        -c 2  peak 294   non-zero  3,308 / 1,152,000
+        #
+        # 2. `audioop.rms()`. "Device liveness is peak, never RMS."
+        #    The dead card and the real microphone both measure RMS 0;
+        #    peak separates them perfectly (0 against 29+).
+        #
+        # So the probe asked for the one channel layout that destroys
+        # the signal, and then measured it with the one statistic that
+        # cannot see what survived. Native channels first, peak as the
+        # verdict, and RMS kept alongside because it is genuinely
+        # useful for judging LOUDNESS once you know there is signal.
         import audioop
         for dev in devs:
             for rate in (48000, 44100, 16000):
+              for chans in (2, 1):
                 fd, path = tempfile.mkstemp(suffix=".wav")
                 os.close(fd)
                 try:
                     r = subprocess.run(
                         ["arecord", "-D", dev, "-f", "S16_LE",
-                         "-r", str(rate), "-c", "1",
+                         "-r", str(rate), "-c", str(chans),
                          "-d", str(int(seconds)), path],
                         capture_output=True, text=True,
                         timeout=seconds + 6, env=self._audio_env())
@@ -4220,8 +4257,20 @@ class DoseVoice:
                         continue
                     with wave.open(path) as w:
                         data = w.readframes(w.getnframes())
-                    rms = audioop.rms(data, 2) if data else 0
-                    return (rms, "%s @%dHz" % (dev, rate))
+                    if not data:
+                        note = "opened but delivered no audio"
+                        continue
+                    peak = audioop.max(data, 2)
+                    rms = audioop.rms(data, 2)
+                    # A device that opens and delivers pure silence is
+                    # not a microphone. Keep looking rather than
+                    # reporting the first thing that did not error.
+                    if peak <= 0 and chans == 2:
+                        note = "%s @%dHz %dch: opened, peak 0" % (
+                            dev, rate, chans)
+                        continue
+                    return (peak, "%s @%dHz %dch (peak %d rms %d)"
+                            % (dev, rate, chans, peak, rms))
                 except Exception as e:
                     note = str(e)[:80]
                 finally:
@@ -6437,9 +6486,14 @@ class DoseVoice:
             # for Vosk. This adapts to ANY mic quietness with no fixed
             # threshold a faint mic could never cross.
             rms_raw = 0
+            peak_raw = 0
             try:
                 import audioop
                 rms = rms_raw = audioop.rms(data, 2)
+                # PEAK, SEPARATELY, BEFORE ANY GAIN. The level meter
+                # and the Settings mic test need this and nothing else
+                # does — see the probe at the bottom of ingest().
+                peak_raw = audioop.max(data, 2)
                 # ── AMBIENT NOISE FLOOR ──────────────────────────────
                 # Both directions move as an average. This used to
                 # snap straight down to the quietest block seen and
@@ -6573,12 +6627,55 @@ class DoseVoice:
                     data = audioop.mul(data, 2, self._gain)
             except Exception:
                 pass
+            # ── THE LEVEL METER MEASURED RMS AND CALLED IT max ──
+            #
+            # Ryan:
+            #
+            #     "When I try audio test it never hears anything but
+            #      when I use the regular Dose hold logo it works"
+            #     "i just tried the select microhpone thing and
+            #      although it could hear me with the dose logo path
+            #      when i went to check how much it heard it did
+            #      nothing"
+            #
+            # Both halves of that are true at once, and this line is
+            # why. The key is named "max", the docstring says "peak",
+            # and the value was `audioop.rms(data, 2)`.
+            #
+            # This project has measured what that difference costs, on
+            # this exact microphone, and written it down (CLAUDE.md,
+            # "THE MICROPHONE FAULT"):
+            #
+            #     route                      RMS    PEAK
+            #     card 5 plughw:5,0           0      29
+            #     card 5 via sysdefault:5     0     107
+            #     card 4 (dead device)        0       0
+            #
+            # RMS separates none of them. And this is worse than that
+            # table, because the probe sees ONE 21 ms block at a time:
+            # only ~1.2% of blocks in this room carry a non-zero
+            # sample, so the RMS of a single block rounds to zero even
+            # while somebody is talking. `_voice_mic_test` then asks
+            # `if level <= 5` and reports a dead microphone.
+            #
+            # The engine has always used PEAK for exactly this
+            # decision (ROUTE_LIVE_PEAK), which is why recognition
+            # worked perfectly while the meter beside it read zero.
+            # The station was never deaf; the instrument was.
+            #
+            # FOURTH time this project has confused the two — after
+            # route liveness, the stereo downmix, and the silence
+            # watchdog. All four were the same shape: a name or a
+            # comment saying peak over a call that computes RMS.
             lp = self._level_probe
             if lp and time.time() < lp["until"]:
                 try:
                     import audioop
-                    lp["max"] = max(lp["max"], audioop.rms(data, 2))
-                    lp["raw"] = max(lp.get("raw", 0), rms_raw)
+                    # Post-gain, which is what the recogniser receives.
+                    lp["max"] = max(lp["max"], audioop.max(data, 2))
+                    # Pre-gain, which is what the microphone physically
+                    # delivered. 0 here means truly nothing arrived.
+                    lp["raw"] = max(lp.get("raw", 0), peak_raw)
                 except Exception:
                     pass
             try:
