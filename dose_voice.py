@@ -2797,6 +2797,12 @@ class DoseVoice:
         if not audio_bytes:
             return vosk_text
         t_start = time.time()
+        # Which engine actually answered, on a channel BOTH passes can
+        # write. self._last_engine is guarded by _recording() so the
+        # speculation cannot stamp its name on a live turn — correct,
+        # and the reason finish() needs this to decide whether the
+        # speculative answer is worth reusing.
+        _TL.engine = ""
         audio_bytes = self._trim_silence(audio_bytes)
         # NOT ENOUGH AUDIO TO CONTAIN A QUESTION.
         #
@@ -2870,6 +2876,7 @@ class DoseVoice:
                         self._wav_bytes(audio_bytes))
                     r_secs = time.time() - t_r
                     if rtext and self._usable(rtext):
+                        _TL.engine = "mac"
                         if _recording():
                             self._t_fast = time.time() - t_start
                         if _recording():
@@ -8265,6 +8272,12 @@ class DoseVoice:
                     box["text"] = self._better_transcribe(
                         snapshot, hint, allow_cloud=False,
                         allow_remote=True)
+                    # WHO ANSWERED IT, so finish() can tell whether
+                    # this is worth reusing. Not self._last_engine —
+                    # that is guarded by _recording() precisely so this
+                    # thread cannot write it, which is the right rule
+                    # and the reason a separate channel is needed.
+                    box["by"] = getattr(_TL, "engine", "")
                 except Exception:
                     box["text"] = ""
                 finally:
@@ -8336,8 +8349,33 @@ class DoseVoice:
             # the race by starting first.
             going_remote = (self._remote_ready()
                             or (self._cloud_enabled() and self._is_online()))
-            if not going_remote and spec \
-                    and spec.get("voice_ts") == self._last_voice_ts:
+            # ...AND THEN THAT RULE INVERTED, because the speculation
+            # is no longer the weaker thing.
+            #
+            # `not going_remote` was written when this pass ran
+            # whisper-tiny.en on the Pi: reusing it would have thrown
+            # away a much better recogniser sitting on the LAN, so the
+            # turn was always re-done properly. Correct then.
+            #
+            # The speculation now uses the Mac itself. When it does,
+            # its answer IS what a fresh Mac call would return — the
+            # same audio, the same model, already finished — and
+            # re-asking is a second round trip for an identical
+            # string. The device showed the cost of not noticing:
+            #
+            #   speculation hits: 0      stt 1.17-1.49s
+            #
+            # against 0.80-0.96 s before the speculation started
+            # calling the Mac, because every turn was now making TWO
+            # requests and the second queued behind the first. I made
+            # it slower by half a second and the counter said so.
+            #
+            # So: reuse it when the audio has not changed AND the Mac
+            # is who answered it. A locally-speculated answer still
+            # defers to the Mac, exactly as before.
+            _spec_by_mac = bool(spec and spec.get("by") == "mac")
+            if spec and spec.get("voice_ts") == self._last_voice_ts \
+                    and (_spec_by_mac or not going_remote):
                 # WAIT THE TURN BUDGET, NOT A ROUND NUMBER.
                 #
                 # This used to wait six seconds and then, if the

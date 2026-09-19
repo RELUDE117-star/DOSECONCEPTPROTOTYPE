@@ -202,8 +202,31 @@ check("the speculation short-circuit asks about the MAC, not only "
       "with no cloud credential this was always False, and the local "
       "speculation was returned every single turn")
 check("the old cloud-only name is gone", "going_cloud" not in DVC)
-check("...and the short-circuit is the thing guarded by it",
-      "if not going_remote and spec" in DVC)
+# AND THEN THAT GUARD INVERTED, on purpose.
+#
+# `not going_remote` was right when the speculation ran
+# whisper-tiny.en on the Pi: reusing it would have thrown away a much
+# better recogniser on the LAN. The speculation uses the MAC now, so
+# its answer is what a fresh Mac call would return — same audio, same
+# model, already finished — and re-asking is a second round trip for
+# an identical string. The device measured that mistake: speculation
+# hits 0, and stt up from 0.80-0.96s to 1.17-1.49s, because every
+# turn was making two requests and the second queued behind the first.
+check("a Mac-answered speculation is reused instead of re-asked",
+      "_spec_by_mac or not going_remote" in DVC,
+      "two round trips for an identical string is slower, not safer")
+check("...and it only counts when the MAC is who answered it",
+      'spec.get("by") == "mac"' in DVC,
+      "a locally-speculated answer must still defer to the Mac")
+check("...and only when no new speech arrived",
+      'spec.get("voice_ts") == self._last_voice_ts' in DVC)
+check("the speculation records who answered on a channel the live "
+      "turn does not own",
+      'box["by"] = getattr(_TL, "engine", "")' in DVC
+      and "_TL.engine" in DVC,
+      "self._last_engine is guarded by _recording() so this thread "
+      "cannot write it — that is the right rule, and the reason a "
+      "separate channel is needed")
 check("the Mac is still tried before the local models",
       DVC.index("_remote_stt.available()")
       # NOT the exact call text — it gained a `budget` argument and
