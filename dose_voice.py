@@ -8423,6 +8423,27 @@ class DoseVoice:
                 if spec.get("text"):
                     self._spec_hits = getattr(self, "_spec_hits", 0) + 1
                     self._t_spec_wait = waited
+                    # NAME THE ENGINE ON THIS PATH TOO.
+                    #
+                    # It returned without touching _last_engine, so
+                    # the row carried whatever the PREVIOUS turn left
+                    # there. The device printed `mac (unclear)` beside
+                    # two turns it had understood perfectly — a label
+                    # from a turn that had finished a minute earlier.
+                    #
+                    # Seventh instance of a field that is not written
+                    # on one path being read as though it were. The
+                    # others were all two threads; this one is two
+                    # code paths, which is the same mistake standing
+                    # slightly differently.
+                    self._t_fast = waited
+                    self._t_slow = 0.0
+                    self._last_engine = ("mac (early)"
+                                         if spec.get("remote")
+                                         else "local (early)")
+                    self._stt_note = (
+                        "transcribed while he was still talking; "
+                        "waited %.2fs for it at the end" % waited)
                     return spec["text"]
                 # It really did run out of budget. Count it: a station
                 # whose speculation never lands is doing every turn
