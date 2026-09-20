@@ -59,7 +59,54 @@ PANEL_PORT = int(os.environ.get("DOSE_PANEL_PORT", "8766"))
 SERVER_PORT = int(os.environ.get("DOSE_SERVER_PORT", "8765"))
 
 SESSION = secrets.token_urlsafe(24)
+# WHERE THE SESSION KEY LIVES SO THE PANEL CAN BE REOPENED.
+#
+# It used to live only in this process's memory. That made the
+# already_running() path below a trap: it opened the BARE url, with
+# no key, so the page loaded and then every call it made came back
+# 403 "stale window". Reopening the panel the normal way handed Ryan
+# a dead panel — every button silently refusing — and the only way
+# back was to find and kill the process.
+#
+# Owner-only, beside the other secrets in ~/.dose-server. The key is
+# what stops any OTHER program on this Mac from driving the panel by
+# guessing a URL, so it gets the same 0600 treatment as the token,
+# and it is rewritten on every start so a stale one cannot linger.
+SESSION_FILE = os.path.join(STATE_DIR, "panel-session")
 _SRV = {"proc": None}
+
+
+def write_session():
+    """Record this process's key, owner-readable only."""
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        fd = os.open(SESSION_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                     0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(SESSION)
+        os.chmod(SESSION_FILE, 0o600)
+        return True
+    except Exception:
+        return False
+
+
+def read_session():
+    """The running panel's key, or "" if there is not one to read."""
+    try:
+        with open(SESSION_FILE) as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def clear_session():
+    """Blank it rather than delete it, so the mode survives."""
+    try:
+        fd = os.open(SESSION_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                     0o600)
+        os.close(fd)
+    except Exception:
+        pass
 
 
 def run(args, stdin_text=None, timeout=25):
@@ -628,12 +675,22 @@ def main():
     write_ssh_shortcut()
     if already_running():
         # Show the one that is already there rather than dying next to
-        # it. The session key belongs to that process, so the browser
-        # goes to the bare URL and it redirects.
-        print("DOSE panel already running: http://127.0.0.1:%d/"
-              % PANEL_PORT, flush=True)
+        # it. Its key is on disk, so the browser can be sent to a URL
+        # that actually WORKS — the comment here used to say the bare
+        # URL "redirects", and it does not: it serves the page with no
+        # key and every call the page makes comes back 403.
+        k = read_session()
+        if k:
+            url = "http://127.0.0.1:%d/?k=%s" % (PANEL_PORT, k)
+            print("DOSE panel already running; reopening it", flush=True)
+        else:
+            url = "http://127.0.0.1:%d/" % PANEL_PORT
+            print("DOSE panel is running but its key could not be read "
+                  "from %s — the window will open unable to do "
+                  "anything. Quit that panel and start this one "
+                  "again." % SESSION_FILE, flush=True)
         try:
-            webbrowser.open("http://127.0.0.1:%d/" % PANEL_PORT)
+            webbrowser.open(url)
         except Exception:
             pass
         return 0
@@ -659,6 +716,7 @@ def main():
             pass
         return 1
     httpd.daemon_threads = True
+    write_session()
     url = "http://127.0.0.1:%d/?k=%s" % (PANEL_PORT, SESSION)
     print("DOSE panel: %s" % url, flush=True)
     threading.Timer(0.6, lambda: webbrowser.open(url)).start()
@@ -666,6 +724,7 @@ def main():
         httpd.serve_forever()
     except KeyboardInterrupt:
         a_server_stop()
+        clear_session()
         print("closed")
     return 0
 
