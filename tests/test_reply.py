@@ -184,9 +184,42 @@ check("compose() checks is_medical before matching any reply",
 check("a digit alone is enough to defer",
       "HAS_DIGIT" in SRC and "HAS_DIGIT.search" in
       SRC.split("def is_medical(")[1][:700])
-check("a strong medication word is never exempt",
-      "MED_WORDS.search(t) or HAS_DIGIT.search(t)" in SRC,
-      "the greeting exemption must not reach the words that matter")
+# ASSERTED BY BEHAVIOUR, NOT BY GREPPING THE LINE.
+#
+# This used to check that the source contained, character for
+# character, "MED_WORDS.search(t) or HAS_DIGIT.search(t)". A correct
+# edit to that line then failed the test while the property it cares
+# about held perfectly — which is the same class of mistake this
+# project has now made a dozen times: asserting the spelling of an
+# implementation instead of the thing it does.
+#
+# What actually matters: no exemption, present or future, may let a
+# strong word or a digit through. So try to sneak each one past every
+# exemption there is.
+STRONG = [w for w in re.findall(r"[a-z]{3,}", R.MED_WORDS.pattern)
+          if w not in ("the",)]
+escaped = []
+for w in STRONG:
+    for wrap in ("%s", "hello %s", "good morning %s",
+                 "hey how is it going %s today",
+                 "nice to see you %s"):
+        if not R.is_medical(wrap % w):
+            escaped.append(wrap % w)
+for d in ("4", "take 2", "hello 8 am", "how is it going today at 4"):
+    if not R.is_medical(d):
+        escaped.append(d)
+check("no exemption lets a strong word or a digit through",
+      not escaped, escaped[:4])
+
+# And the ONE phrase exception, pinned from both sides so it cannot
+# quietly grow into "any sentence with 'missed' in it".
+check("'missed you' is conversation",
+      not R.is_medical("i missed you"))
+check("...but 'missed a dose' is still his",
+      R.is_medical("i missed a dose")
+      and R.is_medical("i missed my pill")
+      and R.is_medical("i missed you and i missed my dose"),
+      "the exception strips the phrase and re-tests what is left")
 check("only a BARE greeting escapes the temporal words",
       "PURE_GREETING.match(t)" in SRC and "^[" in R.PURE_GREETING.pattern
       and R.PURE_GREETING.pattern.rstrip().endswith("$"),

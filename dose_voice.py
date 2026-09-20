@@ -368,6 +368,22 @@ COMMAND_WORDS = (
     "medications", "pills", "doses", "dose", "everything",
 )
 
+# Ordinary English that a "what's ___" pattern will happily hand to
+# the drug matcher. None of these is a medication and none of them is
+# a mis-transcribed command, so neither existing guard caught them —
+# "what's the weather" came back as "That medication is not in my
+# database, Ryan." A word on this list means the sentence was not
+# about a medication at all, so the turn falls through to the
+# conversation layer, which has an honest answer.
+CHITCHAT_WORDS = frozenset((
+    "up", "new", "good", "going", "on", "it", "that", "this", "there",
+    "happening", "weather", "forecast", "news", "time", "day", "date",
+    "life", "everything", "anything", "something", "nothing", "else",
+    "wrong", "right", "ok", "okay", "cool", "left", "next", "now",
+    "then", "here", "you", "me", "us", "your", "my", "the", "a", "an",
+    "word", "story", "deal", "matter", "point", "plan", "idea",
+))
+
 assert all(k.startswith("nav:") or k in {
     "time", "date", "remaining_today", "next_dose", "taken_today",
     "count", "adherence", "addmed", "chsched", "addnote",
@@ -10855,6 +10871,29 @@ class DoseVoice:
                         return None
                 except Exception:
                     pass
+            # AND AN ORDINARY WORD IS NOT A DRUG NAME EITHER.
+            #
+            # Measured during Ryan's own testing:
+            #
+            #   "what's up"           -> "That medication is not in
+            #                            my database, Ryan."
+            #   "what's the weather"  -> the same
+            #   "what's new"          -> the same
+            #
+            # The pattern above is `what'?s (my |the )?([a-z ]+?) $`,
+            # so it handed "up", "weather" and "new" to the drug
+            # matcher as if they were medications. Answering a
+            # question about the WEATHER by naming a database is the
+            # kind of reply that makes somebody stop talking to a
+            # machine altogether — and it is strictly worse than
+            # falling through, because falling through reaches the
+            # conversation layer, which has an honest answer for all
+            # three.
+            #
+            # COMMAND_WORDS did not catch these: they are not
+            # mis-transcribed commands, they are ordinary English.
+            if name.replace(" ", "") in CHITCHAT_WORDS:
+                return None
             return (intent_id, name)
 
         # EVERY ONE OF THESE CARRIES A VERB. It used to also match a
@@ -10935,12 +10974,43 @@ class DoseVoice:
         # inside "reschedule" has no word boundary in front of it, so
         # the noun test below never sees it, and the most direct way
         # anyone would phrase this fell straight through.
-        resched = bool(re.search(r"\breschedul\w*\b", t)) or (
-            re.search(r"\b(?:change|changing|move|moving|switch|"
-                      r"shift|update|adjust|set|make)\b", t)
+        _resched_verb = re.search(
+            r"\b(?:change|changing|move|moving|switch|shift|update|"
+            r"adjust|set|make)\b", t)
+        resched = bool(re.search(r"\breschedul\w*\b", t)) or bool(
+            _resched_verb
             and re.search(r"\b(?:schedule|scheduled|dose time|"
                           r"dosing time|time|times|reminder|alarm|"
                           r"when i take|when it)\b", t))
+        # "CHANGE MY METFORMIN TO 4 PM" — a verb, a drug and a clock,
+        # and not the word "schedule" anywhere in it. That is how a
+        # person actually says this, and it fell straight through to
+        # "That instruction is unclear" because the rule above wants a
+        # scheduling NOUN. Found by running ordinary phrasings past
+        # the brain rather than the ones I had written the rule for.
+        #
+        # Both halves are required, so it cannot run away with
+        # anything: a real time must parse out of the sentence AND a
+        # medication this station actually holds must be named in it.
+        # "Set a timer for five minutes" names no medication;
+        # "change the settings" carries no time.
+        if not resched and _resched_verb:
+            try:
+                _new, _old, _seg, _ = parse_time_change(t)
+                if _new:
+                    _hunt = re.sub(r"[0-9]+|\b(?:am|pm|oclock|change|"
+                                   r"move|switch|shift|update|adjust|"
+                                   r"set|make|my|the|to|for|instead|"
+                                   r"of|from|i|want|it|this|that|"
+                                   r"morning|evening|afternoon|night|"
+                                   r"noon|thirty|fifteen|forty|twenty|"
+                                   r"one|two|three|four|five|six|"
+                                   r"seven|eight|nine|ten|eleven|"
+                                   r"twelve)\b", " ", t).strip()
+                    if _hunt and self._find_med(_hunt)[1] is not None:
+                        resched = True
+            except Exception:
+                pass
         if resched and not re.search(
                 r"\b(?:add|new|register|set up)\b.*"
                 r"\b(?:medication|med|pill|prescription)\b", t):
@@ -11161,6 +11231,35 @@ class DoseVoice:
         #    thing but broke the teaching flow, where the station is
         #    supposed to say it does not have that one so you can
         #    correct it and give it the real name.
+        # ── BUT NOT IF IT IS PLAINLY CONVERSATION ─────────────────
+        #
+        # The matcher below asks "which of the things I can do does
+        # this SOUND most like", and it always answers. Measured
+        # during Ryan's testing:
+        #
+        #   "what's the weather" -> "Today is Sunday, September 20."
+        #   "whats new"          -> "Nothing further is scheduled
+        #                            today, Ryan."
+        #
+        # "whatsnew" against "whatsnext" is a real phonetic collision
+        # and the matcher is not wrong to score it high. It is being
+        # asked the wrong question. Neither sentence is a garbled
+        # command — they are ordinary English, and the conversation
+        # layer has an honest answer for both ("That's outside what I
+        # know" and "Not much on my end").
+        #
+        # dose_reply decides, because it is the module that knows the
+        # difference, and it defers ANYTHING medical before it
+        # answers — so a real medication question can never be
+        # diverted here.
+        if _reply_mod is not None:
+            try:
+                _say, _kind, _ = _reply_mod.compose(t)
+                if _kind == "chat" and _say.strip():
+                    return None
+            except Exception:
+                pass
+
         if _nlu_mod is not None and len(t.split()) <= 8:
             try:
                 hit = _nlu_mod.match_choice(t, COMMAND_VOCAB,
