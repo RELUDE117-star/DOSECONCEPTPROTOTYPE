@@ -130,9 +130,24 @@ ask("how many sertraline do i have left", "28")
 # caution, it is a dead end — the same failure as guessing wrong,
 # minus the information. Now it asks, listens, answers, and REMEMBERS
 # the mishearing, so the second time it goes straight through.
-ask("how many certain lean pills do i have left", "sertraline",
-    "did you mean")
-ask("yes", "sertraline", "28")
+# WHICH PATH IT TAKES DEPENDS ON THE MACHINE, AND THAT IS FINE.
+#
+# With rapidfuzz and jellyfish installed — the Pi — metaphone makes
+# "certain lean" score high enough to accept outright, and it answers
+# at once. Without them, dose_nlu falls back to difflib, the score
+# lands at 71 against a threshold of 72, and it asks first.
+#
+# Asserting one path made this file pass in the cloud container and
+# FAIL on the actual device, which is the worst possible way for a
+# test to be wrong. The invariant is not which path it takes. It is
+# that BOTH paths end with Ryan getting his number.
+r = ask("how many certain lean pills do i have left", "sertraline")
+if "did you mean" in r.lower():
+    ask("yes", "sertraline", "28")
+else:
+    assert "28" in r, "answered outright but without the count: %r" % r
+# Either way, asking again must not stall: confirmed once, it is
+# learned; matched outright, it never asked at all.
 ask("how many certain lean pills do i have left", "sertraline", "28",
     forbid=["did you mean"])
 ask("how many pills do i have", "sertraline", "atorvastatin")
