@@ -114,7 +114,27 @@ app.due = {}
 
 # counts + fuzzy names (vosk mangles: "certain lean" ~ sertraline)
 ask("how many sertraline do i have left", "28")
-ask("how many certain lean pills do i have left", "sertraline", "28")
+# A MANGLED NAME IS CONFIRMED, NOT GUESSED.
+#
+# This line used to expect the count straight away. It cannot, and
+# should not: "certain lean" scores 71 against Sertraline where 72 is
+# the accept threshold, so the phonetic matcher declines to guess —
+# which is the whole safety design for a device that gates real pills.
+#
+# What WAS broken is what happened next. It asked "did you mean
+# Sertraline?" and then threw the answer away:
+#
+#     "yes"  ->  "Right you are."      ...and no count, ever.
+#
+# A clarifying question with nowhere to put the clarification is not
+# caution, it is a dead end — the same failure as guessing wrong,
+# minus the information. Now it asks, listens, answers, and REMEMBERS
+# the mishearing, so the second time it goes straight through.
+ask("how many certain lean pills do i have left", "sertraline",
+    "did you mean")
+ask("yes", "sertraline", "28")
+ask("how many certain lean pills do i have left", "sertraline", "28",
+    forbid=["did you mean"])
 ask("how many pills do i have", "sertraline", "atorvastatin")
 
 # schedule + info

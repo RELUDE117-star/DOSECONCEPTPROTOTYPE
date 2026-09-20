@@ -11362,9 +11362,48 @@ class DoseVoice:
                         "advice. Never change a dose on your own — "
                         "please contact your pharmacist or doctor."), False
             # Refuse to guess between similar medication names.
+            #
+            # AND THEN LISTEN TO THE ANSWER. This asked "did you mean
+            # Sertraline?" and threw the reply away:
+            #
+            #   "how many certain lean pills do i have left"
+            #       -> "I want to be certain before I answer, Ryan —
+            #           did you mean Sertraline?"
+            #   "yes"
+            #       -> "Right you are."
+            #
+            # and no count, ever. The safety mechanism asked a
+            # clarifying question and then had nowhere to put the
+            # clarification, so "refusing to guess" came out as
+            # refusing to answer. A dead end is not the safe outcome;
+            # it is the same failure as guessing wrong, minus the
+            # information.
+            #
+            # The pending question is now held as a flow, which also
+            # means it expires on its own after two minutes like every
+            # other flow, rather than lingering to catch an unrelated
+            # "yes" later on.
             if (nlu_i.suggestion and not nlu_i.med
                     and nlu_i.name in ("did_take", "pills_left",
                                        "dispense", "next_dose")):
+                # ...unless he has already answered this exact
+                # question. Asking a second time after being told is
+                # its own kind of not-listening.
+                _known = self._alias_hit(text)
+                if _known and _known.lower() == nlu_i.suggestion.lower():
+                    route = {"pills_left": "count",
+                             "did_take": "taken_check",
+                             "dispense": "dispense",
+                             "next_dose": "schedule"}.get(nlu_i.name,
+                                                          "count")
+                    self._last_exchange = {"text": t, "intent": route,
+                                           "arg": _known}
+                    return self._dispatch(route, _known)
+                self._flow = {
+                    "name": "confirm_med", "ts": time.time(),
+                    "med": nlu_i.suggestion, "nlu": nlu_i.name,
+                    "text": text,
+                }
                 return ("I want to be certain before I answer, Ryan — "
                         "did you mean %s?" % nlu_i.suggestion), True
 
@@ -11714,6 +11753,36 @@ class DoseVoice:
             if md.get("loaded") and md.get("count", 0) >= 0:
                 out.append((key, md))
         return out
+
+    @staticmethod
+    def _med_phrase(text):
+        """Strip the question around a medication name.
+
+        "how many certain lean pills do i have left" -> "certain lean"
+        so that what gets learned as an alias is the mangled NAME and
+        not the whole sentence, which would never match again."""
+        s = re.sub(r"\b(how many|how much|did i|have i|do i have|"
+                   r"take|taken|taking|is|are|my|the|a|an|of|"
+                   r"left|remaining|pills?|tablets?|capsules?|"
+                   r"meds?|medications?|medicines?|doses?|"
+                   r"when|what|whats|next|for|i)\b", " ",
+                   (text or "").lower())
+        return " ".join(re.sub(r"[^a-z' ]", " ", s).split())
+
+    def _alias_hit(self, text):
+        """A medication the user has ALREADY confirmed for these exact
+        words. Not a guess — a thing he said yes to."""
+        phrase = self._med_phrase(text)
+        if not phrase:
+            return None
+        for alias, canonical in (self._learn.get("aliases") or {}).items():
+            if not alias:
+                continue
+            if alias == phrase or (
+                    len(alias) >= 5 and difflib.SequenceMatcher(
+                        None, phrase, alias).ratio() >= 0.9):
+                return canonical
+        return None
 
     def _find_med(self, spoken):
         """Fuzzy-match a spoken name against loaded medications."""
@@ -12183,9 +12252,52 @@ class DoseVoice:
             return ({"chsched": "Reschedule cancelled — nothing was "
                                 "changed. Standing by, Ryan.",
                      "addnote": "Note discarded — nothing was saved. "
-                                "Standing by, Ryan."}.get(
+                                "Standing by, Ryan.",
+                     "confirm_med": "Dropped it, Ryan. Ask me again "
+                                    "whenever."}.get(
                          flow.get("name"),
                          "Intake cancelled. Standing by, Ryan.")), False
+
+        if flow["name"] == "confirm_med":
+            self._flow = None
+            med = flow.get("med", "")
+            # Which question was being asked when we stopped to check.
+            route = {"pills_left": "count", "did_take": "taken_check",
+                     "dispense": "dispense",
+                     "next_dose": "schedule"}.get(flow.get("nlu"), "count")
+            if _nlu_mod is not None and _nlu_mod.is_yes(raw):
+                reply, keep = self._dispatch(route, med)
+                self._last_exchange = {"text": flow.get("text", t),
+                                       "intent": route, "arg": med}
+                # Remember the mishearing. UNCONDITIONALLY: the first
+                # version of this only learned when _find_med() could
+                # not already resolve the phrase, which skipped every
+                # useful case — _find_med is not the matcher that
+                # asked. The strict phonetic one in dose_nlu asked,
+                # and it keeps asking until something tells it not to.
+                #
+                # Ryan saying "yes" IS that something. This is the one
+                # kind of evidence that can safely relax a medication
+                # match: not a lower threshold, not a looser matcher,
+                # but him confirming this exact mishearing out loud.
+                try:
+                    spoken = self._med_phrase(flow.get("text") or "")
+                    if spoken:
+                        self._learn_alias(spoken, med)
+                except Exception:
+                    pass
+                return reply, keep
+            if _nlu_mod is not None and _nlu_mod.is_no(raw):
+                names = ", ".join(m.get("name", "?")
+                                  for _k, m in self._loaded_meds())
+                return ("My mistake, Ryan. I have " + names +
+                        " — which one?"), True
+            # Not a yes and not a no: treat it as naming the
+            # medication directly rather than shrugging.
+            key, md = self._find_med(raw)
+            if md is not None:
+                return self._dispatch(route, md.get("name", raw))
+            return ("Yes or no, Ryan — or say the name again."), True
 
         if flow["name"] == "chsched":
             return self._flow_step_chsched(raw, t, flow)

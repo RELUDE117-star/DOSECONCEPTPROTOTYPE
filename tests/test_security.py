@@ -129,8 +129,24 @@ import importlib.util
 sys.modules.setdefault('tkinter', types.ModuleType('tkinter'))
 sys.modules['tkinter'].font = types.ModuleType('tkinter.font')
 sys.modules.setdefault('tkinter.font', sys.modules['tkinter'].font)
+# AN ABSOLUTE PATH FROM SOMEBODY ELSE'S MACHINE.
+#
+#     '/home/user/DOSECONCEPTPROTOTYPE/dose_app.py'
+#
+# That directory has not existed for as long as anyone can remember,
+# so this import raised FileNotFoundError and took the whole file
+# down with it — which means EVERYTHING BELOW THIS LINE HAS NOT RUN.
+# Below this line is the QR payload fuzzing: the section that proves
+# a crafted sticker cannot inject a command, break the parser, or
+# reach the dispenser. A security suite that dies before its
+# adversarial half is worse than no suite, because the name in the
+# test list still says "test_security".
+#
+# The rest of this file already derives the repo root from its own
+# location, three lines from the top. This now does the same.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 spec = importlib.util.spec_from_file_location(
-    'dose_app', '/home/user/DOSECONCEPTPROTOTYPE/dose_app.py')
+    'dose_app', os.path.join(ROOT, 'dose_app.py'))
 da = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(da)
 fapp = object.__new__(da.DoseApp)
