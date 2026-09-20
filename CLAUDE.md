@@ -2566,3 +2566,38 @@ A CUMULATIVE counter does not tell you what is happening now. Only
 its derivative does. "Refused: 25" and "refused: 25 and not moving"
 are completely different facts and they print identically — read it
 twice, spaced, before believing what it says.
+
+## I made the same `timeout` mistake twice in one day
+
+Earlier today, restarting the Mac speech server, twelve suites
+reported FAIL having never run: macOS has no `timeout`, so
+`timeout 180 python3 tests/x.py` is command-not-found. I wrote that
+down in this file, in the section above.
+
+Then, in the last job of the same session, I typed
+`timeout 600 python3 tests/$t.py` and reported **thirteen** suites
+failing. All 22 pass. Writing a lesson down is not the same as
+learning it.
+
+So it is no longer a thing to remember. `~/Documents/dose-agent/run_suite.sh`
+on the Mac picks `timeout`, then `gtimeout`, then runs the suite with
+no limiter rather than reporting a failure that did not happen:
+
+    bash "$AG/run_suite.sh" "$R" test_security
+
+Use it from jobs. Never type `timeout` in a job that runs on the Mac.
+
+### And a rule about red lines generally
+
+Three separate times today a red line meant "this did not run"
+rather than "this found a problem":
+
+  - `test_security.py` died on a hardcoded path from another
+    machine, so its adversarial half had not executed in weeks
+  - `timeout`, twice, on macOS
+  - `test_brain.py` passed here and failed on the Pi, because
+    dose_nlu degrades to difflib without rapidfuzz/jellyfish
+
+A result you cannot distinguish from "did not run" is not a result.
+`tests/test_suites_actually_run.py` now enforces the first of those
+and names hardware skips separately from failures.
