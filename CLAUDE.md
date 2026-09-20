@@ -2511,3 +2511,58 @@ given up after five in five minutes. Both are now 0: never give up.
 `voice/soak.log`. `tools/trim_logs.sh` runs hourly from cron so no log
 can ever fill the card — a full SD card takes the station down and the
 medication data with it.
+
+## Restarting the Mac speech server — the three things I got wrong
+
+2026-09-19, while Ryan was testing. I killed `dose_server.py` so it
+would pick up a new `dose_reply.py`, and took the good recogniser off
+the air for twenty minutes.
+
+**1. It takes `--serve`.** `python3 tools/dose_server.py` prints the
+argparse help and exits. I read that help text in the log as a crash.
+It is a usage message.
+
+**2. Use the venv's python, not `python3`.**
+
+    ~/.dose-server/venv/bin/python3 tools/dose_server.py --serve
+
+The system/Xcode python has no `faster_whisper`, so the server comes
+up, binds the port, answers /health — and transcribes nothing:
+
+    model small.en not available yet: No module named 'faster_whisper'
+
+Both processes show the same Xcode framework path in `ps`, because a
+venv built from that framework does. `ps` cannot tell you which one
+you started. The log line above can.
+
+**3. A keychain prompt cannot reach a background job.** Started from
+the job runner, `security find-generic-password` times out at 120s
+with no dialog Ryan can see, three times running:
+
+    THE KEYCHAIN DID NOT RELEASE THE TOKEN (TimeoutExpired ... 120)
+    Falling back to /Users/ryanjarvis/.dose-server/token
+
+To get the keychain path, start the server from HIS OWN GUI SESSION —
+the connector panel's Server ▸ Start button does exactly that. From a
+job, the file fallback is the only outcome available, and posting a
+notification first does not change it.
+
+### And the refusals were not what they looked like
+
+The station's `refused` counter climbed 8 → 25 through all of this,
+and the server's own log warns that a mismatched fallback token
+refuses every request. Both facts pointed at a token desync, which
+this project has had before, so it was the obvious reading.
+
+It was wrong. The counter was climbing because the Pi was retrying
+against a server that was **not serving** — down, or up without
+models. Once it came up properly the counter stopped dead at 25 and
+stayed there through six samples over ninety seconds, at 68-275 ms:
+
+    +15s  MAC  refused: 25  last round trip: 275 ms
+    +90s  MAC  refused: 25  last round trip:  92 ms
+
+A CUMULATIVE counter does not tell you what is happening now. Only
+its derivative does. "Refused: 25" and "refused: 25 and not moving"
+are completely different facts and they print identically — read it
+twice, spaced, before believing what it says.
